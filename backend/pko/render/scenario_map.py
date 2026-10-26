@@ -51,7 +51,7 @@ _DOCUMENT = r'''<!doctype html>
 <meta name="color-scheme" content="light"><title>__TITLE__ · Белка</title>
 __FONTS__<style>__STYLE__</style></head>
 <body><a class="skip" href="#workspace">Перейти к карте</a>
-<header class="page-header"><div class="eyebrow">БЕЛКА <span> / </span> КАРТА СЦЕНАРИЯ</div>
+<header class="page-header">
 <div class="heading-line"><h1 id="page-title">__TITLE__</h1><div class="heading-badges"><span id="demo-badge" class="badge demo"__DEMO_HIDDEN__>Учебный пример</span><span id="detail-badge" class="badge unknown"__DETAIL_HIDDEN__>Детализация не проверена</span><span id="run-status" class="badge unknown"></span></div></div>
 <p id="scenario-description" class="description"></p>
 <div class="overview" id="overview"></div>
