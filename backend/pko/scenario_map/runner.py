@@ -98,7 +98,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
 
 def add_cli_command(subparsers):
-    command = subparsers.add_parser("map-scenario", help="Построить карту варианта сценария по коду нескольких АС")
+    command = subparsers.add_parser("map-scenario", help="Построить карту варианта сценария по коду одной или нескольких АС")
     scenario = command.add_mutually_exclusive_group(required=True)
     scenario.add_argument("--scenario-text", default="", help="Краткое описание выбранного варианта сценария")
     scenario.add_argument("--scenario-file", default="", help="UTF-8 файл с кратким описанием варианта")

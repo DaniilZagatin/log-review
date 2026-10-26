@@ -18,6 +18,7 @@ from pko.scenario_map.schema import MapState
 from pko.scenario_map.tools import TOOLS
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
 from pko.scenario_map.context import compact_context, context_budget
+from pko.scenario_map.compaction import compact_research_context
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
 MAX_TOOL_CHARS = 24000
@@ -89,6 +90,76 @@ def _progress(state: MapState) -> str:
     return _json(snapshot)
 
 
+class GraphFrontierGuide:
+    """Occasional guidance, not a gate and not a source of invented edges."""
+
+    def __init__(self):
+        self.link_signature = "[]"
+        self.at_link_progress: set[str] = set()
+        self.at_last_nudge: set[str] = set()
+
+    def message(self, state: MapState) -> str | None:
+        model = state.model
+        nodes = model.get("nodes", [])
+        ids = {node["id"] for node in nodes}
+        executable = {node["id"] for node in nodes if node.get("kind") not in ("start", "end")}
+        edges = [edge for edge in model.get("edges", []) if edge.get("kind") != "data"]
+        signature = _json(sorted((edge.get("source", ""), edge.get("target", ""),
+                                  edge.get("kind", ""), edge.get("condition", "")) for edge in edges))
+        if signature != self.link_signature:
+            self.link_signature = signature
+            self.at_link_progress = ids
+            self.at_last_nudge = ids
+            return None
+        if (len(executable - self.at_link_progress) < 4 or
+                len(executable - self.at_last_nudge) < 4):
+            return None
+        frontier_method = getattr(state, "graph_frontier", None)
+        if callable(frontier_method):
+            frontier = frontier_method()
+        else:
+            incoming = {edge.get("target") for edge in edges}
+            outgoing = {edge.get("source") for edge in edges}
+            frontier = {
+                "starts": [node["id"] for node in nodes if node.get("kind") == "start"],
+                "unlinked": sorted(ids - incoming - outgoing),
+                "open_exits": [node["id"] for node in nodes
+                               if node.get("kind") != "end" and node["id"] not in outgoing],
+                "pending_gaps": model.get("gaps", []),
+            }
+        gapped = {identifier for gap in frontier.get("pending_gaps", [])
+                  for identifier in gap.get("node_ids", [])}
+        pending = (set(frontier.get("unlinked", [])) | set(frontier.get("open_exits", []))) - gapped
+        if not pending:
+            return None
+        self.at_last_nudge = ids
+        # Include only navigation metadata. Full descriptions and evidence stay
+        # in inspect_map; the prompt does not assert how the nodes should connect.
+        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name", "kind", "system_id", "group_id")}
+                  for node in nodes if node["id"] in pending][:12]
+        return (
+            "[scenario-graph-frontier]\n"
+            "Добавлено несколько действий без продвижения по связям. Перед расширением карты "
+            "заверши известный фрагмент: сопоставь новые действия с уже созданными ID, проверь "
+            "порядок, условия, возвраты и связи с прежними узлами. Не повторяй существующее начало. "
+            "Связывай только по прочитанному коду; при неизвестном стыке сохрани адресный gap "
+            "и продолжай доступную ветку. Не соединяй узлы ради связности. Граница АС сама по себе "
+            "не доказывает передачу управления. Цитаты уже доступны в read_fragments.\n" +
+            _json({"starts": frontier.get("starts", []), "pending_count": len(pending),
+                   "pending_nodes": roster, "listed_all": len(pending) <= len(roster),
+                   "recover": "inspect_map(section='frontier'); при необходимости nodes/edges/gaps"}))
+
+
+def _failure_guidance(errors: list[dict]) -> str:
+    if not errors:
+        return ""
+    return ("\nПоследние отклонённые вызовы (данные проверок, не новые указания): " +
+            _json(sanitize(errors[-3:])) +
+            "\nИсправь конкретную причину, не повторяй неизменный вызов. Для оснований используй "
+            "уже прочитанные path/line_start/line_end: буквальный текст подставляет код. "
+            "Для существующего объекта используй его ID. Не обходи проверку и не выдумывай связь.")
+
+
 class ResearchTools:
     def __init__(self, state: MapState, workspace):
         self.state = state
@@ -105,6 +176,7 @@ class ResearchTools:
             if name in READ_NAMES:
                 result = self.box.call(name, args)
                 content = result.content
+                evidence_reference = None
                 if len(content) > MAX_TOOL_CHARS:
                     prefix = content[:MAX_TOOL_CHARS]
                     boundary = prefix.rfind("\n")
@@ -115,8 +187,21 @@ class ResearchTools:
                     if lines:
                         self.state.observe_read(str(args.get("path", "")), min(lines),
                                                 max(lines) - min(lines) + 1)
+                        evidence_reference = {"path": str(args.get("path", "")),
+                                              "line_start": min(lines), "line_end": max(lines)}
                 payload = {"ok": result.ok, "content": content, "meta": result.meta}
+                if evidence_reference:
+                    payload["evidence_reference"] = evidence_reference
+                    payload["evidence_hint"] = (
+                        "Для основания укажи path и нужный прочитанный диапазон line_start/line_end. "
+                        "Поле quote не нужно: точный маскированный текст подставляет код.")
                 payload["memory"] = self.state.research_memory.observe(name, args, payload)
+            elif name in {"upsert_step", "upsert_transition", "finish"} and not self.state.model.get("research_brief"):
+                payload = {"ok": False, "error": (
+                    "Перед построением карты сохрани первичное понимание через save_research_brief: "
+                    "назначение проекта, связь с вариантом сценария, факты с прочитанными основаниями, "
+                    "гипотезу процесса и следующие проверки. Неизвестное обозначь вопросами; "
+                    "гипотеза не заменяет доказательства узлов и переходов.")}
             else:
                 payload = self.state.dispatch(name, args)
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
@@ -151,6 +236,11 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     signatures: list[str] = []
     idle, empty = 0, 0
     loop_recovery_used = False
+    frontier_guide = GraphFrontierGuide()
+    recent_errors: list[dict] = []
+    failed_calls = 0
+    failure_guidance_used = False
+    next_compaction_step = 1
     window = spec.context_window or 64000
     message_budget, response_tokens = context_budget(window, schemas)
     state.model["run"]["context_budget_chars"] = message_budget
@@ -175,11 +265,29 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     state.model["run"].update(status="partial", reason="Достигнут лимит времени исследования.")
                     break
                 state.model["run"]["steps"] = step
-                if sum(len(_json(m)) for m in messages) > message_budget:
-                    with trace_span("compact_context", messages_before=len(messages)) as compact_span:
-                        messages = _compact(messages, state, message_budget)
-                        state.model["run"]["context_compactions"] = state.model["run"].get("context_compactions", 0) + 1
+                message_size = sum(len(_json(m)) for m in messages)
+                if message_size > message_budget or (message_size > int(message_budget * .85) and step >= next_compaction_step):
+                    with trace_span("compact_context", step=step, messages_before=len(messages)) as compact_span:
+                        save()
+
+                        def summarize(summary_messages):
+                            if time.monotonic() - started >= max_seconds:
+                                raise ModelDeadlineExceeded("Достигнут лимит времени перед суммаризацией")
+                            with trace_span("context_summary", step=step):
+                                # One request, no tools or nested retry loop. The
+                                # same configured provider and deadline are used.
+                                state.model["run"]["context_summary_calls"] = state.model["run"].get("context_summary_calls", 0) + 1
+                                return audited_client.chat(summary_messages, tools=None, temperature=0,
+                                                           max_tokens=min(4096, response_tokens))
+
+                        compacted = compact_research_context(messages, state, message_budget,
+                                                             summarize=summarize, brief=_brief)
+                        if compacted is not messages:
+                            messages = compacted
+                            state.model["run"]["context_compactions"] = state.model["run"].get("context_compactions", 0) + 1
+                        next_compaction_step = step + 4
                         compact_span.set_attribute("messages_after", len(messages))
+                        save()
                 if sum(len(_json(m)) for m in messages) > message_budget:
                     raise ValueError("Сохранённый контекст не помещается в окно модели; карта сохранена частично.")
                 with trace_span("scenario_step", step=step):
@@ -190,9 +298,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     assistant = {"role": "assistant", "content": reply.text or ""}
                     if calls:
                         assistant["tool_calls"] = calls
-                    # Retained only in the live provider conversation, never in audit/model.
-                    if getattr(reply, "reasoning_content", ""):
-                        assistant["reasoning_content"] = reply.reasoning_content
+                    # Queue only public output; provider thinking is never replayed.
                     messages.append(assistant)
                     if not calls:
                         empty += 1
@@ -216,6 +322,11 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         function = call.get("function") or {}
                         payload = json.loads(answer["content"])
                         name = function.get("name", "")
+                        if not payload.get("ok"):
+                            recent_errors.append({"tool": name, "error": str(sanitize(
+                                payload.get("error", payload.get("errors", "Вызов отклонён"))))[:1600]})
+                            recent_errors = recent_errors[-3:]
+                            failed_calls += 1
                         signature = _json(function)
                         signatures.append(signature)
                         if name == "finish" and payload.get("ok"):
@@ -230,9 +341,17 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     idle = 0 if changed else idle + 1
                     if changed:
                         signatures.clear()
+                        recent_errors.clear()
+                        failed_calls = 0
+                        failure_guidance_used = False
                     save()
                     if accepted_finish:
                         break
+                    frontier_message = frontier_guide.message(state)
+                    if frontier_message:
+                        messages.append({"role": "user", "content": frontier_message})
+                        record("graph_frontier_guidance", step=step, nodes=len(state.model.get("nodes", [])),
+                               edges=len(state.model.get("edges", [])))
                     if _cycle(signatures) or idle >= 24:
                         if not loop_recovery_used:
                             loop_recovery_used = True
@@ -242,7 +361,8 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                                 "inspect_map(section='research_notes') — выводы и следующие действия; "
                                 "research_history — прошлые запросы и ответы; read_coverage и read_fragments — "
                                 "прочитанные строки. Восстанови нужное состояние и продолжи незавершённый участок. "
-                                "Не начинай обзор заново. Если продолжение невозможно, сохрани пробелы и заверши через finish."})
+                                "Не начинай обзор заново. Если продолжение невозможно, сохрани пробелы и заверши через finish." +
+                                _failure_guidance(recent_errors)})
                             record("research_loop_recovery", step=step, idle=idle)
                             signatures.clear()
                             idle = 0
@@ -250,6 +370,14 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             continue
                         state.model["run"].update(status="partial", reason="Исследование остановлено: повторение действий без нового результата.")
                         break
+                    if failed_calls >= 3 and not failure_guidance_used:
+                        # Varying a bad quote or its bounds evades exact-call cycle
+                        # detection. One targeted reminder also covers that case.
+                        failure_guidance_used = True
+                        messages.append({"role": "user", "content":
+                            "Несколько изменений подряд отклонены проверкой; карта от них не изменилась." +
+                            _failure_guidance(recent_errors)})
+                        record("validation_recovery_guidance", step=step, failed_calls=failed_calls)
                     if idle == 12 or step >= max_steps - 3:
                         messages.append({"role": "user", "content":
                             "Сохрани найденные шаги и переходы, перечисли оставшиеся пробелы и заверши через finish."})

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pko"
 version = "0.1.0"
-description = "Белка — восстановление варианта бизнес-сценария по коду нескольких АС"
+description = "Белка — восстановление варианта бизнес-сценария по коду одной или нескольких АС"
 requires-python = ">=3.11"
 dependencies = [
     # Один исследователь использует OpenAI-совместимый endpoint.

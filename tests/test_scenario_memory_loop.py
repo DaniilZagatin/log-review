@@ -10,7 +10,7 @@ from pko.audit import audit_run
 from pko.llm.client import ChatResult
 from pko.scenario_map.agent import run_agent
 from pko.scenario_map.sources import build_workspace
-from scenario_script import NODE_COUNT, SCENARIO, SPEC, ScriptedClient, research_calls, sources
+from scenario_script import NODE_COUNT, SCENARIO, SPEC, ScriptedClient, research_calls, sources, scripted_summary
 
 
 PRIVATE_MARKER = "PRIVATE_THOUGHT_SENTINEL_92817"
@@ -19,15 +19,18 @@ PRIVATE_MARKER = "PRIVATE_THOUGHT_SENTINEL_92817"
 class BatchClient(ScriptedClient):
     """Script public tool proposals, validating every observed tool response."""
 
-    def __init__(self, batches, reasoning=None):
+    def __init__(self, batches, reasoning=None, public_text=None):
         self.batches = iter(batches)
         self.reasoning = reasoning or {}
+        self.public_text = public_text or {}
         self.requests = []
         self.responses = {}
         self.emitted = []
         self.seen = []
 
     def chat(self, messages, **kwargs):
+        if not kwargs.get("tools"):
+            return scripted_summary()
         self.seen = messages
         self.requests.append(copy.deepcopy(messages))
         for message in messages:
@@ -39,7 +42,7 @@ class BatchClient(ScriptedClient):
         batch = next(self.batches)
         number = len(self.requests)
         self.emitted.extend(batch)
-        return ChatResult(text="", usage={}, reasoning_content=self.reasoning.get(number, ""),
+        return ChatResult(text=self.public_text.get(number, ""), usage={}, reasoning_content=self.reasoning.get(number, ""),
                           tool_calls=[{"id": f"request-{number}-tool-{index}", "type": "function",
                                        "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)}}
                                       for index, (name, arguments) in enumerate(batch)])
@@ -123,7 +126,8 @@ class ScenarioMemoryLoopTests(unittest.TestCase):
 
         large_thinking = PRIVATE_MARKER + "x" * 50000
         client = RecoveringClient([[call] for call in preliminary + remaining],
-                                  reasoning={1: large_thinking, 2: large_thinking, 3: large_thinking})
+                                  reasoning={1: large_thinking, 2: large_thinking, 3: large_thinking},
+                                  public_text={n: "Публичный результат исследования. " * 1600 for n in (1, 2, 3)})
         saved = []
         audit_path = self.root / "compaction-audit.txt"
         with patch("pko.scenario_map.agent.context_budget", return_value=(30000, 1024)), \
@@ -145,21 +149,28 @@ class ScenarioMemoryLoopTests(unittest.TestCase):
         self.assertTrue(any(checkpoint["run"].get("context_compactions", 0) >= 2 and not checkpoint["nodes"]
                             for checkpoint in saved))
         self.assertNotIn(PRIVATE_MARKER, json.dumps(model))
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(client.requests))
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(client.seen))
         self.assertNotIn(PRIVATE_MARKER, json.dumps(saved))
         self.assertNotIn(PRIVATE_MARKER, audit_path.read_text(encoding="utf-8"))
         self.assertFalse(model["run"].get("loop_recovery_attempted", False))
 
-    def test_short_thinking_remains_in_live_exchange_but_not_checkpoint_or_audit(self):
-        client = BatchClient([[call] for call in research_calls()], reasoning={1: PRIVATE_MARKER})
+    def test_thinking_is_never_queued_replayed_or_used_to_trigger_compaction(self):
+        client = BatchClient([[call] for call in research_calls()],
+                             reasoning={1: PRIVATE_MARKER + "x" * 50000})
         saved = []
         audit_path = self.root / "thinking-audit.txt"
-        with audit_run(audit_path, "thinking-test"):
+        with patch("pko.scenario_map.agent.context_budget", return_value=(30000, 1024)), \
+                audit_run(audit_path, "thinking-test"):
             model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=2,
                               checkpoint=saved.append)
         self.assertEqual(model["run"]["status"], "partial")
         assistant = next(message for message in client.requests[1] if message["role"] == "assistant")
-        self.assertEqual(assistant["reasoning_content"], PRIVATE_MARKER)
+        self.assertNotIn("reasoning_content", assistant)
         self.assertTrue(assistant["tool_calls"])
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(client.requests))
+        self.assertNotIn(PRIVATE_MARKER, json.dumps(client.seen))
+        self.assertFalse(model["run"].get("context_summary_calls"))
         self.assertNotIn(PRIVATE_MARKER, json.dumps(saved))
         self.assertNotIn(PRIVATE_MARKER, json.dumps(model))
         self.assertNotIn(PRIVATE_MARKER, audit_path.read_text(encoding="utf-8"))

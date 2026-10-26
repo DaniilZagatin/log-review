@@ -1,11 +1,12 @@
-"""Recover ongoing research across compactions, including thinking tool turns."""
+"""Recover public research across compactions without replaying thinking."""
 import copy
 import json
 import unittest
 from unittest.mock import Mock, patch
 
 from pko.scenario_map.agent import _brief, _compact, _json
-from pko.scenario_map.context import COMPACTION_MARKER, compact_context, context_budget
+from pko.scenario_map.context import COMPACTION_MARKER, compact_context, context_budget, graph_identity
+from pko.scenario_map.schema import MapState
 
 
 class ContextCompactionTests(unittest.TestCase):
@@ -94,13 +95,15 @@ class ContextCompactionTests(unittest.TestCase):
         with_tools, _ = context_budget(300000, schemas)
         self.assertLess(with_tools, large)
 
-    def test_compaction_retains_recent_complete_thinking_exchanges(self):
+    def test_compaction_retains_recent_complete_public_exchanges_without_thinking(self):
         first = self.exchange("first", reasoning="private-first", count=2)
         second = self.exchange("second", reasoning="private-second")
         messages = self.prefix() + [{"role": "assistant", "content": "x" * 30000}] + first + second
         result = compact_context(messages, self.state(), 12000, brief=_brief)
         self.assertEqual(result[:2], self.prefix())
-        self.assertEqual(result[-len(first + second):], first + second)
+        self.assertEqual(result[-len(first + second):],
+                         self.exchange("first", count=2) + self.exchange("second"))
+        self.assertNotIn("private-", _json(result))
         self.assert_paired_tools(result)
         self.assertLessEqual(self.size(result), int(12000 * .6))
 
@@ -118,7 +121,8 @@ class ContextCompactionTests(unittest.TestCase):
             self.assertIn("CardIssued", recovery)
             self.assertIn("Найти получателя", recovery)
             self.assertIn("obs-3", recovery)
-            self.assertEqual(messages[-len(latest):], latest)
+            self.assertEqual(messages[-len(latest):], self.exchange(f"turn-{number}"))
+            self.assertNotIn("private-", _json(messages))
             self.assertEqual(sum(COMPACTION_MARKER in str(m.get("content", "")) for m in messages), 1)
             self.assert_paired_tools(messages)
             # A compacted history does not immediately need another reset.
@@ -137,17 +141,25 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIn("read_fragments", recovery)
         self.assertLessEqual(self.size(result), int(12000 * .6))
 
-    def test_oversized_latest_thinking_drops_whole_exchange_not_reasoning_alone(self):
+    def test_oversized_legacy_thinking_is_removed_without_dropping_public_exchange(self):
         state = self.state()
         old = self.exchange("older")
         huge = self.exchange("huge", reasoning="private-thinking " * 3000)
         messages = self.prefix() + old + huge
         result = compact_context(messages, state, 6000, brief=_brief)
-        self.assertEqual(len(result), 3)
+        self.assertEqual(result, self.prefix() + old + self.exchange("huge"))
         self.assertNotIn("private-thinking", _json(result))
-        self.assertIn("research_history", result[2]["content"])
-        self.assertIn("read_fragments", result[2]["content"])
-        self.assertIn("Найти получателя", result[2]["content"])
+        state.snapshot.assert_not_called()
+        self.assert_paired_tools(result)
+
+    def test_legacy_thinking_aliases_are_removed_even_without_compaction(self):
+        messages = self.prefix() + self.exchange("legacy", result='{"thinking": "source field"}')
+        messages[2].update(reasoning_content="PRIVATE_A", thinking="PRIVATE_B", reasoning="PRIVATE_C")
+        original = copy.deepcopy(messages)
+        result = compact_context(messages, self.state(), 12000, brief=_brief)
+        self.assertEqual(result, self.prefix() + self.exchange("legacy", result='{"thinking": "source field"}'))
+        self.assertEqual(messages, original)
+        self.assertIs(compact_context(result, self.state(), 12000, brief=_brief), result)
         self.assert_paired_tools(result)
 
     def test_small_fallback_keeps_all_recovery_routes(self):
@@ -182,17 +194,17 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(result[3:], latest)
         self.assert_paired_tools(result)
 
-    def test_live_reasoning_never_enters_recovery_state_or_compaction_audit(self):
+    def test_reasoning_never_enters_recovered_history_state_or_compaction_audit(self):
         state = self.state()
         original = copy.deepcopy(state.snapshot.return_value)
         latest = self.exchange("latest", reasoning="SECRET-PRIVATE-THINKING")
         messages = self.prefix() + [{"role": "assistant", "content": "x" * 30000}] + latest
         with patch("pko.scenario_map.context.record") as record:
             result = compact_context(messages, state, 12000, brief=_brief)
-        self.assertNotIn("SECRET-PRIVATE-THINKING", result[2]["content"])
+        self.assertNotIn("SECRET-PRIVATE-THINKING", _json(result))
         self.assertNotIn("SECRET-PRIVATE-THINKING", str(record.call_args))
         self.assertEqual(state.snapshot.return_value, original)
-        self.assertEqual(result[-len(latest)]["reasoning_content"], "SECRET-PRIVATE-THINKING")
+        self.assertEqual(result[-len(latest):], self.exchange("latest"))
 
     def test_recovery_marker_is_replaced_instead_of_recursively_summarized(self):
         old_marker = {"role": "user", "content": COMPACTION_MARKER + "\nold memory " + "x" * 20000}
@@ -201,3 +213,77 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertNotIn("old memory", _json(result))
         self.assertEqual(sum(COMPACTION_MARKER in str(m.get("content", "")) for m in result), 1)
         self.assertEqual(result[-len(latest):], latest)
+
+    def test_all_28_node_identities_survive_before_recent_dialogue(self):
+        state = self.state()
+        state.snapshot.return_value["nodes"] = [
+            {"id": f"step-{index}", "name": f"Действие {index}",
+             "kind": "start" if index == 1 else "action", "system_id": "sys-1", "group_id": "group-1"}
+            for index in range(1, 29)]
+        latest = self.exchange("last", result="recent public data " * 130)
+        messages = self.prefix() + [{"role": "assistant", "content": "x" * 40000}] + latest
+        result = compact_context(messages, state, 14000, brief=lambda _: "x" * 30000)
+        manifest = json.loads(result[2]["content"].split("\n")[-1])
+        identity = manifest["graph_identity"]
+        self.assertTrue(identity["registry_complete"])
+        self.assertTrue(identity["names_complete"])
+        self.assertEqual(len(identity["nodes"]), 28)
+        self.assertEqual(identity["nodes"][0]["id"], "step-1")
+        self.assertEqual(identity["starts"], ["step-1"])
+        self.assertEqual(identity["nodes"][-1]["id"], "step-28")
+        self.assertLessEqual(self.size(result), int(14000 * .6))
+        self.assert_paired_tools(result)
+
+    def test_id_only_registry_is_complete_and_requires_paging_for_names(self):
+        state = self.state()
+        state.snapshot.return_value["nodes"] = [
+            {"id": f"step-{index}", "name": "Большое название " * 30,
+             "kind": "start" if index == 1 else "action", "system_id": "sys-1", "group_id": "group-1"}
+            for index in range(1, 29)]
+        result = compact_context(self.prefix() + [{"role": "assistant", "content": "x" * 40000}],
+                                 state, 6000, brief=lambda _: "x" * 30000)
+        identity = json.loads(result[2]["content"].split("\n")[-1])["graph_identity"]
+        self.assertTrue(identity["registry_complete"])
+        self.assertFalse(identity["names_complete"])
+        self.assertEqual(identity["all_node_ids"], [f"step-{index}" for index in range(1, 29)])
+        self.assertIn("offset=31", identity["recover_names"])
+        self.assertEqual(identity["starts"], ["step-1"])
+        self.assertLessEqual(self.size(result), int(6000 * .6))
+
+    def test_tiny_window_does_not_claim_truncated_registry_is_complete(self):
+        state = self.state()
+        state.snapshot.return_value["nodes"] = [
+            {"id": f"step-{index}", "name": "Действие", "kind": "action"} for index in range(1, 501)]
+        result = compact_context(self.prefix() + [{"role": "assistant", "content": "x" * 40000}],
+                                 state, 1800, brief=lambda _: "x" * 30000)
+        identity = json.loads(result[2]["content"].split("\n")[-1])["graph_identity"]
+        self.assertFalse(identity["registry_complete"])
+        self.assertEqual(identity["node_count"], 500)
+        self.assertIn("последней страницы", identity["recover_nodes"])
+        self.assertLessEqual(self.size(result), 1800)
+
+    def test_compaction_keeps_unfinished_decision_and_fork_from_map_frontier(self):
+        state = self.state()
+        model = state.snapshot.return_value
+        model["nodes"] = [
+            {"id": "step-1", "name": "Проверить условие", "kind": "decision"},
+            {"id": "step-2", "name": "Запустить параллельные действия", "kind": "fork"},
+            {"id": "step-3", "name": "Закончить", "kind": "end"},
+        ]
+        model["edges"] = [
+            {"source": "step-1", "target": "step-2", "kind": "branch"},
+            {"source": "step-1", "target": "step-2", "kind": "retry"},
+            {"source": "step-1", "target": "step-3", "kind": "data"},
+            {"source": "step-2", "target": "step-3", "kind": "sequence"},
+        ]
+        state.model = model
+        actual_frontier = MapState.graph_frontier(state)
+        self.assertEqual(actual_frontier["open_exits"], ["step-1", "step-2"])
+        state.graph_frontier.return_value = actual_frontier
+        result = compact_context(self.prefix() + [{"role": "assistant", "content": "x" * 30000}],
+                                 state, 12000, brief=lambda _: "x" * 30000)
+        identity = json.loads(result[2]["content"].split("\n")[-1])["graph_identity"]
+        self.assertEqual(identity["frontier"]["open_exits"], actual_frontier["open_exits"])
+        state.graph_frontier.assert_called_once_with()
+        self.assertEqual(graph_identity(model)["frontier"]["open_exits"], actual_frontier["open_exits"],
+                         "Snapshot-only fallback must use distinct control targets too")

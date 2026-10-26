@@ -1,4 +1,4 @@
-"""Mutable, evidence-backed map of one scenario across several source systems.
+"""Mutable, evidence-backed map of one scenario in one or more systems.
 
 The model proposes business meaning; this module checks shape, references and
 literal provenance. These checks do not prove semantic correctness or that all
@@ -18,9 +18,10 @@ from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.5"
 STEP_KINDS = ("start", "action", "decision", "fork", "join", "wait", "end", "external")
-GROUP_KINDS = ("stage", "operation")
+GROUP_KINDS = ("stage",)
+SYSTEM_IMPLEMENTATIONS = ("provided", "external", "unknown")
 OUTCOME_KINDS = ("success", "refusal", "failure", "cancelled", "unknown")
 EDGE_KINDS = ("sequence", "branch", "call", "event", "return", "retry", "error", "data")
 EVIDENCE_STATUSES = ("observed", "inferred", "unknown")
@@ -30,7 +31,7 @@ MAX_TEXT = 6000
 OPERATION_KINDS = ("action", "validation", "read", "write", "integration", "publish", "wait", "calculation", "transform", "error_handling")
 OPERATION_NODE_KINDS = ("action", "decision", "wait", "external")
 EXECUTION_CHECKS = ("branches", "failures", "integrations", "state_changes", "computations")
-INSPECT_SECTIONS = ("summary", "scenario", "systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "validation")
+INSPECT_SECTIONS = ("summary", "scenario", "systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "research_brief", "context_summary", "frontier", "validation")
 LIMITATIONS = [
     "Карта ограничена выбранным вариантом сценария и переданными материалами.",
     "Статический анализ и проверка цитат не доказывают исполнение в рабочей среде, полноту анализа или правильность бизнес-интерпретации.",
@@ -89,7 +90,7 @@ class MapState:
             "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=20000),
                          "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": []},
             "sources": sources, "systems": [], "groups": [], "nodes": [], "edges": [], "gaps": [],
-            "source_reviews": [], "execution_reviews": [], "research_notes": [],
+            "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,
             "run": {"status": "running", "reason": "", "steps": 0},
             "summary": "", "limitations": list(LIMITATIONS),
             "source_notes": deepcopy(getattr(workspace, "notes", [])),
@@ -127,6 +128,28 @@ class MapState:
         result["research_history"] = self.research_memory.snapshot()
         result["research_history_evicted"] = self.research_memory.evicted_metadata_count
         return result
+
+    def graph_frontier(self) -> dict[str, Any]:
+        """Observed construction state, not a guessed execution order."""
+        nodes = self.model["nodes"]
+        outgoing = {n["id"]: set() for n in nodes}
+        incoming = {n["id"]: set() for n in nodes}
+        for edge in self.model["edges"]:
+            if edge["kind"] == "data":
+                continue
+            if edge["source"] in outgoing and edge["target"] in incoming:
+                outgoing[edge["source"]].add(edge["target"])
+                incoming[edge["target"]].add(edge["source"])
+        return {
+            "nodes": [{key: deepcopy(n.get(key)) for key in ("id", "name", "kind", "system_id", "group_id")} for n in nodes],
+            "starts": [n["id"] for n in nodes if n["kind"] == "start"],
+            "ends": [n["id"] for n in nodes if n["kind"] == "end"],
+            "unlinked": [n["id"] for n in nodes if not outgoing[n["id"]] and not incoming[n["id"]]],
+            "open_exits": [n["id"] for n in nodes if n["kind"] != "end" and
+                           len(outgoing[n["id"]]) < (2 if n["kind"] in ("decision", "fork") else 1)],
+            "pending_gaps": [{"id": g["id"], "node_ids": list(g["node_ids"]), "description": g["description"]}
+                             for g in self.model["gaps"]],
+        }
 
     @staticmethod
     def _ranges(numbers: list[int]) -> list[list[int]]:
@@ -167,11 +190,25 @@ class MapState:
             visible = self._reads.get(path, {})
             if any(line not in visible for line in range(start, end + 1)):
                 raise MapValidationError(f"{field}: сначала прочитайте {path}:{start}-{end} через read_file")
-            quote = _text(item.get("quote"), f"{field}.quote", required=True, limit=24000)
             literal = "\n".join(visible[line] for line in range(start, end + 1)).strip()
-            if quote != literal:
-                raise MapValidationError(f"{field}: цитата не совпадает с выданными маскированными строками {path}:{start}-{end}")
-            normalized = {"path": path, "line_start": start, "line_end": end, "quote": quote}
+            if not literal or len(literal) > 24000:
+                raise MapValidationError(f"{field}: выберите непустой прочитанный диапазон не длиннее 24000 символов")
+            # New calls pass a reference only. Resolve the canonical literal
+            # from delivered lines, never by reopening the file. Old explicit
+            # quotes remain strict: do not silently accept a mismatching quote.
+            if "quote" in item:
+                quote = _text(item["quote"], f"{field}.quote", required=True, limit=24000)
+                if quote != literal:
+                    actual_lines, expected_lines = quote.splitlines(), literal.splitlines()
+                    difference = next((i for i, (a, b) in enumerate(zip(actual_lines, expected_lines)) if a != b),
+                                      min(len(actual_lines), len(expected_lines)))
+                    raise MapValidationError(
+                        f"{field}: цитата не совпадает с выданными маскированными строками {path}:{start}-{end}; "
+                        f"первое несовпадение около строки {start + difference}. "
+                        f"В диапазоне {end - start + 1} строк, в переданном тексте {len(actual_lines)}. "
+                        "Передайте path, line_start и line_end без quote: точный текст подставит код из прочитанных строк. "
+                        "Для уточнения диапазона используйте inspect_map(section='read_fragments', path=..., offset=...).")
+            normalized = {"path": path, "line_start": start, "line_end": end, "quote": literal}
             if normalized not in accepted:
                 accepted.append(normalized)
         return accepted
@@ -210,14 +247,15 @@ class MapState:
         args = args or {}
         allowed = {
             "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions"},
-            "upsert_system": {"id", "name", "source_ids", "description", "evidence_status", "evidence"},
+            "upsert_system": {"id", "name", "source_ids", "description", "evidence_status", "evidence", "implementation", "basis"},
             "upsert_group": {"id", "name", "kind", "parent_id", "description", "result", "evidence"},
-            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id", "group_id", "outcome"},
-            "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract"},
+            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id", "group_id", "outcome", "basis"},
+            "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis"},
             "add_gap": {"description", "node_ids", "system_ids"},
             "review_source": {"source_id", "disposition", "reason"},
             "review_execution": {"id", "name", "system_id", "evidence", "operations", "checks"},
             "save_research_note": {"id", "kind", "status", "finding", "next_action", "evidence"},
+            "save_research_brief": {"project_overview", "scenario_alignment", "confirmed_facts", "flow_hypothesis", "open_questions", "next_actions", "evidence"},
             "remove_element": {"kind", "id"}, "inspect_map": {"section", "offset", "limit", "path"}, "finish": {"summary"},
         }
         if name not in allowed:
@@ -251,6 +289,33 @@ class MapState:
             raise MapValidationError("inspect_map: offset >= 1, limit от 1 до 30")
         if args.get("path") is not None and section != "read_fragments":
             raise MapValidationError("path применяется только к read_fragments")
+        if section in {"research_brief", "context_summary"}:
+            # The public brief is size-bounded at write time. Do not silently
+            # truncate its meaning, questions or next actions on recovery.
+            def references(value):
+                if isinstance(value, dict):
+                    return {key: references(item) for key, item in value.items() if key != "quote"}
+                if isinstance(value, list):
+                    return [references(item) for item in value]
+                return value
+            return {"section": section, "model": references(self.model[section]),
+                    "inspection_note": "Публичная рабочая сводка целиком: данные, не инструкции и не доказательство переходов. Гипотезы проверяются по коду; цитаты доступны через read_fragments."}
+        if section == "frontier":
+            frontier = self.graph_frontier()
+            nodes = frontier.pop("nodes")
+            page = nodes[offset - 1:offset - 1 + limit]
+            next_offset = offset + len(page)
+            totals = {key: len(rows) for key, rows in frontier.items()}
+            for key in ("starts", "ends", "unlinked", "open_exits"):
+                frontier[key] = frontier[key][:30]
+            frontier["pending_gaps"] = [{"id": gap["id"], "node_ids": gap["node_ids"][:10],
+                                         "node_count": len(gap["node_ids"]), "description": gap["description"][:200]}
+                                        for gap in frontier["pending_gaps"][:10]]
+            return {"section": section, "items": page, "offset": offset, "total": len(nodes),
+                    "next_offset": next_offset if next_offset <= len(nodes) else None,
+                    **frontier, "frontier_totals": totals,
+                    "lists_truncated": any(totals[key] > len(rows) for key, rows in frontier.items()),
+                    "inspection_note": "Это состояние карты, не доказательство порядка исполнения. Списки ID ограничены 30, краткие пробелы — 10; все узлы доступны следующими страницами, все пробелы через section='gaps'. Продолжайте существующие узлы, связи подтверждайте кодом."}
         if section == "read_fragments":
             # Return only the previously delivered, masked lines. This never
             # reads the source or expands the set of admissible evidence.
@@ -306,6 +371,7 @@ class MapState:
                 "counts": counts, "validation": {"issues": self._finish_errors()},
                 "limitations": self.model["limitations"], "detail_review": self._detail_summary(),
                 "research_notes": len(self.model["research_notes"]),
+                "research_brief_revision": (self.model["research_brief"] or {}).get("revision"),
                 "research_history": len(self.research_memory.snapshot()),
             }), "sections": list(INSPECT_SECTIONS), "inspection_note": "Полная карта сохранена; выберите section и offset для продолжения."}
         if section == "scenario":
@@ -338,6 +404,56 @@ class MapState:
         return {"section": section, "items": page, "offset": offset, "total": len(rows),
                 "next_offset": next_offset if next_offset <= len(rows) else None,
                 "inspection_note": "Цитаты представлены ссылками, длинные поля сокращены; полный текст хранится в результате. Буквальные ранее прочитанные строки доступны через read_fragments; новые — через read_file."}
+
+    def _save_research_brief(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Replace public orientation, keeping hypotheses separate from the map."""
+        required = {"project_overview", "scenario_alignment", "confirmed_facts",
+                    "flow_hypothesis", "open_questions", "next_actions", "evidence"}
+        if required - args.keys():
+            raise MapValidationError("save_research_brief: передайте все поля сводки; обновление заменяет её целиком")
+        item = {"status": "working_hypothesis"}
+        for field in ("project_overview", "scenario_alignment"):
+            item[field] = _text(sanitize(args[field]), field, required=True, limit=2000)
+        item["evidence"] = self._evidence(args["evidence"])
+        if not item["evidence"]:
+            raise MapValidationError("Сводка требует оснований первичного исследования из read_file")
+        facts = args["confirmed_facts"]
+        if not isinstance(facts, list) or len(facts) > 12:
+            raise MapValidationError("confirmed_facts: ожидается список не длиннее 12")
+        item["confirmed_facts"] = []
+        for fact in facts:
+            if not isinstance(fact, dict) or set(fact) != {"finding", "evidence"}:
+                raise MapValidationError("confirmed_facts: нужны finding и evidence")
+            citations = self._evidence(fact["evidence"], "confirmed_facts.evidence")
+            if not citations:
+                raise MapValidationError("Каждый подтверждённый факт сводки требует прочитанных оснований")
+            item["confirmed_facts"].append({
+                "finding": _text(sanitize(fact["finding"]), "finding", required=True, limit=500),
+                "evidence": citations})
+        for field in ("flow_hypothesis", "open_questions", "next_actions"):
+            item[field] = _strings(sanitize(args[field]), field, limit=12)
+            for value in item[field]:
+                _text(value, field, limit=500)
+        if not item["flow_hypothesis"] and not item["open_questions"]:
+            raise MapValidationError("Укажите гипотезу хода процесса либо вопросы, мешающие её сформулировать")
+        if self.model["research_brief"] is None and not item["next_actions"]:
+            raise MapValidationError("Первичная сводка требует конкретного next_actions для продолжения исследования")
+
+        def public(value):
+            if isinstance(value, dict):
+                return {key: public(part) for key, part in value.items() if key != "quote"}
+            if isinstance(value, list):
+                return [public(part) for part in value]
+            return value
+        if len(json.dumps(public(item), ensure_ascii=False)) > 12000:
+            raise MapValidationError("Сводка слишком велика: до 12000 символов без текстов цитат; подробности сохраняйте в research_notes")
+        previous = self.model["research_brief"] or {}
+        if item == {key: value for key, value in previous.items() if key != "revision"}:
+            return {"revision": previous["revision"], "changed": False}
+        item["revision"] = previous.get("revision", 0) + 1
+        self.model["research_brief"] = item
+        return {"revision": item["revision"], "changed": True,
+                "inspection_hint": "inspect_map(section='research_brief'); гипотеза не создаёт узлы или связи"}
 
     def _save_research_note(self, args: dict[str, Any]) -> dict[str, Any]:
         """Public findings and next work, never private provider reasoning."""
@@ -378,13 +494,17 @@ class MapState:
         item = {"id": self._id("systems", "sys", args.get("id"), MAX_SYSTEMS),
                 "name": _text(args.get("name"), "name", required=True, limit=300),
                 "source_ids": sources, "description": _text(args.get("description", ""), "description"),
-                "evidence_status": status, "evidence": evidence}
+                "evidence_status": status, "evidence": evidence,
+                "implementation": _choice(args.get("implementation", "unknown"), "implementation", SYSTEM_IMPLEMENTATIONS),
+                "basis": _text(sanitize(args.get("basis", "")), "basis", limit=3000)}
+        if item["implementation"] != "unknown" and (not sources or not evidence):
+            raise MapValidationError("implementation=provided/external требует источники и основания; без них укажите unknown")
         if any(s["name"].casefold() == item["name"].casefold() and s["id"] != item["id"] for s in self.model["systems"]):
             raise MapValidationError("АС с таким именем уже есть: обновите существующий id")
         return self._put("systems", item)
 
     def _upsert_group(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Business taxonomy, separate from executable nodes and control flow."""
+        """A stage groups actions directly; stages do not create control flow."""
         evidence = self._evidence(args.get("evidence", []))
         if not evidence:
             raise MapValidationError("Группировка требует оснований из прочитанных материалов")
@@ -413,6 +533,7 @@ class MapState:
             raise MapValidationError("outcome задаётся только для завершения kind=end")
         for field in ("description", "input", "output", "condition"):
             item[field] = _text(args.get(field, ""), field)
+        item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
         return self._put("nodes", item)
 
     def _upsert_transition(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -426,6 +547,7 @@ class MapState:
                 "receiver_evidence": self._evidence(args.get("receiver_evidence", []), "receiver_evidence")}
         for field in ("description", "condition", "data", "correlation", "channel", "contract"):
             item[field] = _text(args.get(field, ""), field)
+        item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
         if item["kind"] == "branch" and not item["condition"]:
             raise MapValidationError("Ветвление требует условия в condition")
         signature = (item["source"], item["target"], item["kind"], item["condition"])
@@ -474,7 +596,10 @@ class MapState:
 
     @staticmethod
     def _fingerprint(value: Any) -> str:
-        return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        # Renaming, explaining, or regrouping an action does not alter its
+        # execution. Conditions, results, provenance, and transitions still do.
+        substantive = {k: v for k, v in value.items() if k not in ("name", "group_id", "basis")} if isinstance(value, dict) else value
+        return hashlib.sha256(json.dumps(substantive, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     @staticmethod
     def _within(citations: list[dict[str, Any]], scope: list[dict[str, Any]]) -> bool:
@@ -495,6 +620,8 @@ class MapState:
         systems = {row["id"]: row for row in self.model["systems"]}
         if system_id not in systems:
             raise MapValidationError("review_execution: нужна существующая АС; неизвестную реализацию сохраняйте в gap")
+        if systems[system_id].get("implementation") == "external":
+            raise MapValidationError("review_execution: реализация внешней АС не представлена; сохраните адресный gap вместо обзора недоступного исполнения")
         evidence = self._evidence(args.get("evidence", []))
         if not evidence:
             raise MapValidationError("review_execution требует прочитанные основания обследованного исполнения")
@@ -582,20 +709,21 @@ class MapState:
         for system in systems.values():
             check_sources(system["evidence"], system["source_ids"], system["id"])
         for group in groups.values():
-            parent = groups.get(group["parent_id"])
-            if group["kind"] == "stage" and group["parent_id"]:
+            if group["kind"] != "stage":
+                errors.append(f"{group['id']}: допускается только группировка по этапам")
+            if group["parent_id"]:
                 errors.append(f"{group['id']}: этап не имеет родительской группы")
-            if group["kind"] == "operation" and (not parent or parent["kind"] != "stage"):
-                errors.append(f"{group['id']}: бизнес-операция должна относиться к существующему этапу")
         for node in nodes.values():
             group_id = node.get("group_id")
-            if group_id and (group_id not in groups or groups[group_id]["kind"] != "operation"):
-                errors.append(f"{node['id']}: group_id должен указывать на бизнес-операцию")
+            if group_id and (group_id not in groups or groups[group_id]["kind"] != "stage"):
+                errors.append(f"{node['id']}: group_id должен указывать на существующий этап")
             system = node["system_id"]
             if system not in systems and system != "unknown":
                 errors.append(f"{node['id']}: неизвестная АС {system}")
             elif system in systems:
                 check_sources(node["evidence"], systems[system]["source_ids"], node["id"])
+                if systems[system].get("implementation") == "external" and node["evidence_status"] == "observed":
+                    errors.append(f"{node['id']}: у внешней АС нет исследованной реализации; ссылка из вызывающего кода не подтверждает её внутреннее действие. Используйте inferred/unknown и укажите границу знания")
             parent = node.get("parent_id")
             seen = {node["id"]}
             while parent:
@@ -626,6 +754,8 @@ class MapState:
                     errors.append(f"{edge['id']}: для observed межсистемного перехода обе АС должны быть определены")
                 if not edge["sender_evidence"] or not edge["receiver_evidence"]:
                     errors.append(f"{edge['id']}: observed межсистемный переход требует sender_evidence и receiver_evidence")
+                if any(systems.get(s, {}).get("implementation") == "external" for s in (left, right)):
+                    errors.append(f"{edge['id']}: для внешней АС исследована только вызывающая сторона; используйте inferred/unknown до проверки реализации второй стороны")
                 for field in ("channel", "contract"):
                     if len(edge[field]) < 5 or edge[field].lower() in ("unknown", "неизвестно", "нет данных", "same name"):
                         errors.append(f"{edge['id']}: опишите {field}; совпадение имён не подтверждает связь")
@@ -642,6 +772,8 @@ class MapState:
             if system_id not in systems:
                 errors.append(f"{review['id']}: обзор ссылается на отсутствующую АС")
                 continue
+            if systems[system_id].get("implementation") == "external":
+                errors.append(f"{review['id']}: обзор исполнения недоступной внешней АС недопустим; удалите его и сохраните адресный gap")
             check_sources(review["evidence"], systems[system_id]["source_ids"], review["id"])
             reviewed_nodes = {op["node_id"] for op in review["operations"]}
             for operation in review["operations"]:
@@ -673,6 +805,11 @@ class MapState:
                 errors.append(f"{review['source_id']}: источник используется в карте; нельзя пометить его вне сценария или недоступным")
         return errors
 
+    def _reviewable_operations(self) -> set[str]:
+        external_systems = {s["id"] for s in self.model["systems"] if s.get("implementation") == "external"}
+        return {n["id"] for n in self.model["nodes"] if n["kind"] in OPERATION_NODE_KINDS
+                and n["evidence_status"] != "unknown" and n["system_id"] not in external_systems}
+
     def _detail_errors(self) -> list[str]:
         """Coverage of an explicit inventory, never proof of discovery recall."""
         errors: list[str] = []
@@ -681,9 +818,8 @@ class MapState:
         edges = {edge["id"]: edge for edge in self.model["edges"]}
         operations = [op for review in reviews for op in review["operations"]]
         mapped = {op["node_id"] for op in operations}
-        required = {n["id"] for n in nodes.values()
-                    if n["kind"] in OPERATION_NODE_KINDS and n["evidence_status"] != "unknown"}
-        unknown_operations = {n["id"] for n in nodes.values() if n["kind"] in OPERATION_NODE_KINDS and n["evidence_status"] == "unknown"}
+        required = self._reviewable_operations()
+        unknown_operations = {n["id"] for n in nodes.values() if n["kind"] in OPERATION_NODE_KINDS} - required
         if (required and (not reviews or not any(op["node_id"] in required for op in operations))) or (not required and not unknown_operations):
             errors.append("Детализация не проверена: вызовите review_execution с атомарными операциями; служебные start/end/fork/join не заменяют исполняемые действия")
         for identifier in sorted(required - mapped):
@@ -727,20 +863,23 @@ class MapState:
     def _detail_summary(self) -> dict[str, Any]:
         if "execution_reviews" not in self.model:
             return {"status": "legacy_unverified", "semantic_completeness_verified": False}
-        required = {node["id"] for node in self.model["nodes"]
-                    if node["kind"] in OPERATION_NODE_KINDS and node["evidence_status"] != "unknown"}
+        required = self._reviewable_operations()
         reviews = self.model["execution_reviews"]
         operations = [operation for review in reviews for operation in review["operations"]]
         mapped = {operation["node_id"] for operation in operations}
         issues = self._detail_errors()
         unknown_nodes = [node["id"] for node in self.model["nodes"]
                          if node["kind"] in OPERATION_NODE_KINDS and node["evidence_status"] == "unknown"]
-        unknown = bool(unknown_nodes) or any(check["status"] == "unknown" for review in reviews for check in review["checks"].values())
+        external_systems = {s["id"] for s in self.model["systems"] if s.get("implementation") == "external"}
+        external_nodes = [node["id"] for node in self.model["nodes"]
+                          if node["kind"] in OPERATION_NODE_KINDS and node["system_id"] in external_systems]
+        unknown = bool(unknown_nodes or external_nodes) or any(check["status"] == "unknown" for review in reviews for check in review["checks"].values())
         return {"contract_version": "1", "status": "pending" if issues else "partial" if unknown else "covered",
                 "review_count": len(reviews), "operation_count": len(operations),
                 "required_nodes": len(required), "mapped_nodes": len(required.intersection(mapped)),
                 "unmapped_node_ids": sorted(required - mapped), "issues": issues,
-                "unknown_node_ids": unknown_nodes, "registry_coverage_checked": bool(reviews) and not issues,
+                "unknown_node_ids": unknown_nodes, "external_node_ids": external_nodes,
+                "registry_coverage_checked": bool(reviews) and not issues,
                 "semantic_completeness_verified": False}
 
     def _finish_errors(self) -> list[str]:
@@ -784,6 +923,7 @@ class MapState:
         # explicit gap tied to the affected nodes; they yield a partial result.
         gap_nodes = {n for gap in self.model["gaps"] for n in gap["node_ids"]}
         gap_systems = {system for gap in self.model["gaps"] for system in gap.get("system_ids", [])}
+        external_systems = {s["id"] for s in self.model["systems"] if s.get("implementation") == "external"}
         # Several independent start-to-end chains are not one connected variant.
         # Preserve unknown islands only as explicitly documented partial findings.
         adjacency = {identifier: outgoing[identifier] | incoming[identifier] for identifier in nodes}
@@ -815,22 +955,23 @@ class MapState:
                 if any(e["source"] == identifier and e["kind"] != "data" and not e["condition"] for e in self.model["edges"]):
                     errors.append(f"{identifier}: подпишите условия всех исходящих ветвей решения либо укажите адресный gap")
             if node["kind"] in OPERATION_NODE_KINDS and not node.get("group_id") and identifier not in gap_nodes:
-                errors.append(f"{identifier}: укажите бизнес-операцию в group_id либо адресный gap о неизвестной группировке")
+                errors.append(f"{identifier}: укажите этап в group_id либо адресный gap о неизвестной группировке")
             if node["kind"] == "join" and len(incoming[identifier]) < 2 and identifier not in gap_nodes:
                 errors.append(f"{identifier}: join требует минимум два входа либо адресный gap")
             if (node["evidence_status"] == "unknown" or node["system_id"] == "unknown") and identifier not in gap_nodes:
                 errors.append(f"{identifier}: неизвестное поведение/АС требует адресный gap")
+            if node["system_id"] in external_systems and identifier not in gap_nodes:
+                errors.append(f"{identifier}: реализация внешней АС не представлена; требуется адресный gap этого шага")
         for edge in self.model["edges"]:
             if edge["evidence_status"] == "unknown" and not {edge["source"], edge["target"]}.issubset(gap_nodes):
                 errors.append(f"{edge['id']}: неизвестный переход требует gap с обоими шагами")
-        unknown_systems = {s["id"] for s in self.model["systems"] if s["evidence_status"] == "unknown"}
+        unknown_systems = {s["id"] for s in self.model["systems"] if s["evidence_status"] == "unknown"} | external_systems
         for system_id in unknown_systems:
             affected_nodes = {node["id"] for node in nodes.values() if node["system_id"] == system_id}
             if system_id not in gap_systems and (not affected_nodes or not affected_nodes.issubset(gap_nodes)):
-                errors.append(f"{system_id}: неподтверждённая АС требует gap с system_ids либо со всеми её шагами")
+                errors.append(f"{system_id}: неподтверждённая или внешняя АС требует gap с system_ids либо со всеми её шагами")
         for group in self.model["groups"]:
-            used = (any(n.get("group_id") == group["id"] for n in nodes.values()) if group["kind"] == "operation"
-                    else any(g["parent_id"] == group["id"] for g in self.model["groups"]))
+            used = any(n.get("group_id") == group["id"] for n in nodes.values())
             if not used:
                 errors.append(f"{group['id']}: пустая группа; свяжите с действиями или удалите")
         errors.extend(self._detail_errors())

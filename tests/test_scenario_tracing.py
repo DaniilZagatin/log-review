@@ -60,7 +60,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                     raise openai.APIConnectionError(request=httpx.Request('POST', 'http://model.invalid'))
                 result = super().chat(messages, **kwargs)
                 result.reasoning_content = 'private-thinking-trace-test'
-                if result.tool_calls[0]['function']['name'] == 'finish':
+                if result.tool_calls and result.tool_calls[0]['function']['name'] == 'finish':
                     result.tool_calls.append({'id': 'after-finish', 'type': 'function',
                                              'function': {'name': 'inspect_map', 'arguments': '{}'}})
                 return result
@@ -117,7 +117,17 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                         llms = [s for s in tree if attrs(s)['openinference.span.kind'].string_value == 'LLM']
                         if model is completed:
                             self.assertEqual(len(tools), len(research_calls()) + 1)
-                            self.assertEqual(len(llms), model['run']['steps'] + 1)
+                            self.assertEqual(len(llms), model['run']['steps'] + 1 + model['run'].get('context_summary_calls', 0))
+                            self.assertGreater(model['run'].get('context_summaries', 0), 0)
+                            self.assertEqual(model['run'].get('context_summary_fallbacks', 0), 0)
+                            compact_spans = [s for s in tree if attrs(s).get('pko.span') and attrs(s)['pko.span'].string_value == 'compact_context']
+                            summary_spans = [s for s in tree if attrs(s).get('pko.span') and attrs(s)['pko.span'].string_value == 'context_summary']
+                            self.assertEqual(len(summary_spans), model['run']['context_summary_calls'])
+                            self.assertTrue(all(s.parent_span_id in {c.span_id for c in compact_spans} for s in summary_spans))
+                            for summary_span in summary_spans:
+                                self.assertEqual(summary_span.trace_id, root.trace_id)
+                                self.assertEqual(sum(s.parent_span_id == summary_span.span_id for s in llms), 1,
+                                                 'Each summary LLM call must stay under compaction in the same trace')
                             self.assertIn('model_retry_wait', names)
                             self.assertEqual(sum(s.status.code == 2 for s in llms), 1)
                             self.assertNotEqual(root.status.code, 2)

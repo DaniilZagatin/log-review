@@ -57,7 +57,7 @@ __FONTS__<style>__STYLE__</style></head>
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
 <div class="map-navigation"><label class="stage-picker" for="stage-select"><span>Этап</span><select id="stage-select" aria-label="Выбрать этап сценария"><option value="">Все этапы</option></select></label><button id="clear-selection" type="button" hidden>Снять выделение</button><button id="notation-toggle" type="button" aria-expanded="false" aria-controls="notation-panel">Обозначения</button></div>
-<section id="notation-panel" class="map-popover notation-panel" aria-label="Обозначения карты" hidden><h2>Как читать карту</h2><div id="notation-items"></div><p>АС указана в каждом узле. Штриховая связь — вывод по коду, пунктирная — не установлена. Направление стрелки задаёт переход; связь «Данные» сама по себе не задаёт порядок исполнения.</p><p>Этапы и операции группируют действия по бизнес-смыслу. Выбор этапа перемещает карту к его узлам. Нажатие на действие выделяет всю его бизнес-операцию; состав и основания доступны в карточке.</p></section>
+<section id="notation-panel" class="map-popover notation-panel" aria-label="Обозначения карты" hidden><h2>Как читать карту</h2><div id="notation-items"></div><p>АС — автоматизированная система, в которой выполняется действие. Её границы устанавливаются по коду и материалам: одна АС может включать несколько сервисов и директорий. Внешняя АС может быть известна только по вызову или контракту.</p><p>Штриховая связь — вывод по коду, пунктирная — не установлена. Направление стрелки задаёт переход, включая возвраты и циклы; связь «Данные» сама по себе не задаёт порядок исполнения.</p><p>Этап объединяет действия общей промежуточной целью. Выбор этапа перемещает карту к его узлам. Нажатие на действие выделяет его и непосредственно связанные узлы. Бизнес-смысл и обоснование доступны в карточке.</p></section>
 <div class="map-toolbar">
 <div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button></div></div>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Карта сценария. Используйте прокрутку для перемещения, кнопки для масштаба; Tab для выбора шагов."><div id="canvas-size"><div id="stage"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-label="Переходы между шагами"></svg><div id="nodes"></div></div></div><div id="empty-map" class="empty" hidden>Карта пока не содержит шагов. Причина и незавершённые участки указаны в результатах исследования.</div></div>
@@ -200,7 +200,8 @@ const byId = new Map(nodes.map(n => [text(n.id),n]));
 const systemById = new Map(systems.map(s => [text(s.id),s]));
 const groups=array(model.groups).filter(g=>g&&typeof g==='object'),groupById=new Map(groups.map(g=>[text(g.id),g]));
 const groupMembers=group=>nodes.filter(n=>text(n.group_id)===text(group.id)||(group.kind==='stage'&&text(groupById.get(text(n.group_id))?.parent_id)===text(group.id)));
-const nodeGroups=node=>{const operation=groupById.get(text(node.group_id));return operation?[groupById.get(text(operation.parent_id)),operation].filter(Boolean):[];};
+// Legacy reports may contain an operation between a node and its stage.
+const nodeGroups=node=>{const group=groupById.get(text(node.group_id));return group?[groupById.get(text(group.parent_id)),group].filter(Boolean):[];};
 const nodeSearchText=node=>[node.name,node.description,systemName(node),node.input,node.output,...nodeGroups(node).map(g=>g.name)].map(text).join(' ').toLocaleLowerCase('ru');
 const kindNames={start:'Начало',action:'Действие',decision:'Условие',fork:'Параллельное выполнение',join:'Объединение',wait:'Ожидание',end:'Завершение',external:'Внешний участок'};
 const operationKinds={action:'Действие',validation:'Проверка',read:'Чтение данных',write:'Запись данных',integration:'Вызов системы',publish:'Публикация события',wait:'Ожидание',calculation:'Расчёт',transform:'Преобразование данных',error_handling:'Обработка отказа / ошибки'};
@@ -249,6 +250,17 @@ function evidenceBlock(container,items,label='Основания в исходн
  }details.append(box);}container.append(details);
 }
 function relatedButton(container,label,callback){const b=el('button','text-button',label);b.type='button';b.addEventListener('click',callback);container.append(b);return b;}
+function systemBlock(container,node){
+ const system=systemById.get(text(node.system_id));field(container,'Автоматизированная система',systemName(node));if(!system)return;
+ const details=el('details','details');details.append(el('summary','','Что известно об АС'));
+ field(details,'Роль системы',system.description);
+ const implementationNames={provided:'Код реализации представлен в материалах',external:'Внешняя система: её реализация не представлена',unknown:'Наличие реализации в материалах не установлено'};
+ field(details,'Граница исследования',implementationNames[system.implementation]||implementationNames.unknown);
+ const sourceNames=array(system.source_ids).map(id=>array(model.sources).find(source=>text(source.id)===text(id))?.name||id);
+ listField(details,'Материалы, в которых установлена система',sourceNames);
+ field(details,'Обоснование определения АС',system.basis);
+ evidenceBlock(details,system.evidence,'Фрагменты об АС');container.append(details);
+}
 function closePopovers(){for(const name of ['notation']){$(name+'-panel').hidden=true;$(name+'-toggle').setAttribute('aria-expanded','false');}}
 for(const name of ['notation'])$(name+'-toggle').addEventListener('click',()=>{const open=$(name+'-panel').hidden;closePopovers();$(name+'-panel').hidden=!open;$(name+'-toggle').setAttribute('aria-expanded',String(open));});
 document.addEventListener('pointerdown',event=>{if(!event.target.closest('.map-popover,.map-navigation'))closePopovers();});
@@ -291,7 +303,7 @@ function showOverview(){
 }
 function showNode(node){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',nodeKindLabel(node)),badge(node.evidence_status),el('h2','',node.name || node.id));
- field(panel,'Бизнес-смысл',node.description);field(panel,'Автоматизированная система',systemName(node));field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);
+ field(panel,'Бизнес-смысл',node.description);field(panel,'Обоснование',node.basis);field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);systemBlock(panel,node);
  const ancestry=nodeGroups(node);if(ancestry.length){const links=el('div','group-links');for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Операция: ')+group.name,()=>selectGroup(group));panel.append(links);}
  for(const {operation,review} of operationsByNode.get(text(node.id))||[]){const section=el('div','details');section.append(el('h3','','Атомарное действие'));field(section,'Действие',operation.action);field(section,'Проверяемый результат',operation.effect);field(section,'При ошибке',operation.failure);field(section,'Условие действия',operation.condition);evidenceBlock(section,operation.evidence,'Основания действия');panel.append(section);}
  if(node.parent_id && byId.has(text(node.parent_id)))field(panel,'Часть шага',byId.get(text(node.parent_id)).name);
@@ -303,14 +315,14 @@ function showNode(node){
 function showEdge(edge){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker','ПЕРЕХОД · '+(edgeNames[edge.kind] || 'Связь')),badge(edge.evidence_status));
  const from=byId.get(text(edge.source)), to=byId.get(text(edge.target));panel.append(el('h2','',(from.name || from.id)+' → '+(to.name || to.id)));
- field(panel,'Что происходит',edge.description);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
+ field(panel,'Что происходит',edge.description);field(panel,'Обоснование перехода',edge.basis);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
  const related=el('div','related');relatedButton(related,'Открыть: '+(from.name || from.id),()=>selectNode(from,true));relatedButton(related,'Открыть: '+(to.name || to.id),()=>selectNode(to,true));panel.append(related);
  const technical=el('details','details');technical.append(el('summary','','Способ передачи и контракт'));field(technical,'Канал',edge.channel);field(technical,'Контракт',edge.contract);panel.append(technical);
  evidenceBlock(panel,edge.sender_evidence,'Отправляющая сторона');evidenceBlock(panel,edge.receiver_evidence,'Принимающая сторона');evidenceBlock(panel,edge.evidence);
  if(!array(edge.evidence).length&&!array(edge.sender_evidence).length&&!array(edge.receiver_evidence).length)field(panel,'Основания','Подтверждающие фрагменты для перехода не представлены.');
 }
 function updateHighlight(){
- const neighborIds=new Set();if(selected?.type==='node'){const node=byId.get(text(selected.id)),operation=groupById.get(text(node?.group_id));for(const member of operation?groupMembers(operation):[node])if(member)neighborIds.add(text(member.id));}
+ const neighborIds=new Set();if(selected?.type==='node'){neighborIds.add(text(selected.id));for(const edge of validEdges){if(text(edge.source)===text(selected.id))neighborIds.add(text(edge.target));if(text(edge.target)===text(selected.id))neighborIds.add(text(edge.source));}}
  if(selected?.type==='edge'){const e=selected.edge;neighborIds.add(text(e.source));neighborIds.add(text(e.target));}
  if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group)for(const node of groupMembers(group))neighborIds.add(text(node.id));}
  const selectedGroup=selected?.type==='group'?groupById.get(text(selected.id)):null;
@@ -318,7 +330,7 @@ function updateHighlight(){
  const selectedStage=selectedGroup?.kind==='stage'?selectedGroup:null;
  $('stage-select').value=selectedStage?text(selectedStage.id):'';
  for(const node of nodes){const button=nodeButtons.get(text(node.id));if(button){button.classList.toggle('in-scope',!!selected&&neighborIds.has(text(node.id)));button.classList.toggle('selected',selected?.type==='node'&&text(selected.id)===text(node.id));button.setAttribute('aria-pressed',String(selected?.type==='node'&&text(selected.id)===text(node.id)));button.classList.toggle('dimmed',!!selected&&!neighborIds.has(text(node.id)));}}
- for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=(selected?.type==='node'||selected?.type==='group')&&neighborIds.has(text(edge.source))&&neighborIds.has(text(edge.target));group.classList.toggle('in-scope',isRelated);group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
+ for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=selected?.type==='node'?(text(edge.source)===text(selected.id)||text(edge.target)===text(selected.id)):selected?.type==='group'&&neighborIds.has(text(edge.source))&&neighborIds.has(text(edge.target));group.classList.toggle('in-scope',isRelated);group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
 }
 function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
@@ -363,7 +375,7 @@ function draw(){
   button.setAttribute('aria-label',nodeKindLabel(node)+': '+(node.name||node.id)+'. '+systemName(node)+'. '+evidenceNames[evidenceStatus(node.evidence_status)]);button.setAttribute('aria-pressed','false');
   const content=el('span','node-content');
   content.append(el('span','node-name',node.name||node.id));
-  const operation=groupById.get(text(node.group_id));if(operation){const label=el('span','node-group',operation.name);label.title=nodeGroups(node).map(g=>g.name).join(' / ');content.append(label);}
+  const group=groupById.get(text(node.group_id));if(group){const label=el('span','node-group',group.name);label.title=nodeGroups(node).map(g=>g.name).join(' / ');content.append(label);}
   content.append(el('span','node-system','АС · '+systemName(node)));
   content.append(el('span','node-status '+evidenceStatus(node.evidence_status),evidenceNames[evidenceStatus(node.evidence_status)]));
   const findingCount=gaps.filter(g=>array(g.node_ids).map(text).includes(id)).length;if(findingCount)content.append(el('span','node-gap','Не установлено: '+findingCount));

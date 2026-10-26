@@ -50,22 +50,28 @@ def research_calls():
         calls.append(("read_file", {"path": f"source-{number}/{filename}"}))
     for number, name in ((1, "Мобильный канал"), (2, "Обработка заявок"), (3, "Выпуск карт")):
         calls.append(("upsert_system", {"name": name, "source_ids": [f"source-{number}"],
-                                       "description": name + " — учебная реализация", "evidence_status": "observed", "evidence": scopes[number]}))
-    # Business groups are separate from executable nodes; two operations cross AS.
-    for kind, name, parent, result, systems in [
-        ("stage", "Подача заявки", None, "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
-        ("operation", "Определить вариант обращения", "group-1", "Выбран поддерживаемый вариант либо сформирован отказ", [1]),
-        ("operation", "Передать заявку на рассмотрение", "group-1", "Подготовленный запрос принят АС заявок", [1, 2]),
-        ("stage", "Рассмотрение заявки", None, "Заявка направлена на выпуск либо отклонена", [2, 3]),
-        ("operation", "Проверить возможность выпуска", "group-4", "Проверен допуск клиента; при отрицательном результате сохранён отказ", [2]),
-        ("operation", "Передать заявку на выпуск", "group-4", "Принятая заявка доставлена обработчику выпуска", [2, 3]),
-        ("stage", "Выпуск карты", None, "Карта и результат выпуска сохранены", [3]),
-        ("operation", "Подготовить карту", "group-7", "Из сообщения получены параметры и подготовлены данные карты", [3]),
-        ("operation", "Зафиксировать выпуск", "group-7", "Карта сохранена, результат связан с заявкой", [3]),
+                                       "description": name + " — учебная реализация", "implementation": "provided",
+                                       "basis": "Роль системы определена по принятому запросу и обработчику выбранного сценария. Реализация обработчика представлена в исходниках.",
+                                       "evidence_status": "observed", "evidence": scopes[number]}))
+    calls.append(("save_research_brief", {
+        "project_overview": "Учебные реализации мобильного канала, обработки заявок и выпуска карт связаны HTTP и сообщением на выпуск.",
+        "scenario_alignment": "Вход /cards/debit/new относится к новой дебетовой карте действующему клиенту; перевыпуск исключён. Исходы — выпуск либо отказ.",
+        "confirmed_facts": [{"finding": "Мобильный обработчик принимает запрос новой карты.", "evidence": scopes[1]}],
+        "flow_hypothesis": ["Приём и проверка варианта в мобильном канале.",
+                            "Проверка допуска и сохранение заявки либо отказа.",
+                            "Передача сообщения и сохранение карты с результатом выпуска."],
+        "open_questions": ["Какие условия ветвей и отдельные эффекты представлены в обработчиках?"],
+        "next_actions": ["Проследить исполнение от входа, выделяя отдельные действия и подтверждённые переходы."],
+        "evidence": [ref for scope in scopes.values() for ref in scope],
+    }))
+    # Only stages group executable nodes; a stage may cross system boundaries.
+    for name, result, systems in [
+        ("Подача заявки", "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
+        ("Рассмотрение заявки", "Заявка направлена на выпуск либо отклонена", [2, 3]),
+        ("Выпуск карты", "Карта и результат выпуска сохранены", [3]),
     ]:
-        calls.append(("upsert_group", {"name": name, "kind": kind, "result": result,
-                                      "evidence": [ref for system in systems for ref in scopes[system]],
-                                      **({"parent_id": parent} if parent else {})}))
+        calls.append(("upsert_group", {"name": name, "kind": "stage", "result": result,
+                                      "evidence": [ref for system in systems for ref in scopes[system]]}))
     # key, AS, business name, graph kind, operation kind, start/end snippets, effect
     specs = [
         ("start", 1, "Заявка отправлена клиентом", "start", None,
@@ -126,12 +132,17 @@ def research_calls():
     }
     nodes = {}
     memberships = {
-        **dict.fromkeys(["start", "channel_receive", "variant_check", "variant_rejection", "variant_end"], "group-2"),
-        **dict.fromkeys(["application_build", "application_send", "application_receive"], "group-3"),
-        **dict.fromkeys(["profile_read", "eligibility_check", "rejection_write", "rejection_response", "rejection_end"], "group-5"),
-        **dict.fromkeys(["acceptance_write", "message_build", "message_publish", "message_receive"], "group-6"),
-        **dict.fromkeys(["issue_parameters", "card_build"], "group-8"),
-        **dict.fromkeys(["card_issue", "result_write", "issued_end"], "group-9"),
+        **dict.fromkeys(["start", "channel_receive", "variant_check", "variant_rejection", "variant_end",
+                        "application_build", "application_send", "application_receive"], "group-1"),
+        **dict.fromkeys(["profile_read", "eligibility_check", "rejection_write", "rejection_response", "rejection_end",
+                        "acceptance_write", "message_build", "message_publish", "message_receive"], "group-2"),
+        **dict.fromkeys(["issue_parameters", "card_build", "card_issue", "result_write", "issued_end"], "group-3"),
+    }
+    explanations = {
+        "variant_check": "Обработчик проверяет тип клиента до подготовки запроса. При неподдерживаемом типе возвращает отказ, поэтому проверка показана отдельной развилкой.",
+        "application_send": "Подготовленная заявка передаётся HTTP-вызовом в обработчик системы заявок. Получение ответа ещё не подтверждает выпуск карты.",
+        "message_publish": "После сохранения принятой заявки обработчик отправляет сообщение на выпуск. Завершение этой операции означает отправку сообщения, а не изготовление карты.",
+        "card_issue": "Обработчик сохраняет подготовленную запись карты в учебном хранилище. Поэтому действие отделено от формирования данных и записи результата заявки.",
     }
     for index, (key, system, name, kind, operation_kind, start, end, effect) in enumerate(specs, 1):
         node = {"id": f"step-{index}", "system": system, "name": name, "kind": kind,
@@ -140,6 +151,7 @@ def research_calls():
         nodes[key] = node
         calls.append(("upsert_step", {"name": name, "kind": kind, "system_id": f"sys-{system}", "description": effect,
                                       "group_id": memberships[key],
+                                      **({"basis": explanations[key]} if key in explanations else {}),
                                       **({"outcome": "success" if key == "issued_end" else "refusal"} if kind == "end" else {}),
                                       "input": "request_id, client_id, client_type" if system == 1 else "request_id, client_id, product",
                                       "output": effect, "evidence_status": "observed", "evidence": node["evidence"]}))
@@ -174,6 +186,8 @@ def research_calls():
                 "evidence": scopes[source["system"]]}
         if source["system"] != target["system"]:
             args.update(sender_evidence=source["evidence"], receiver_evidence=target["evidence"],
+                        basis="В отправителе и получателе совпадают адрес и поля запроса, а обработчик принимает переданную заявку."
+                              if key == "http" else "Публикация и подписчик используют один канал; идентификатор заявки передаётся в сообщении и читается обработчиком выпуска.",
                         channel="HTTP POST https://applications.example/applications/debit" if key == "http" else "card.issue.requested",
                         contract="request_id, client_id, product принимаются accept(request) маршрута /applications/debit"
                                  if key == "http" else "request_id, client_id, product принимает подписчик issue(message) канала card.issue.requested",
@@ -209,12 +223,24 @@ def research_calls():
                                            "evidence": scopes[number], "operations": operations, "checks": checks}))
         calls.append(("review_source", {"source_id": f"source-{number}", "disposition": "reviewed",
                                         "reason": "Прочитан выбранный обработчик и его операции. Соседний перевыпуск и неподключённый helper не включены."}))
+    initial_brief = next(args for name, args in calls if name == "save_research_brief")
+    calls.append(("save_research_brief", {**initial_brief, "open_questions": [], "next_actions": []}))
     calls.append(("finish", {"summary": "Учебный детерминированный пример: 18 отдельных операций, 22 узла, 21 переход и три АС. "
                                        "Показаны проверки, формирование данных, HTTP-вызов, записи, публикация, приём сообщения и выпуск, включая отказы. "
                                        "Учебные хранилища находятся в памяти. Это проверка сборки по заранее заданным ответам, не оценка качества реальной модели."}))
     if len(nodes) != NODE_COUNT or len(edge_ids) != EDGE_COUNT:
         raise AssertionError("Update fixture counts when changing the educational scenario")
     return calls
+
+
+def scripted_summary():
+    return ChatResult(text=json.dumps({
+        "project_and_scenario": "Учебный выпуск карты действующему клиенту.",
+        "completed_work": ["Исследуются обработчики выбранного сценария."],
+        "key_findings": ["Точные факты и ID сохранены в состоянии карты."],
+        "open_questions": [], "next_actions": ["Продолжить открытые проверки из памяти."],
+        "references": [],
+    }, ensure_ascii=False), usage={})
 
 
 class ScriptedClient:
@@ -225,6 +251,8 @@ class ScriptedClient:
         self.seen = []
 
     def chat(self, messages, **kwargs):
+        if not kwargs.get("tools"):
+            return scripted_summary()
         self.seen = messages
         for item in messages:
             if item["role"] == "tool":

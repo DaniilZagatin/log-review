@@ -41,6 +41,7 @@ async function main() {
       }
       await page.locator('#notation-toggle').click();
       assert.equal(await page.locator('#notation-items .notation-item').count(), 8);
+      assert.match(await page.locator('#notation-panel').innerText(), /АС — автоматизированная система/);
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('#notation-toggle').getAttribute('aria-expanded'), 'false');
       assert.equal(await page.locator('#notation-toggle').evaluate(e=>document.activeElement===e), true);
@@ -55,7 +56,7 @@ async function main() {
       const stages=model.groups.filter(g=>g.kind==='stage');
       for(const stage of [stages[0],stages[stages.length-1]]) {
         await page.locator('#stage-select').selectOption(stage.id);
-        const memberIds=model.nodes.filter(n=>model.groups.find(g=>g.id===n.group_id)?.parent_id===stage.id).map(n=>n.id);
+        const memberIds=model.nodes.filter(n=>n.group_id===stage.id||model.groups.find(g=>g.id===n.group_id)?.parent_id===stage.id).map(n=>n.id);
         assert.equal(await page.locator('#inspector').isVisible(), false);
         assert.equal(await page.locator('.node.in-scope').count(), memberIds.length);
         assert.equal(await page.locator('.node:not(.dimmed)').count(), memberIds.length);
@@ -68,20 +69,35 @@ async function main() {
       }
       await page.locator('#stage-select').selectOption('');
       assert.equal(await page.locator('.node.dimmed').count(),0);
-      const operation=model.groups.find(g=>g.kind==='operation'&&new Set(model.nodes.filter(n=>n.group_id===g.id).map(n=>n.system_id)).size>1)||model.groups.find(g=>g.kind==='operation');
-      await page.locator('#stage-select').selectOption(operation.parent_id);
-      const member=model.nodes.find(n=>n.group_id===operation.id);
+      const member=model.nodes.find(n=>n.basis&&n.kind==='action')||model.nodes.find(n=>n.kind==='action')||model.nodes[0];
+      const memberGroup=model.groups.find(g=>g.id===member.group_id);
+      await page.locator('#stage-select').selectOption(memberGroup.kind==='stage'?memberGroup.id:memberGroup.parent_id);
       await page.locator('[data-node-id="'+member.id+'"]').focus();
       await page.keyboard.press('Enter');
       assert.equal(await page.locator('.node.selected').count(), 1);
-      assert.equal(await page.locator('#stage-select').inputValue(), '', 'Stage can be selected again after inspecting an operation');
-      assert.equal(await page.locator('.node.in-scope').count(), model.nodes.filter(n=>n.group_id===operation.id).length);
-      assert.equal(await page.locator('.node:not(.dimmed)').count(), model.nodes.filter(n=>n.group_id===operation.id).length);
+      assert.equal(await page.locator('#stage-select').inputValue(), '', 'Stage can be selected again after inspecting an action');
+      const relatedEdges=model.edges.filter(e=>e.source===member.id||e.target===member.id);
+      const neighborIds=[...new Set([member.id,...relatedEdges.flatMap(e=>[e.source,e.target])])].sort();
+      assert.deepEqual(await page.locator('.node.in-scope').evaluateAll(nodes=>nodes.map(n=>n.dataset.nodeId).sort()),neighborIds);
+      assert.deepEqual(await page.locator('.node:not(.dimmed)').evaluateAll(nodes=>nodes.map(n=>n.dataset.nodeId).sort()),neighborIds);
+      assert.deepEqual(await page.locator('.edge.in-scope').evaluateAll(edges=>edges.map(e=>e.dataset.edgeId).sort()),relatedEdges.map(e=>e.id).sort());
       assert.equal(await page.locator('.node').count(),model.nodes.length,'All nodes must stay on the map');
+      if(member.basis){
+        assert.equal(await page.locator('#inspector-content dl').filter({has:page.locator('dt',{hasText:/^Обоснование$/})}).locator('dd').innerText(),member.basis);
+      }
+      assert.equal(await page.locator('#inspector-content details[open]').count(),0,'Literal citations and system details start collapsed');
+      const system=model.systems.find(s=>s.id===member.system_id);
+      if(system?.basis){
+        await page.locator('#inspector-content summary',{hasText:'Что известно об АС'}).click();
+        assert.match(await page.locator('#inspector-content').innerText(),new RegExp(system.basis.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')));
+        assert.equal(await page.locator('#inspector-content details[open] .evidence:visible').count(),0,'System citations stay collapsed');
+      }
       await page.keyboard.press('Escape');
-      await page.locator('.edge').first().focus();
+      const edge=model.edges.find(e=>e.basis)||model.edges[0];
+      await page.locator('[data-edge-id="'+edge.id+'"]').focus();
       await page.keyboard.press('Enter');
       assert.equal(await page.locator('#inspector').isVisible(), true);
+      if(edge.basis)assert.equal(await page.locator('#inspector-content dl').filter({has:page.locator('dt',{hasText:/^Обоснование перехода$/})}).locator('dd').innerText(),edge.basis);
       await page.keyboard.press('Escape');
       await page.locator('#zoom-in').click();
       await page.locator('#fit').click();
@@ -93,7 +109,7 @@ async function main() {
         await page.screenshot({path:path.join(output,`map-${width}x${height}.png`)});
       }
       assert.deepEqual(errors, [], 'No browser runtime errors');
-      console.log(`PASS ${width}x${height}: compact header, all nodes, stage framing, operation highlighting across AS, keyboard, zoom`);
+      console.log(`PASS ${width}x${height}: compact header, all nodes, stage framing, adjacent nodes, readable explanations, AS boundaries, keyboard, zoom`);
       await page.close();
     }
   } finally {
