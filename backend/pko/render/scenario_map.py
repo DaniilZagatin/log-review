@@ -35,14 +35,12 @@ def render_scenario_map(model: dict[str, Any]) -> str:
     title = str(scenario.get("title") or "Карта сценария")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
-        "STYLE": _STYLE, "SCRIPT": _SCRIPT, "MODEL": _script_json(model),
-        "DEMO_HIDDEN": "" if run.get("demo") is True else " hidden",
-        "DETAIL_HIDDEN": " hidden" if model.get("schema_version") == "1.1" and isinstance(model.get("execution_reviews"), list) else "",
+        "STYLE": _STYLE + _NOTATION_STYLE, "SCRIPT": _SCRIPT, "MODEL": _script_json(model),
         "RUN_NOTE": html.escape(str(run.get("reason") or ""), quote=True),
         "RUN_NOTE_HIDDEN": "" if run.get("reason") and run.get("status") in ("partial", "failed") else " hidden",
     }
     # A single pass also keeps placeholder-like words in user text literal.
-    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|DEMO_HIDDEN|DETAIL_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN)__",
+    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|RUN_NOTE|RUN_NOTE_HIDDEN)__",
                   lambda match: values[match.group(1)], _DOCUMENT)
 
 
@@ -52,26 +50,18 @@ _DOCUMENT = r'''<!doctype html>
 __FONTS__<style>__STYLE__</style></head>
 <body><a class="skip" href="#workspace">Перейти к карте</a>
 <header class="page-header">
-<div class="heading-line"><h1 id="page-title">__TITLE__</h1><div class="heading-badges"><span id="demo-badge" class="badge demo"__DEMO_HIDDEN__>Учебный пример</span><span id="detail-badge" class="badge unknown"__DETAIL_HIDDEN__>Детализация не проверена</span><span id="run-status" class="badge unknown"></span></div></div>
+<div class="heading-line"><h1 id="page-title">__TITLE__</h1><div class="overview" id="overview"></div></div>
 <p id="scenario-description" class="description"></p>
-<div class="overview" id="overview"></div>
-<details class="scope"><summary>Границы сценария и материалы исследования</summary><div id="scope-content" class="scope-content"></div></details>
 <p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></header>
 <main id="workspace" tabindex="-1">
-<div class="workspace-bar"><div class="tabs" role="tablist" aria-label="Представление результата">
-<button id="tab-map" role="tab" aria-selected="true" aria-controls="panel-map" type="button">Карта</button>
-<button id="tab-registry" role="tab" aria-selected="false" aria-controls="panel-registry" tabindex="-1" type="button">Реестр шагов</button>
-<button id="tab-gaps" role="tab" aria-selected="false" aria-controls="panel-gaps" tabindex="-1" type="button">Пробелы исследования</button>
-</div><label class="search-label" for="search"><span>Найти шаг</span><input id="search" type="search" placeholder="Название, описание или АС" autocomplete="off" aria-describedby="search-help" title="Enter — перейти к следующему найденному шагу"><span id="search-help" class="sr-only">Enter — перейти к следующему найденному шагу</span></label></div>
 <div class="workspace-layout"><div class="main-panels">
-<section id="panel-map" role="tabpanel" aria-labelledby="tab-map">
-<div class="map-toolbar"><div class="map-heading"><strong>Сквозной сценарий</strong><span id="search-result" role="status" aria-live="polite">Подробная карта выбранного сценария</span></div>
+<section id="panel-map" aria-label="Подробная карта сценария">
+<div class="map-navigation"><label class="stage-picker" for="stage-select"><span>Этап</span><select id="stage-select" aria-label="Выбрать этап сценария"><option value="">Все этапы</option></select></label><button id="clear-selection" type="button" hidden>Снять выделение</button><button id="notation-toggle" type="button" aria-expanded="false" aria-controls="notation-panel">Обозначения</button></div>
+<section id="notation-panel" class="map-popover notation-panel" aria-label="Обозначения карты" hidden><h2>Как читать карту</h2><div id="notation-items"></div><p>АС указана в каждом узле. Штриховая связь — вывод по коду, пунктирная — не установлена. Направление стрелки задаёт переход; связь «Данные» сама по себе не задаёт порядок исполнения.</p><p>Этапы и операции группируют действия по бизнес-смыслу. Выбор этапа перемещает карту к его узлам. Нажатие на действие выделяет всю его бизнес-операцию; состав и основания доступны в карточке.</p></section>
+<div class="map-toolbar">
 <div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button></div></div>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Карта сценария. Используйте прокрутку для перемещения, кнопки для масштаба; Tab для выбора шагов."><div id="canvas-size"><div id="stage"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-label="Переходы между шагами"></svg><div id="nodes"></div></div></div><div id="empty-map" class="empty" hidden>Карта пока не содержит шагов. Причина и незавершённые участки указаны в результатах исследования.</div></div>
-<div class="map-footer"><div class="legend" aria-label="Основания карты"><span class="badge observed">Подтверждено кодом</span><span class="badge inferred">Вывод по коду</span><span class="badge unknown">Не установлено</span></div><span class="map-hint">Выберите шаг или переход, чтобы открыть описание</span></div>
 </section>
-<section id="panel-registry" role="tabpanel" aria-labelledby="tab-registry" hidden><div class="table-wrap"><table><caption>Шаги выбранного сценария</caption><thead><tr><th scope="col">Шаг</th><th scope="col">Система</th><th scope="col">Назначение</th><th scope="col">Основание</th></tr></thead><tbody id="registry"></tbody></table></div><p id="registry-empty" class="empty" hidden>По запросу ничего не найдено.</p></section>
-<section id="panel-gaps" role="tabpanel" aria-labelledby="tab-gaps" hidden><div class="gaps-intro"><h2>Что осталось установить</h2><p>Пробелы показывают границы исследования. Отсутствие найденного подтверждения не доказывает отсутствие реализации.</p></div><div id="gaps"></div></section>
 </div><aside id="inspector" class="inspector" aria-label="Описание выбранного элемента" hidden><div class="inspector-head"><span>Описание элемента</span><button type="button" id="close-inspector" aria-label="Закрыть описание">×</button></div><div id="inspector-content"></div></aside></div>
 <p class="footnote">Карта восстановлена по переданным материалам. Подтверждение в коде не гарантирует поведение работающих систем и полноту бизнес-процесса.</p>
 </main><div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
@@ -98,6 +88,42 @@ html,body{height:100%;overflow:hidden}body{height:100dvh;display:flex;flex-direc
 .node-system{font-size:11px;line-height:1.35;color:var(--muted)}
 @media(max-width:480px){.workspace-bar{flex-wrap:nowrap}.search-label{width:36px;position:relative;overflow:visible}.search-label:before{content:'';position:absolute;width:10px;height:10px;border:1.5px solid var(--muted);border-radius:50%;left:10px;top:10px;z-index:1;pointer-events:none}.search-label:after{content:'';position:absolute;width:6px;border-top:1.5px solid var(--muted);transform:rotate(45deg);left:19px;top:22px;z-index:1;pointer-events:none}.search-label:focus-within:before,.search-label:focus-within:after{display:none}.search-label input{width:36px;padding:6px;transition:none}.search-label input:focus{position:absolute;right:0;top:-18px;width:min(300px,calc(100vw - 32px));z-index:8;background:#fff}.search-label input::placeholder{color:transparent}.search-label input:focus::placeholder{color:var(--muted)}.tabs button{padding:5px 6px;font-size:10px}.map-footer{padding-left:10px;padding-right:10px}.legend .badge{font-size:9px;padding:4px 6px}}
 @media print{.page-header,main{padding:0}.workspace-bar,.map-actions,.map-hint,.skip{display:none}.workspace-layout{display:block}.inspector{position:static;max-height:none;margin-top:18px}.viewport{height:650px}.main-panels{break-inside:avoid}.scope:not([open]){display:none}.footnote{padding-bottom:0}}
+'''
+
+
+_NOTATION_STYLE = r'''
+.stage-picker{display:flex;align-items:center;gap:9px;flex:1;min-width:140px;max-width:330px;font-size:12px;color:var(--muted);padding:3px 8px 3px 12px;background:#f5f7f6;border:1px solid var(--border);border-radius:9px}
+.stage-picker select{font:inherit;font-size:13px;min-width:0;width:100%;min-height:32px;border:0;background:transparent;color:var(--ink);cursor:pointer}.stage-picker select:focus-visible{outline:2px solid var(--focus);outline-offset:2px;border-radius:4px}
+.node.in-scope .node-surface>*{stroke:var(--purple);fill:#faf4ff;stroke-width:1.7}.node.selected .node-surface>*{fill:#ecdcfc;stroke-width:2.5}.edge.in-scope .edge-visible{stroke:var(--purple);stroke-width:2}
+.notation-item{display:flex;gap:12px;align-items:center;margin:12px 0;font-size:12px}.notation-item svg{flex:none;width:24px;height:24px;color:var(--muted)}
+@media(max-width:1000px) and (min-width:701px){.workspace-bar{flex-wrap:wrap}.stage-picker{max-width:none}.search-label{width:180px}}
+@media(max-width:700px){.stage-picker{width:100%;max-width:none;flex:none}}
+.map-navigation{display:flex;align-items:center;gap:10px;flex:none;padding:5px 24px;border-bottom:1px solid var(--border);background:#fff;min-height:44px;font-size:12px}
+.map-navigation button{border:1px solid var(--border);background:#fff;border-radius:8px;padding:4px 10px;min-height:32px;color:var(--muted);white-space:nowrap}
+.map-navigation button[aria-expanded=true]{color:var(--purple);background:var(--pale-purple);border-color:var(--accent)}
+#notation-toggle{margin-left:auto}
+.map-popover{position:absolute;top:48px;left:16px;width:310px;max-width:calc(100% - 32px);max-height:calc(100% - 110px);overflow:auto;z-index:5;background:#fff;border:1px solid var(--border);border-radius:12px;box-shadow:0 8px 24px #26384418;padding:16px}
+.map-popover h2{font-size:16px;margin:0 0 8px}.map-popover p{font-size:12px;color:var(--muted);margin-bottom:12px}.notation-panel{left:auto;right:16px;width:360px}
+.node,.node.selected,.node.kind-start,.node.kind-end,.node.kind-decision,.node.kind-fork,.node.kind-join,.node.kind-wait,.node.kind-external{border:0;background:transparent;box-shadow:none;padding:14px 16px;isolation:isolate;overflow:visible}
+.node:hover,.node.search-match{box-shadow:none}.node:focus-visible{outline:3px solid var(--focus);outline-offset:4px}
+.node-surface{position:absolute;inset:0;width:100%;height:100%;z-index:-1;overflow:visible;pointer-events:none}.node-surface>*{fill:#fff;stroke:#9baab4;stroke-width:1.3;vector-effect:non-scaling-stroke}
+.node:hover .node-surface>*,.node.search-match .node-surface>*{stroke:var(--purple);stroke-width:2}.node.selected .node-surface>*{stroke:var(--purple);stroke-width:2;fill:#f7edff}
+.node.kind-external .node-surface>*{stroke-dasharray:5 4}.node-content{display:flex;flex-direction:column;gap:7px;width:100%;position:relative}.node.kind-decision{width:280px;padding:0;justify-content:center;align-items:center}.node.kind-decision .node-content{width:140px;text-align:center;align-items:center}
+.node.kind-start,.node.kind-end{width:208px;padding:17px 22px}.node-type .symbol{display:inline-flex;width:20px;height:20px;border:0;background:transparent;border-radius:0}.symbol svg{width:20px;height:20px;display:block}.node-type{gap:6px;font-size:11px}.node-group{font-size:11px;color:var(--purple);line-height:1.35}.node-system{font-size:11px;color:var(--muted)}
+.node-gap{font-size:11px;color:#805619}.node-status{font-size:11px}.node.kind-fork .node-type,.node.kind-join .node-type{font-weight:600}.edge-visible,.edge-observed .edge-visible{stroke:#8b9ca7}.edge-label{font-size:12px;stroke-width:6px}
+.group-links{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 16px}.group-links .text-button{width:auto;font-size:12px;padding:6px 8px;min-height:32px}.group-member{display:block;margin-top:7px}.type-label.group-label{color:var(--purple)}
+.map-navigation button:hover{border-color:var(--purple);color:var(--purple)}
+@media(max-width:700px){.workspace-bar{flex-direction:column;align-items:stretch;flex-wrap:nowrap}.tabs{width:100%;min-width:0;flex:none}.tabs button{flex:1;min-width:0}.search-label{width:100%;min-width:0}.search-label input{width:100%}.map-navigation{padding:5px 12px;gap:6px}.map-navigation button{font-size:11px;padding:4px 7px}.map-popover{top:47px}.node{touch-action:manipulation}#clear-selection{font-size:0;padding:4px 8px}#clear-selection:after{content:'Сброс';font-size:11px}}
+@media(max-height:500px){.description{display:none}.page-header{padding-top:6px;padding-bottom:5px}.heading-line h1{font-size:18px}.map-footer{padding-top:5px;padding-bottom:5px}}
+@media(max-width:480px){.search-label:before,.search-label:after{display:none}.search-label input:focus{position:static;width:100%}.search-label input::placeholder{color:var(--muted)}}
+@media print{.map-navigation,.map-popover{display:none}}
+
+.heading-line{align-items:center;flex-wrap:nowrap}.heading-line h1{flex:1;min-width:0}
+.node-group{color:#687580}.node-system{color:#243F62}
+.heading-line .overview{margin:0;flex-shrink:0;justify-content:flex-end;gap:8px 18px;flex-wrap:nowrap}.overview>span{white-space:nowrap}
+.map-actions{bottom:16px}.map-navigation .stage-picker{max-width:330px;flex:0 1 330px;min-width:140px}
+@media(max-width:900px){.heading-line{flex-wrap:wrap;gap:6px}.heading-line h1{flex-basis:100%}.heading-line .overview{justify-content:flex-start}}
+@media(max-width:700px){.map-navigation .stage-picker{width:auto;flex:1;min-width:0}.map-actions{bottom:16px}.heading-line .overview{gap:5px 14px}}
 '''
 
 
@@ -172,10 +198,23 @@ const executionReviews=array(model.execution_reviews),operationsByNode=new Map()
 for(const review of executionReviews)for(const operation of array(review.operations)){const id=text(operation.node_id);if(!operationsByNode.has(id))operationsByNode.set(id,[]);operationsByNode.get(id).push({operation,review});}
 const byId = new Map(nodes.map(n => [text(n.id),n]));
 const systemById = new Map(systems.map(s => [text(s.id),s]));
+const groups=array(model.groups).filter(g=>g&&typeof g==='object'),groupById=new Map(groups.map(g=>[text(g.id),g]));
+const groupMembers=group=>nodes.filter(n=>text(n.group_id)===text(group.id)||(group.kind==='stage'&&text(groupById.get(text(n.group_id))?.parent_id)===text(group.id)));
+const nodeGroups=node=>{const operation=groupById.get(text(node.group_id));return operation?[groupById.get(text(operation.parent_id)),operation].filter(Boolean):[];};
+const nodeSearchText=node=>[node.name,node.description,systemName(node),node.input,node.output,...nodeGroups(node).map(g=>g.name)].map(text).join(' ').toLocaleLowerCase('ru');
 const kindNames={start:'Начало',action:'Действие',decision:'Условие',fork:'Параллельное выполнение',join:'Объединение',wait:'Ожидание',end:'Завершение',external:'Внешний участок'};
-const operationKinds={action:'Операция',validation:'Проверка',read:'Чтение данных',write:'Запись данных',integration:'Вызов системы',publish:'Публикация события',wait:'Ожидание',calculation:'Расчёт',transform:'Преобразование данных',error_handling:'Обработка ошибки'};
-const nodeKindLabel=node=>node.kind==='action'?(operationKinds[operationsByNode.get(text(node.id))?.[0]?.operation.kind]||kindNames.action):(kindNames[node.kind]||'Шаг сценария');
-const symbols={start:'○',action:'→',decision:'◇',fork:'⑂',join:'⑃',wait:'◷',end:'●',external:'↗'};
+const operationKinds={action:'Действие',validation:'Проверка',read:'Чтение данных',write:'Запись данных',integration:'Вызов системы',publish:'Публикация события',wait:'Ожидание',calculation:'Расчёт',transform:'Преобразование данных',error_handling:'Обработка отказа / ошибки'};
+const outcomeNames={success:'Успешное завершение',refusal:'Бизнес-отказ',failure:'Технический сбой',cancelled:'Отмена',unknown:'Завершение · исход не уточнён'};
+const nodeKindLabel=node=>node.kind==='end'&&node.outcome?(outcomeNames[node.outcome]||outcomeNames.unknown):node.kind==='action'?(operationKinds[operationsByNode.get(text(node.id))?.[0]?.operation.kind]||kindNames.action):(kindNames[node.kind]||'Шаг сценария');
+function notationIcon(kind){
+ const icon=svg('svg',{viewBox:'0 0 24 24','aria-hidden':'true',focusable:'false',fill:'none',stroke:'currentColor','stroke-width':1.6,'stroke-linecap':'round','stroke-linejoin':'round'});
+ if(kind==='start'||kind==='end'){icon.append(svg('circle',{cx:12,cy:12,r:9}));if(kind==='end')icon.append(svg('circle',{cx:12,cy:12,r:6}));}
+ else if(kind==='decision')icon.append(svg('path',{d:'M12 2 L22 12 L12 22 L2 12 Z'}));
+ else if(kind==='wait'){icon.append(svg('circle',{cx:12,cy:12,r:9}),svg('path',{d:'M12 6 V12 L16 15'}));}
+ else if(kind==='fork'||kind==='join'){icon.append(svg('path',{d:kind==='fork'?'M3 12 H10 M10 4 V20 M10 5 H21 M10 12 H21 M10 19 H21':'M3 5 H14 M3 12 H14 M3 19 H14 M14 4 V20 M14 12 H21'}));}
+ else if(kind==='external')icon.append(svg('rect',{x:3,y:3,width:18,height:18,rx:3,'stroke-dasharray':'3 3'}),svg('path',{d:'M8 16 L16 8 M9 8 H16 V15'}));
+ else icon.append(svg('rect',{x:3,y:5,width:18,height:14,rx:3}));return icon;
+}
 const edgeNames={sequence:'Далее',branch:'Ветвление',call:'Вызов',event:'Сообщение',return:'Ответ',retry:'Повтор',error:'Ошибка',data:'Передача данных'};
 const evidenceNames={observed:'Подтверждено кодом',inferred:'Вывод по коду',unknown:'Не установлено'};
 const evidenceStatus = value => Object.prototype.hasOwnProperty.call(evidenceNames,value) ? value : 'unknown';
@@ -184,34 +223,19 @@ const run=model.run || {}; const runState=Object.prototype.hasOwnProperty.call(s
 const badge = value => el('span','badge '+evidenceStatus(value),evidenceNames[evidenceStatus(value)]);
 const systemName = node => (systemById.get(text(node.system_id)) || {}).name || 'АС не установлена';
 const validEdges=edges.filter(e => byId.has(text(e.source)) && byId.has(text(e.target)));
-const positions=new Map(), nodeButtons=new Map(), edgeGroups=new Map(), registryRows=new Map();
-let selected=null, query='', zoom=1, graphWidth=1000, graphHeight=600, activeTab='map', restoreFocus=null, layoutDirty=false, matchIndex=-1;
+const positions=new Map(), nodeButtons=new Map(), edgeGroups=new Map();
+let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null;
 
 $('page-title').textContent=scenario.title || 'Карта сценария';
 const fullDescription=text(scenario.description).trim();
 $('scenario-description').textContent=fullDescription?(fullDescription.length>260?fullDescription.slice(0,257)+'…':fullDescription):'Описание выбранного варианта сценария не задано.';
-$('run-status').textContent=stateNames[runState] || 'Статус исследования не установлен';
-$('run-status').className='badge '+(runState==='unknown'?'unknown':'run-'+runState);
-$('demo-badge').hidden=run.demo!==true;
 for(const [count,label] of [[systems.length,'АС'],[nodes.length,plural(nodes.length,['шаг','шага','шагов'])],[validEdges.length,plural(validEdges.length,['переход','перехода','переходов'])],[gaps.length,plural(gaps.length,['пробел','пробела','пробелов'])]]){
  const entry=el('span'); entry.append(el('b','',count),document.createTextNode(label)); $('overview').append(entry);
 }
 function field(container,label,value){ if(!text(value).trim())return; const dl=el('dl','field');dl.append(el('dt','',label),el('dd','',value));container.append(dl); }
 function listField(container,label,values){ const items=array(values);if(!items.length)return;const section=el('div','field');section.append(el('div','muted',label));const ul=el('ul');for(const item of items)ul.append(el('li','',item));section.append(ul);container.append(section); }
-field($('scope-content'),'Описание варианта сценария',fullDescription);field($('scope-content'),'Начало',scenario.start);field($('scope-content'),'Завершение',scenario.end);
-if(Array.isArray(scenario.exclusions))listField($('scope-content'),'За пределами сценария',scenario.exclusions);else field($('scope-content'),'За пределами сценария',scenario.exclusions);
-if(Array.isArray(scenario.assumptions))listField($('scope-content'),'Принятые допущения',scenario.assumptions);else field($('scope-content'),'Принятые допущения',scenario.assumptions);
-for(const source of array(model.sources))field($('scope-content'),'Источник: '+(source.name || source.id),[source.kind,Number.isFinite(source.file_count)?source.file_count+' файлов':''].filter(Boolean).join(' · '));
-if(!array(model.sources).length)field($('scope-content'),'Материалы','Источники не указаны.');
-field($('scope-content'),'Результат исследования',run.reason);
-listField($('scope-content'),'Ограничения анализа',array(model.limitations).length?model.limitations:run.limitations);
-listField($('scope-content'),'Примечания к источникам',model.source_notes);
-listField($('scope-content'),'Материалы, не вошедшие в исследование',omissions);
-listField($('scope-content'),'Незакрытые проверки карты',validationIssues);
-field($('scope-content'),'Границы достоверности','Карта восстановлена по переданным материалам. Подтверждение в коде не гарантирует поведение работающих систем и полноту бизнес-процесса.');
-if(!$('detail-badge').hidden)field($('scope-content'),'Детализация карты','Эта версия результата не содержит проверенного реестра атомарных операций. Узлы показаны полностью, но детальность исследования не подтверждена.');
 if(run.reason&&(runState==='partial'||runState==='failed')){$('run-note').textContent=text(run.reason);$('run-note').hidden=false;}
-if(validationIssues.length||omissions.length){const notice=el('button','checks-notice');notice.type='button';notice.textContent=[omissions.length?'Пропуски материалов: '+omissions.length:'',validationIssues.length?'Незакрытые проверки: '+validationIssues.length:''].filter(Boolean).join(' · ')+' — посмотреть';notice.addEventListener('click',()=>activateTab('gaps'));$('panel-map').insertBefore(notice,$('viewport'));}
+if(validationIssues.length||omissions.length){const notice=el('button','checks-notice');notice.type='button';notice.textContent=[omissions.length?'Пропуски материалов: '+omissions.length:'',validationIssues.length?'Незакрытые проверки: '+validationIssues.length:''].filter(Boolean).join(' · ')+' — посмотреть';notice.addEventListener('click',showFindings);$('panel-map').insertBefore(notice,$('viewport'));}
 
 function evidenceBlock(container,items,label='Основания в исходниках'){
  const evidence=array(items); if(!evidence.length)return;
@@ -225,12 +249,41 @@ function evidenceBlock(container,items,label='Основания в исходн
  }details.append(box);}container.append(details);
 }
 function relatedButton(container,label,callback){const b=el('button','text-button',label);b.type='button';b.addEventListener('click',callback);container.append(b);return b;}
+function closePopovers(){for(const name of ['notation']){$(name+'-panel').hidden=true;$(name+'-toggle').setAttribute('aria-expanded','false');}}
+for(const name of ['notation'])$(name+'-toggle').addEventListener('click',()=>{const open=$(name+'-panel').hidden;closePopovers();$(name+'-panel').hidden=!open;$(name+'-toggle').setAttribute('aria-expanded',String(open));});
+document.addEventListener('pointerdown',event=>{if(!event.target.closest('.map-popover,.map-navigation'))closePopovers();});
+document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const name of ['notation'])if(!$(name+'-panel').hidden){closePopovers();$(name+'-toggle').focus();event.preventDefault();break;}});
+for(const [kind,label] of [['start','Начало сценария'],['action','Атомарное действие'],['decision','Условие и альтернативные ветви'],['fork','Запуск параллельных ветвей'],['join','Синхронизация параллельных ветвей'],['wait','Ожидание события или результата'],['end','Исход: успех, отказ, сбой или отмена'],['external','Внешний участок с ограниченным описанием']]){const row=el('div','notation-item');row.append(notationIcon(kind),el('span','',label));$('notation-items').append(row);}
+function showGroup(group){
+ const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',group.kind==='stage'?'ЭТАП':'БИЗНЕС-ОПЕРАЦИЯ'),el('h2','',group.name));
+ field(panel,'Бизнес-смысл',group.description);field(panel,group.kind==='stage'?'Промежуточная цель':'Отделимый результат',group.result);
+ const parent=groupById.get(text(group.parent_id));if(parent)relatedButton(panel,'Этап: '+parent.name,()=>selectGroup(parent));
+ panel.append(el('p','muted','Бизнес-группировка действий по материалам исследования. Порядок исполнения определяется переходами карты.'));
+ if(group.kind==='stage')for(const operation of groups.filter(g=>text(g.parent_id)===text(group.id)))relatedButton(panel,'Операция: '+operation.name,()=>selectGroup(operation));
+ const members=groupMembers(group);panel.append(el('h3','details','Состав · '+members.length));
+ for(const node of members)relatedButton(panel,(node.name||node.id)+' · '+systemName(node),()=>selectNode(node,true)).classList.add('group-member');
+ evidenceBlock(panel,group.evidence,'Основания группировки');
+}
+function selectGroup(group){
+ closePopovers();selected={type:'group',id:group.id};showGroup(group);openInspector();updateHighlight();
+ const members=groupMembers(group);requestAnimationFrame(()=>frameGroup(group));announce('Выбрана группа: '+group.name+'. Действий и управляющих узлов: '+members.length);
+}
+const stages=groups.filter(g=>g.kind==='stage');
+for(const stage of stages){const option=el('option','',stage.name);option.value=text(stage.id);$('stage-select').append(option);}
+$('stage-select').disabled=!stages.length;
+if(!stages.length)$('stage-select').options[0].textContent='Этапы не заданы';
+$('stage-select').addEventListener('change',()=>{
+ const group=groupById.get($('stage-select').value);closePopovers();closeInspector(false);
+ if(group){selected={type:'group',id:group.id};updateHighlight();requestAnimationFrame(()=>frameGroup(group));announce('Выбран этап: '+group.name);}
+ else{requestAnimationFrame(initialView);announce('Показаны все этапы');}
+});
+$('clear-selection').addEventListener('click',()=>closeInspector());
 function showOverview(){
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
  panel.append(el('p','muted',model.summary || 'Выберите шаг на карте, чтобы увидеть его бизнес-смысл, вход, результат и подтверждения в коде. Переходы открываются отдельно.'));
- field(panel,'Начало',scenario.start);field(panel,'Завершение',scenario.end);
+ field(panel,'Описание варианта сценария',fullDescription);field(panel,'Начало',scenario.start);field(panel,'Завершение',scenario.end);
  panel.append(el('p','muted','Граф показывает шаги и переходы выбранного сценария. АС указана у каждого шага. Пунктирные связи содержат вывод или остаются неподтверждёнными.'));
- if(openFindings)relatedButton(panel,'Посмотреть пробелы и проверки ('+openFindings+')',()=>activateTab('gaps'));
+ if(openFindings)relatedButton(panel,'Посмотреть пробелы и проверки ('+openFindings+')',showFindings);
  const details=el('details','details');details.append(el('summary','','Что проверено'));
  details.append(el('p','muted','Основания показывают найденные участки исходников. Их наличие не доказывает правильность бизнес-интерпретации и полноту карты.'));
  for(const review of array(model.source_reviews)){const source=array(model.sources).find(s=>s.id===review.source_id);const disposition={reviewed:'Рассмотрен',out_of_scope:'Вне выбранного сценария',unavailable:'Недоступен'}[review.disposition];const inspection=review.disposition==='out_of_scope'&&review.inspected===false?'Исключение без изучения кода':Number.isFinite(review.read_files)?'Прочитано файлов: '+review.read_files:'';field(details,source?.name || review.source_id || 'Источник',[disposition,inspection,review.summary || review.reason || review.description].filter(Boolean).join('\n'));}
@@ -239,7 +292,8 @@ function showOverview(){
 function showNode(node){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',nodeKindLabel(node)),badge(node.evidence_status),el('h2','',node.name || node.id));
  field(panel,'Бизнес-смысл',node.description);field(panel,'Автоматизированная система',systemName(node));field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);
- for(const {operation,review} of operationsByNode.get(text(node.id))||[]){const section=el('div','details');section.append(el('h3','','Атомарная операция'));field(section,'Действие',operation.action);field(section,'Проверяемый результат',operation.effect);field(section,'При ошибке',operation.failure);field(section,'Условие операции',operation.condition);evidenceBlock(section,operation.evidence,'Основания операции');panel.append(section);}
+ const ancestry=nodeGroups(node);if(ancestry.length){const links=el('div','group-links');for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Операция: ')+group.name,()=>selectGroup(group));panel.append(links);}
+ for(const {operation,review} of operationsByNode.get(text(node.id))||[]){const section=el('div','details');section.append(el('h3','','Атомарное действие'));field(section,'Действие',operation.action);field(section,'Проверяемый результат',operation.effect);field(section,'При ошибке',operation.failure);field(section,'Условие действия',operation.condition);evidenceBlock(section,operation.evidence,'Основания действия');panel.append(section);}
  if(node.parent_id && byId.has(text(node.parent_id)))field(panel,'Часть шага',byId.get(text(node.parent_id)).name);
  const related=validEdges.filter(e=>text(e.source)===text(node.id) || text(e.target)===text(node.id));
  if(related.length){const area=el('div','details');area.append(el('h3','','Переходы'));const buttons=el('div','related');for(const edge of related){const outgoing=text(edge.source)===text(node.id);const peer=byId.get(text(outgoing?edge.target:edge.source));relatedButton(buttons,(outgoing?'→ ':'← ')+(peer.name || peer.id)+' · '+(edgeNames[edge.kind] || 'Связь'),()=>selectEdge(edge));}area.append(buttons);panel.append(area);}
@@ -256,46 +310,76 @@ function showEdge(edge){
  if(!array(edge.evidence).length&&!array(edge.sender_evidence).length&&!array(edge.receiver_evidence).length)field(panel,'Основания','Подтверждающие фрагменты для перехода не представлены.');
 }
 function updateHighlight(){
- const neighborIds=new Set();if(selected?.type==='node'){neighborIds.add(text(selected.id));for(const e of validEdges)if(text(e.source)===text(selected.id)||text(e.target)===text(selected.id)){neighborIds.add(text(e.source));neighborIds.add(text(e.target));}}
+ const neighborIds=new Set();if(selected?.type==='node'){const node=byId.get(text(selected.id)),operation=groupById.get(text(node?.group_id));for(const member of operation?groupMembers(operation):[node])if(member)neighborIds.add(text(member.id));}
  if(selected?.type==='edge'){const e=selected.edge;neighborIds.add(text(e.source));neighborIds.add(text(e.target));}
- for(const node of nodes){const button=nodeButtons.get(text(node.id));const haystack=[node.name,node.description,systemName(node),node.input,node.output].map(text).join(' ').toLocaleLowerCase('ru');const match=!query||haystack.includes(query);if(button){button.classList.toggle('selected',selected?.type==='node'&&text(selected.id)===text(node.id));button.setAttribute('aria-pressed',String(selected?.type==='node'&&text(selected.id)===text(node.id)));button.classList.toggle('dimmed',!match||(!!selected&&!neighborIds.has(text(node.id))));button.classList.toggle('search-match',!!query&&match);}const row=registryRows.get(text(node.id));if(row)row.hidden=!match;}
- for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=selected?.type==='node'&&(text(edge.source)===text(selected.id)||text(edge.target)===text(selected.id));group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
- const found=nodes.filter(n=>!query||[n.name,n.description,systemName(n),n.input,n.output].map(text).join(' ').toLocaleLowerCase('ru').includes(query)).length;
- $('search-result').textContent=query?'Найдено шагов: '+found+' из '+nodes.length:'Подробная карта выбранного сценария';$('registry-empty').hidden=found>0;
+ if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group)for(const node of groupMembers(group))neighborIds.add(text(node.id));}
+ const selectedGroup=selected?.type==='group'?groupById.get(text(selected.id)):null;
+ $('clear-selection').hidden=!selected;
+ const selectedStage=selectedGroup?.kind==='stage'?selectedGroup:null;
+ $('stage-select').value=selectedStage?text(selectedStage.id):'';
+ for(const node of nodes){const button=nodeButtons.get(text(node.id));if(button){button.classList.toggle('in-scope',!!selected&&neighborIds.has(text(node.id)));button.classList.toggle('selected',selected?.type==='node'&&text(selected.id)===text(node.id));button.setAttribute('aria-pressed',String(selected?.type==='node'&&text(selected.id)===text(node.id)));button.classList.toggle('dimmed',!!selected&&!neighborIds.has(text(node.id)));}}
+ for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=(selected?.type==='node'||selected?.type==='group')&&neighborIds.has(text(edge.source))&&neighborIds.has(text(edge.target));group.classList.toggle('in-scope',isRelated);group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
 }
 function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
 function openInspector(){if($('inspector').hidden)restoreFocus=document.activeElement;$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
 function closeInspector(restore=true){selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore&&restoreFocus&&document.contains(restoreFocus))restoreFocus.focus({preventScroll:true});restoreFocus=null;}
-function selectNode(node,center=false){selected={type:'node',id:node.id};showNode(node);openInspector();updateHighlight();announce('Выбран шаг: '+(node.name||node.id));if(center){activateTab('map');requestAnimationFrame(()=>centerNode(node));}else if(window.innerWidth>700)centerNode(node);}
-function selectEdge(edge){selected={type:'edge',id:edge.id,edge};showEdge(edge);openInspector();updateHighlight();announce('Выбран переход: '+(edge.description||edgeNames[edge.kind]||'Связь'));}
+function selectNode(node,center=false){closePopovers();selected={type:'node',id:node.id};showNode(node);openInspector();updateHighlight();announce('Выбран шаг: '+(node.name||node.id));if(center){requestAnimationFrame(()=>centerNode(node));}else if(window.innerWidth>700)centerNode(node);}
+function selectEdge(edge){closePopovers();selected={type:'edge',id:edge.id,edge};showEdge(edge);openInspector();updateHighlight();announce('Выбран переход: '+(edge.description||edgeNames[edge.kind]||'Связь'));}
 function centerNode(node){const p=positions.get(text(node.id));if(!p)return;const view=$('viewport'),stage=$('stage');view.scrollTo({left:Math.max(0,(p.x+p.w/2)*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(p.y+p.h/2)*zoom+(parseFloat(stage.style.top)||0)-view.clientHeight/2)});}
-function activateTab(name){activeTab=name;for(const candidate of ['map','registry','gaps']){const active=candidate===name;const tab=$('tab-'+candidate);tab.setAttribute('aria-selected',String(active));tab.tabIndex=active?0:-1;$('panel-'+candidate).hidden=!active;}if(name==='map')requestAnimationFrame(()=>{if(layoutDirty){layoutDirty=false;draw();initialView();}else applyZoom(zoom);});}
-for(const name of ['map','registry','gaps']){const tab=$('tab-'+name);tab.addEventListener('click',()=>{closeInspector(false);activateTab(name);});tab.addEventListener('keydown',event=>{const names=['map','registry','gaps'];let index=names.indexOf(name);if(event.key==='ArrowRight')index=(index+1)%3;else if(event.key==='ArrowLeft')index=(index+2)%3;else if(event.key==='Home')index=0;else if(event.key==='End')index=2;else return;event.preventDefault();closeInspector(false);activateTab(names[index]);$('tab-'+names[index]).focus();});}
+function frameGroup(group){
+ const members=groupMembers(group).map(n=>positions.get(text(n.id))).filter(Boolean);if(!members.length)return;
+ const left=Math.min(...members.map(p=>p.x)),top=Math.min(...members.map(p=>p.y)),right=Math.max(...members.map(p=>p.x+p.w)),bottom=Math.max(...members.map(p=>p.y+p.h));
+ const view=$('viewport');applyZoom(Math.min(1,(availableWidth()-48)/(right-left),Math.max(40,view.clientHeight-96)/(bottom-top)));
+ const stage=$('stage');view.scrollTo({left:Math.max(0,(left+right)/2*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(top+bottom)/2*zoom+(parseFloat(stage.style.top)||0)-(view.clientHeight-48)/2)});
+}
 $('close-inspector').addEventListener('click',()=>closeInspector());
-document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}else if(event.key==='Escape'){const scope=document.querySelector('.scope');if(scope.open){scope.open=false;scope.querySelector('summary').focus();}}});
-document.addEventListener('pointerdown',event=>{const scope=document.querySelector('.scope');if(scope.open&&!scope.contains(event.target))scope.open=false;});
-$('search').addEventListener('input',event=>{query=event.target.value.trim().toLocaleLowerCase('ru');matchIndex=-1;updateHighlight();announce($('search-result').textContent+(query?'. Enter — перейти к совпадению.':''));});
-$('search').addEventListener('keydown',event=>{if(event.key==='Escape'){$('search').value='';query='';matchIndex=-1;updateHighlight();}else if(event.key==='Enter'&&query){const matches=nodes.filter(n=>[n.name,n.description,systemName(n),n.input,n.output].map(text).join(' ').toLocaleLowerCase('ru').includes(query));if(matches.length){event.preventDefault();matchIndex=(matchIndex+1)%matches.length;selectNode(matches[matchIndex],true);}}});
+document.addEventListener('keydown',event=>{if(event.defaultPrevented)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
 
-for(const node of nodes){const row=el('tr');const name=el('td');relatedButton(name,node.name || node.id,()=>selectNode(node,true));name.append(el('span','type-label',nodeKindLabel(node)));const status=el('td');status.append(badge(node.evidence_status));row.append(name,el('td','',systemName(node)),el('td','',node.description || 'Описание не задано'),status);$('registry').append(row);registryRows.set(text(node.id),row);}
-if(!openFindings)$('gaps').append(el('p','empty','Агент не зафиксировал пробелов. Это не является гарантией полноты карты.'));
-for(const gap of gaps){const card=el('article','gap');card.append(el('p','',gap.description || 'Описание пробела не задано.'));const links=el('div','related');for(const id of array(gap.node_ids)){const node=byId.get(text(id));if(node)relatedButton(links,node.name || node.id,()=>selectNode(node,true));}for(const id of array(gap.system_ids)){const system=systemById.get(text(id));if(system){const label=el('span','badge '+evidenceStatus(system.evidence_status),'АС: '+(system.name || system.id)+(evidenceStatus(system.evidence_status)==='unknown'?' · Не установлено':''));links.append(label);}}card.append(links);$('gaps').append(card);}
-for(const [category,items] of [['Материал не исследован',omissions],['Незакрытая проверка карты',validationIssues]])for(const item of items){const card=el('article','gap');card.append(el('div','gap-category',category),el('p','',typeof item==='object'?(item.description||item.message||item.reason||item):item));$('gaps').append(card);}
-if(edges.length!==validEdges.length){const card=el('article','gap');card.append(el('p','','Часть переходов ссылается на отсутствующие шаги и не может быть показана: '+(edges.length-validEdges.length)+'.'));$('gaps').append(card);}
+function showFindings(){
+ closePopovers();selected=null;const panel=$('inspector-content');panel.replaceChildren();
+ panel.append(el('h2','','Что осталось установить'));
+ field(panel,'Результат исследования',stateNames[runState]||'Статус исследования не установлен');
+ listField(panel,'Материалы, не вошедшие в исследование',omissions);
+ listField(panel,'Примечания к источникам',model.source_notes);
+ listField(panel,'Незакрытые проверки карты',validationIssues);
+ listField(panel,'Ограничения анализа',array(model.limitations).length?model.limitations:run.limitations);
+if(!openFindings)panel.append(el('p','empty','Агент не зафиксировал пробелов. Это не является гарантией полноты карты.'));
+for(const gap of gaps){const card=el('article','gap');card.append(el('p','',gap.description || 'Описание пробела не задано.'));const links=el('div','related');for(const id of array(gap.node_ids)){const node=byId.get(text(id));if(node)relatedButton(links,node.name || node.id,()=>selectNode(node,true));}for(const id of array(gap.system_ids)){const system=systemById.get(text(id));if(system){const label=el('span','badge '+evidenceStatus(system.evidence_status),'АС: '+(system.name || system.id)+(evidenceStatus(system.evidence_status)==='unknown'?' · Не установлено':''));links.append(label);}}card.append(links);panel.append(card);}
+for(const [category,items] of [['Материал не исследован',omissions],['Незакрытая проверка карты',validationIssues]])for(const item of items){const card=el('article','gap');card.append(el('div','gap-category',category),el('p','',typeof item==='object'?(item.description||item.message||item.reason||item):item));panel.append(card);}
+if(edges.length!==validEdges.length){const card=el('article','gap');card.append(el('p','','Часть переходов ссылается на отсутствующие шаги и не может быть показана: '+(edges.length-validEdges.length)+'.'));panel.append(card);}
+
+ openInspector();updateHighlight();
+}
 
 __GRAPH_LAYOUT_JS__
 function draw(){
  const nodeContainer=$('nodes');nodeContainer.replaceChildren();$('connections').replaceChildren();positions.clear();nodeButtons.clear();edgeGroups.clear();
  if(!nodes.length){$('empty-map').hidden=false;$('canvas-size').hidden=true;return;}else{$('empty-map').hidden=true;$('canvas-size').hidden=false;}
  const vertical=$('viewport').clientWidth<740,sizes=new Map();
- for(const node of nodes){const id=text(node.id),kind=Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';const button=el('button','node kind-'+kind);button.type='button';button.setAttribute('aria-label',nodeKindLabel(node)+': '+(node.name||node.id)+'. '+systemName(node)+'. '+evidenceNames[evidenceStatus(node.evidence_status)]);button.setAttribute('aria-pressed','false');const type=el('span','node-type');type.append(el('span','symbol',symbols[kind]),document.createTextNode(nodeKindLabel(node)));button.append(type,el('span','node-name',node.name || node.id),el('span','node-system','АС · '+systemName(node)),el('span','node-status '+evidenceStatus(node.evidence_status),evidenceNames[evidenceStatus(node.evidence_status)]));button.addEventListener('click',()=>selectNode(node));nodeContainer.append(button);nodeButtons.set(id,button);sizes.set(id,{w:224,h:button.offsetHeight});}
+ for(const node of nodes){
+  const id=text(node.id),kind=Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';
+  const button=el('button','node kind-'+kind);button.type='button';button.dataset.nodeId=id;
+  button.setAttribute('aria-label',nodeKindLabel(node)+': '+(node.name||node.id)+'. '+systemName(node)+'. '+evidenceNames[evidenceStatus(node.evidence_status)]);button.setAttribute('aria-pressed','false');
+  const content=el('span','node-content');
+  content.append(el('span','node-name',node.name||node.id));
+  const operation=groupById.get(text(node.group_id));if(operation){const label=el('span','node-group',operation.name);label.title=nodeGroups(node).map(g=>g.name).join(' / ');content.append(label);}
+  content.append(el('span','node-system','АС · '+systemName(node)));
+  content.append(el('span','node-status '+evidenceStatus(node.evidence_status),evidenceNames[evidenceStatus(node.evidence_status)]));
+  const findingCount=gaps.filter(g=>array(g.node_ids).map(text).includes(id)).length;if(findingCount)content.append(el('span','node-gap','Не установлено: '+findingCount));
+  button.append(content);button.addEventListener('click',()=>selectNode(node));nodeContainer.append(button);
+  if(kind==='decision')button.style.height=Math.max(230,content.offsetHeight*2+32)+'px';
+  const w=button.offsetWidth,h=button.offsetHeight,surface=svg('svg',{'class':'node-surface',viewBox:'0 0 '+w+' '+h,'aria-hidden':'true',focusable:'false'});
+  if(kind==='decision')surface.append(svg('path',{d:`M ${w/2} 1 L ${w-1} ${h/2} L ${w/2} ${h-1} L 1 ${h/2} Z`}));
+  else surface.append(svg('rect',{x:1,y:1,width:w-2,height:h-2,rx:kind==='start'||kind==='end'?Math.min(38,h/2):12}));
+  button.prepend(surface);nodeButtons.set(id,button);sizes.set(id,{w,h});
+ }
  const layout=layoutScenarioGraph(nodes,validEdges,sizes,vertical),rank=layout.rank;graphWidth=layout.width;graphHeight=layout.height;
  for(const [id,p] of layout.positions){positions.set(id,p);const button=nodeButtons.get(id);button.style.left=p.x+'px';button.style.top=p.y+'px';}
  $('stage').style.width=graphWidth+'px';$('stage').style.height=graphHeight+'px';
  const drawing=$('connections');drawing.setAttribute('width',graphWidth);drawing.setAttribute('height',graphHeight);drawing.setAttribute('viewBox','0 0 '+graphWidth+' '+graphHeight);
- const defs=svg('defs');const marker=svg('marker',{id:'arrow',viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#B7C2CB'}));defs.append(marker);drawing.append(defs);
- const labelContext=document.createElement('canvas').getContext('2d');if(labelContext)labelContext.font="11px 'SB Sans Display', Arial, sans-serif";
+ const defs=svg('defs');const marker=svg('marker',{id:'arrow',viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#8b9ca7'}));defs.append(marker);drawing.append(defs);
+ const labelContext=document.createElement('canvas').getContext('2d');if(labelContext)labelContext.font="12px 'SB Sans Display', Arial, sans-serif";
  const labelWidth=value=>labelContext?labelContext.measureText(value).width:value.length*6.5;
  function wrapLabel(value,width,maxLines){const words=text(value).trim().split(/\s+/),lines=[];let line='';for(const word of words){if(line&&labelWidth(line+' '+word)<=width){line+=' '+word;continue;}if(line){lines.push(line);line='';}if(labelWidth(word)<=width){line=word;continue;}let part='';for(const char of word){if(part&&labelWidth(part+char)>width){lines.push(part);part='';}part+=char;}line=part;}if(line)lines.push(line);if(lines.length>maxLines){lines.length=maxLines;while(lines[maxLines-1]&&labelWidth(lines[maxLines-1]+'…')>width)lines[maxLines-1]=lines[maxLines-1].slice(0,-1);lines[maxLines-1]+='…';}return lines;}
  let backIndex=0;const pairCounts=new Map(),pairUsed=new Map();for(const edge of validEdges){const key=JSON.stringify([edge.source,edge.target]);pairCounts.set(key,(pairCounts.get(key)||0)+1);}
@@ -306,9 +390,9 @@ function draw(){
  else{start={x:a.x+a.w,y:a.y+a.h/2+port};end={x:b.x-3,y:b.y+b.h/2+port};const reach=Math.max(34,(end.x-start.x)*.5);c1={x:start.x+reach,y:start.y+bend};c2={x:end.x-reach,y:end.y+bend};}
  const path=routed?routed.path:`M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
  const labelX=routed?routed.label.x:(start.x+3*c1.x+3*c2.x+end.x)/8,labelY=routed?routed.label.y:(start.y+3*c1.y+3*c2.y+end.y)/8-9;
- const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','aria-label':(edgeNames[edge.kind]||'Связь')+': '+(byId.get(text(edge.source)).name||edge.source)+' → '+(byId.get(text(edge.target)).name||edge.target)+(edge.condition?'. '+edge.condition:'')});
+ const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','data-edge-id':text(edge.id),'aria-label':(edgeNames[edge.kind]||'Связь')+': '+(byId.get(text(edge.source)).name||edge.source)+' → '+(byId.get(text(edge.target)).name||edge.target)+(edge.condition?'. '+edge.condition:'')});
  const title=svg('title');title.textContent=[edge.description,edge.condition,evidenceNames[evidenceStatus(edge.evidence_status)]].filter(Boolean).join(' · ');group.append(title,svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
- if(edge.kind!=='sequence'||edge.condition){const forward=rank.get(text(edge.target))>rank.get(text(edge.source));const freeWidth=vertical&&routed?90:!vertical&&forward?Math.max(24,b.x-(a.x+a.w)-18):170;const lines=wrapLabel(edge.condition || edgeNames[edge.kind] || 'Связь',freeWidth,vertical&&forward&&!routed?2:4);const label=svg('text',{'text-anchor':vertical&&routed?'end':'middle','class':'edge-label'});const top=labelY-(lines.length-1)*6.5;for(let line=0;line<lines.length;line++){const span=svg('tspan',{x:labelX,y:top+line*13});span.textContent=lines[line];label.append(span);}group.append(label);}
+ if(edge.kind!=='sequence'||edge.condition||byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id){const forward=rank.get(text(edge.target))>rank.get(text(edge.source));const freeWidth=vertical&&routed?90:!vertical&&forward?Math.max(24,b.x-(a.x+a.w)-18):170;const lines=wrapLabel(edge.condition || (byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id?(edgeNames[edge.kind]||'Переход')+' между АС':edgeNames[edge.kind]) || 'Связь',freeWidth,vertical&&forward&&!routed?2:4);const label=svg('text',{'text-anchor':vertical&&routed?'end':'middle','class':'edge-label'});const top=labelY-(lines.length-1)*6.5;for(let line=0;line<lines.length;line++){const span=svg('tspan',{x:labelX,y:top+line*13});span.textContent=lines[line];label.append(span);}group.append(label);}
  group.addEventListener('click',()=>selectEdge(edge));group.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectEdge(edge);}});drawing.append(group);edgeGroups.set(text(edge.id),group);
  }
  applyZoom(zoom);updateHighlight();
@@ -316,15 +400,15 @@ function draw(){
 function minimumZoom(){return Math.max(.001,Math.min(.16,(availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight));}
 function applyZoom(value,anchor){const view=$('viewport');const old=zoom;zoom=Math.min(1.7,Math.max(minimumZoom(),value));const padX=Math.max(0,(availableWidth()-graphWidth*zoom)/2),padY=Math.max(0,(view.clientHeight-graphHeight*zoom)/2);$('stage').style.transform='scale('+zoom+')';$('stage').style.left=padX+'px';$('stage').style.top=padY+'px';$('canvas-size').style.width=graphWidth*zoom+padX*2+(view.clientWidth-availableWidth())+'px';$('canvas-size').style.height=graphHeight*zoom+padY*2+'px';$('zoom-value').textContent=Math.round(zoom*100)+'%';$('zoom-out').disabled=zoom<=minimumZoom();$('zoom-in').disabled=zoom>=1.7;if(anchor){view.scrollLeft=(view.scrollLeft+anchor.x)*zoom/old-anchor.x;view.scrollTop=(view.scrollTop+anchor.y)*zoom/old-anchor.y;}}
 function fit(){if(!nodes.length)return;const view=$('viewport');applyZoom(Math.min((availableWidth()-24)/graphWidth,(view.clientHeight-24)/graphHeight,1));view.scrollTo(0,0);}
-function initialView(){if(!nodes.length)return;const fitted=Math.min((availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight,1);applyZoom(Math.max(.8,fitted));if(fitted<.8)centerNode(nodes.find(n=>n.kind==='start')||nodes[0]);else $('viewport').scrollTo(0,0);}
+function initialView(){if(!nodes.length)return;if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group){frameGroup(group);return;}}const fitted=Math.min((availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight,1);applyZoom(Math.max(.8,fitted));if(fitted<.8)centerNode(nodes.find(n=>n.kind==='start')||nodes[0]);else $('viewport').scrollTo(0,0);}
 function zoomBy(factor){const view=$('viewport');applyZoom(zoom*factor,{x:availableWidth()/2,y:view.clientHeight/2});}
 $('zoom-in').addEventListener('click',()=>zoomBy(1.2));$('zoom-out').addEventListener('click',()=>zoomBy(1/1.2));$('fit').addEventListener('click',fit);
-$('reset').addEventListener('click',()=>{closeInspector(false);query='';$('search').value='';showOverview();updateHighlight();applyZoom(1);$('viewport').scrollTo(0,0);announce('Выбор и поиск сброшены. Масштаб 100 процентов.');});
+$('reset').addEventListener('click',()=>{closeInspector(false);showOverview();updateHighlight();applyZoom(1);if(nodes.length)centerNode(nodes.find(n=>n.kind==='start')||nodes[0]);announce('Выбор сброшен. Масштаб 100 процентов.');});
 const viewport=$('viewport');viewport.addEventListener('keydown',event=>{if(event.target!==viewport)return;if(event.key==='+'||event.key==='='){event.preventDefault();zoomBy(1.2);}else if(event.key==='-'){event.preventDefault();zoomBy(1/1.2);}else if(event.key==='0'){event.preventDefault();fit();}else if(event.key==='Escape'){selected=null;showOverview();updateHighlight();}});
 viewport.addEventListener('wheel',event=>{if(!event.ctrlKey&&!event.metaKey)return;event.preventDefault();const rect=viewport.getBoundingClientRect();applyZoom(zoom*(event.deltaY<0?1.08:1/1.08),{x:event.clientX-rect.left,y:event.clientY-rect.top});},{passive:false});
 let drag=null;viewport.addEventListener('pointerdown',event=>{if(event.button!==0||event.pointerType==='touch'||event.target.closest('button,.edge'))return;drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};viewport.setPointerCapture(event.pointerId);viewport.classList.add('dragging');});viewport.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;viewport.scrollLeft=drag.left-(event.clientX-drag.x);viewport.scrollTop=drag.top-(event.clientY-drag.y);});const stopDrag=()=>{drag=null;viewport.classList.remove('dragging');};viewport.addEventListener('pointerup',stopDrag);viewport.addEventListener('pointercancel',stopDrag);viewport.addEventListener('lostpointercapture',stopDrag);
-let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{if(activeTab==='map'){draw();initialView();}else layoutDirty=true;});});
+let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{draw();initialView();});});
 showOverview();draw();initialView();updateHighlight();
-if(document.fonts?.ready)document.fonts.ready.then(()=>{if(activeTab==='map'){draw();initialView();}else layoutDirty=true;});
+if(document.fonts?.ready)document.fonts.ready.then(()=>{draw();initialView();});
 })();
 '''.replace('__GRAPH_LAYOUT_JS__', _GRAPH_LAYOUT_JS)

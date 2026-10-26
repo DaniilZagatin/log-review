@@ -90,7 +90,7 @@ def _compact(messages: list[dict], state: MapState, budget: int) -> list[dict]:
         summary = _json({"title": str(model["scenario"].get("title", ""))[:120],
                          "status": model["run"].get("status", "running"),
                          "counts": {k: len(model.get(k, [])) for k in
-                                    ("nodes", "edges", "systems", "gaps")},
+                                    ("nodes", "edges", "systems", "groups", "gaps")},
                          "instruction": "Используй inspect_map для чтения сохранённой карты по частям."})
         candidate = pack(summary)
     record("context_compacted", messages_before=len(messages), retained_chars=len(summary))
@@ -180,7 +180,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     state.model["run"].update(status="partial", reason="Достигнут лимит времени исследования.")
                     break
                 state.model["run"]["steps"] = step
-                messages = _compact(messages, state, context_budget)
+                if sum(len(_json(m)) for m in messages) > context_budget:
+                    with trace_span("compact_context", messages_before=len(messages)) as compact_span:
+                        messages = _compact(messages, state, context_budget)
+                        compact_span.set_attribute("messages_after", len(messages))
                 if sum(len(_json(m)) for m in messages) > context_budget:
                     raise ValueError("Сохранённый контекст не помещается в окно модели; карта сохранена частично.")
                 with trace_span("scenario_step", step=step):
@@ -206,8 +209,9 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     accepted_finish = False
                     for call in calls:
                         if accepted_finish or time.monotonic() - started >= max_seconds:
-                            answer = {"role": "tool", "tool_call_id": call.get("id", ""),
-                                      "content": _json({"ok": False, "error": "Исследование уже остановлено."})}
+                            answer = trace_tool_call(lambda owner, c: {
+                                "role": "tool", "tool_call_id": c.get("id", ""),
+                                "content": _json({"ok": False, "error": "Исследование уже остановлено."})}, toolkit, call)
                         else:
                             answer = trace_tool_call(lambda owner, c: owner.answer(c), toolkit, call)
                         messages.append(answer)

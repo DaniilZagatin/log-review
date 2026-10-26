@@ -16,8 +16,10 @@ from typing import Any
 from pko.extractors.base import is_vendor
 from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 STEP_KINDS = ("start", "action", "decision", "fork", "join", "wait", "end", "external")
+GROUP_KINDS = ("stage", "operation")
+OUTCOME_KINDS = ("success", "refusal", "failure", "cancelled", "unknown")
 EDGE_KINDS = ("sequence", "branch", "call", "event", "return", "retry", "error", "data")
 EVIDENCE_STATUSES = ("observed", "inferred", "unknown")
 MAX_SYSTEMS, MAX_NODES, MAX_EDGES, MAX_GAPS = 100, 500, 1500, 500
@@ -26,7 +28,7 @@ MAX_TEXT = 6000
 OPERATION_KINDS = ("action", "validation", "read", "write", "integration", "publish", "wait", "calculation", "transform", "error_handling")
 OPERATION_NODE_KINDS = ("action", "decision", "wait", "external")
 EXECUTION_CHECKS = ("branches", "failures", "integrations", "state_changes", "computations")
-INSPECT_SECTIONS = ("summary", "scenario", "systems", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "validation")
+INSPECT_SECTIONS = ("summary", "scenario", "systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "validation")
 LIMITATIONS = [
     "Карта ограничена выбранным вариантом сценария и переданными материалами.",
     "Статический анализ и проверка цитат не доказывают исполнение в рабочей среде, полноту анализа или правильность бизнес-интерпретации.",
@@ -71,7 +73,7 @@ class MapState:
         self.workspace = workspace
         self._files = set(workspace.tree.files)
         self._reads: dict[str, dict[int, str]] = {}
-        self._counters = {"sys": 0, "step": 0, "edge": 0, "gap": 0, "review": 0, "op": 0}
+        self._counters = {"sys": 0, "group": 0, "step": 0, "edge": 0, "gap": 0, "review": 0, "op": 0}
         sources = [asdict(s) if is_dataclass(s) else deepcopy(s) for s in workspace.sources]
         source_ids = [s.get("id") for s in sources]
         if not source_ids or any(not isinstance(s, str) or not s for s in source_ids):
@@ -82,8 +84,8 @@ class MapState:
         self.model: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=20000),
-                         "title": "", "start": "", "end": "", "exclusions": [], "assumptions": []},
-            "sources": sources, "systems": [], "nodes": [], "edges": [], "gaps": [],
+                         "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": []},
+            "sources": sources, "systems": [], "groups": [], "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [],
             "run": {"status": "running", "reason": "", "steps": 0},
             "summary": "", "limitations": list(LIMITATIONS),
@@ -202,9 +204,10 @@ class MapState:
             return {"ok": False, "error": "Аргументы должны быть объектом JSON"}
         args = args or {}
         allowed = {
-            "set_scope": {"title", "start", "end", "exclusions", "assumptions"},
+            "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions"},
             "upsert_system": {"id", "name", "source_ids", "description", "evidence_status", "evidence"},
-            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id"},
+            "upsert_group": {"id", "name", "kind", "parent_id", "description", "result", "evidence"},
+            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id", "group_id", "outcome"},
             "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract"},
             "add_gap": {"description", "node_ids", "system_ids"},
             "review_source": {"source_id", "disposition", "reason"},
@@ -253,7 +256,7 @@ class MapState:
                 return {k: compact(v, k) for k, v in value.items() if k != "quote"}
             return value
 
-        counts = {key: len(self.model[key]) for key in ("systems", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews")}
+        counts = {key: len(self.model[key]) for key in ("systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews")}
         counts["operations"] = sum(len(review["operations"]) for review in self.model["execution_reviews"])
         if section == "summary":
             return {"section": section, "model": compact({
@@ -288,6 +291,7 @@ class MapState:
     def _set_scope(self, args: dict[str, Any]) -> dict[str, Any]:
         self.model["scenario"].update({
             "title": _text(args.get("title"), "title", required=True, limit=300),
+            "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
             "start": _text(args.get("start"), "start", required=True),
             "end": _text(args.get("end"), "end", required=True),
             "exclusions": _strings(args.get("exclusions", []), "exclusions"),
@@ -310,6 +314,20 @@ class MapState:
             raise MapValidationError("АС с таким именем уже есть: обновите существующий id")
         return self._put("systems", item)
 
+    def _upsert_group(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Business taxonomy, separate from executable nodes and control flow."""
+        evidence = self._evidence(args.get("evidence", []))
+        if not evidence:
+            raise MapValidationError("Группировка требует оснований из прочитанных материалов")
+        item = {"id": self._id("groups", "group", args.get("id"), MAX_NODES),
+                "kind": _choice(args.get("kind"), "kind", GROUP_KINDS),
+                "name": _text(args.get("name"), "name", required=True, limit=300),
+                "description": _text(args.get("description", ""), "description"),
+                "result": _text(args.get("result"), "result", required=True),
+                "parent_id": _text(args.get("parent_id") or "", "parent_id") or None,
+                "evidence": evidence}
+        return self._put("groups", item)
+
     def _upsert_step(self, args: dict[str, Any]) -> dict[str, Any]:
         status, evidence = self._support(args)
         item = {"id": self._id("nodes", "step", args.get("id"), MAX_NODES),
@@ -317,7 +335,13 @@ class MapState:
                 "kind": _choice(args.get("kind", "action"), "kind", STEP_KINDS),
                 "system_id": _text(args.get("system_id", "unknown"), "system_id", required=True),
                 "evidence_status": status, "evidence": evidence,
-                "parent_id": args.get("parent_id") or None}
+                "parent_id": args.get("parent_id") or None,
+                "group_id": _text(args.get("group_id") or "", "group_id") or None}
+        outcome = args.get("outcome") or ""
+        if item["kind"] == "end":
+            item["outcome"] = _choice(outcome or "unknown", "outcome", OUTCOME_KINDS)
+        elif outcome:
+            raise MapValidationError("outcome задаётся только для завершения kind=end")
         for field in ("description", "input", "output", "condition"):
             item[field] = _text(args.get(field, ""), field)
         return self._put("nodes", item)
@@ -369,8 +393,8 @@ class MapState:
         return review
 
     def _remove_element(self, args: dict[str, Any]) -> dict[str, Any]:
-        kind = _choice(args.get("kind"), "kind", ("system", "step", "transition", "gap", "execution_review"))
-        collection = {"system": "systems", "step": "nodes", "transition": "edges", "gap": "gaps", "execution_review": "execution_reviews"}[kind]
+        kind = _choice(args.get("kind"), "kind", ("system", "group", "step", "transition", "gap", "execution_review"))
+        collection = {"system": "systems", "group": "groups", "step": "nodes", "transition": "edges", "gap": "gaps", "execution_review": "execution_reviews"}[kind]
         identifier = _text(args.get("id"), "id", required=True)
         if not any(row["id"] == identifier for row in self.model[collection]):
             raise MapValidationError(f"Объект {identifier} не найден")
@@ -480,6 +504,7 @@ class MapState:
         errors: list[str] = []
         systems = {item["id"]: item for item in self.model["systems"]}
         nodes = {item["id"]: item for item in self.model["nodes"]}
+        groups = {item["id"]: item for item in self.model["groups"]}
 
         def check_sources(citations: list[dict[str, Any]], sources: list[str], label: str) -> None:
             if any(self._source_for(c["path"]) not in sources for c in citations):
@@ -487,7 +512,16 @@ class MapState:
 
         for system in systems.values():
             check_sources(system["evidence"], system["source_ids"], system["id"])
+        for group in groups.values():
+            parent = groups.get(group["parent_id"])
+            if group["kind"] == "stage" and group["parent_id"]:
+                errors.append(f"{group['id']}: этап не имеет родительской группы")
+            if group["kind"] == "operation" and (not parent or parent["kind"] != "stage"):
+                errors.append(f"{group['id']}: бизнес-операция должна относиться к существующему этапу")
         for node in nodes.values():
+            group_id = node.get("group_id")
+            if group_id and (group_id not in groups or groups[group_id]["kind"] != "operation"):
+                errors.append(f"{node['id']}: group_id должен указывать на бизнес-операцию")
             system = node["system_id"]
             if system not in systems and system != "unknown":
                 errors.append(f"{node['id']}: неизвестная АС {system}")
@@ -561,7 +595,7 @@ class MapState:
                     for g in check["gap_ids"]
                 ):
                     errors.append(f"{review['id']}.{category}: gap должен относиться к обследованной АС или её операциям")
-        used_sources = {self._source_for(c["path"]) for collection in ("systems", "nodes", "edges")
+        used_sources = {self._source_for(c["path"]) for collection in ("systems", "groups", "nodes", "edges")
                         for row in self.model[collection] for field in ("evidence", "sender_evidence", "receiver_evidence")
                         for c in row.get(field, [])}
         used_sources.update(self._source_for(c["path"]) for review in self.model.get("execution_reviews", []) for c in review["evidence"])
@@ -708,6 +742,11 @@ class MapState:
                 errors.append(f"{identifier}: исходящий переход из конечного шага")
             if node["kind"] in ("decision", "fork") and len(outgoing[identifier]) < 2 and identifier not in gap_nodes:
                 errors.append(f"{identifier}: развилка должна иметь минимум два направления либо адресный gap")
+            if node["kind"] == "decision" and identifier not in gap_nodes:
+                if any(e["source"] == identifier and e["kind"] != "data" and not e["condition"] for e in self.model["edges"]):
+                    errors.append(f"{identifier}: подпишите условия всех исходящих ветвей решения либо укажите адресный gap")
+            if node["kind"] in OPERATION_NODE_KINDS and not node.get("group_id") and identifier not in gap_nodes:
+                errors.append(f"{identifier}: укажите бизнес-операцию в group_id либо адресный gap о неизвестной группировке")
             if node["kind"] == "join" and len(incoming[identifier]) < 2 and identifier not in gap_nodes:
                 errors.append(f"{identifier}: join требует минимум два входа либо адресный gap")
             if (node["evidence_status"] == "unknown" or node["system_id"] == "unknown") and identifier not in gap_nodes:
@@ -720,6 +759,11 @@ class MapState:
             affected_nodes = {node["id"] for node in nodes.values() if node["system_id"] == system_id}
             if system_id not in gap_systems and (not affected_nodes or not affected_nodes.issubset(gap_nodes)):
                 errors.append(f"{system_id}: неподтверждённая АС требует gap с system_ids либо со всеми её шагами")
+        for group in self.model["groups"]:
+            used = (any(n.get("group_id") == group["id"] for n in nodes.values()) if group["kind"] == "operation"
+                    else any(g["parent_id"] == group["id"] for g in self.model["groups"]))
+            if not used:
+                errors.append(f"{group['id']}: пустая группа; свяжите с действиями или удалите")
         errors.extend(self._detail_errors())
         return errors
 

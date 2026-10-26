@@ -43,7 +43,7 @@ def research_calls():
         2: quote(2, "@app.post('/applications/debit')", "broker.publish('card.issue.requested', message)"),
         3: quote(3, "@subscriber('card.issue.requested')", "results[parameters['request_id']] ="),
     }
-    calls = [("set_scope", {"title": "Новая дебетовая карта действующему клиенту",
+    calls = [("set_scope", {"title": "Новая дебетовая карта действующему клиенту", "process_name": "Оформление дебетовой карты",
                            "start": "Клиент отправил заявку", "end": "Карта выпущена либо сформирован окончательный отказ",
                            "exclusions": ["Перевыпуск", "Самостоятельное оформление новым клиентом", "Доставка карты"]})]
     for number, filename in ((1, "app.py"), (2, "app.py"), (3, "worker.py")):
@@ -51,6 +51,21 @@ def research_calls():
     for number, name in ((1, "Мобильный канал"), (2, "Обработка заявок"), (3, "Выпуск карт")):
         calls.append(("upsert_system", {"name": name, "source_ids": [f"source-{number}"],
                                        "description": name + " — учебная реализация", "evidence_status": "observed", "evidence": scopes[number]}))
+    # Business groups are separate from executable nodes; two operations cross AS.
+    for kind, name, parent, result, systems in [
+        ("stage", "Подача заявки", None, "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
+        ("operation", "Определить вариант обращения", "group-1", "Выбран поддерживаемый вариант либо сформирован отказ", [1]),
+        ("operation", "Передать заявку на рассмотрение", "group-1", "Подготовленный запрос принят АС заявок", [1, 2]),
+        ("stage", "Рассмотрение заявки", None, "Заявка направлена на выпуск либо отклонена", [2, 3]),
+        ("operation", "Проверить возможность выпуска", "group-4", "Проверен допуск клиента; при отрицательном результате сохранён отказ", [2]),
+        ("operation", "Передать заявку на выпуск", "group-4", "Принятая заявка доставлена обработчику выпуска", [2, 3]),
+        ("stage", "Выпуск карты", None, "Карта и результат выпуска сохранены", [3]),
+        ("operation", "Подготовить карту", "group-7", "Из сообщения получены параметры и подготовлены данные карты", [3]),
+        ("operation", "Зафиксировать выпуск", "group-7", "Карта сохранена, результат связан с заявкой", [3]),
+    ]:
+        calls.append(("upsert_group", {"name": name, "kind": kind, "result": result,
+                                      "evidence": [ref for system in systems for ref in scopes[system]],
+                                      **({"parent_id": parent} if parent else {})}))
     # key, AS, business name, graph kind, operation kind, start/end snippets, effect
     specs = [
         ("start", 1, "Заявка отправлена клиентом", "start", None,
@@ -110,12 +125,22 @@ def research_calls():
         "issue_parameters": "Отсутствие обязательного поля вызывает исключение; локальная обработка не показана.",
     }
     nodes = {}
+    memberships = {
+        **dict.fromkeys(["start", "channel_receive", "variant_check", "variant_rejection", "variant_end"], "group-2"),
+        **dict.fromkeys(["application_build", "application_send", "application_receive"], "group-3"),
+        **dict.fromkeys(["profile_read", "eligibility_check", "rejection_write", "rejection_response", "rejection_end"], "group-5"),
+        **dict.fromkeys(["acceptance_write", "message_build", "message_publish", "message_receive"], "group-6"),
+        **dict.fromkeys(["issue_parameters", "card_build"], "group-8"),
+        **dict.fromkeys(["card_issue", "result_write", "issued_end"], "group-9"),
+    }
     for index, (key, system, name, kind, operation_kind, start, end, effect) in enumerate(specs, 1):
         node = {"id": f"step-{index}", "system": system, "name": name, "kind": kind,
                 "operation_kind": operation_kind, "evidence": quote(system, start, end), "effect": effect,
                 "failure": failures.get(key, "В обследованном участке отдельная обработка технического отказа не показана.")}
         nodes[key] = node
         calls.append(("upsert_step", {"name": name, "kind": kind, "system_id": f"sys-{system}", "description": effect,
+                                      "group_id": memberships[key],
+                                      **({"outcome": "success" if key == "issued_end" else "refusal"} if kind == "end" else {}),
                                       "input": "request_id, client_id, client_type" if system == 1 else "request_id, client_id, product",
                                       "output": effect, "evidence_status": "observed", "evidence": node["evidence"]}))
     edge_specs = [

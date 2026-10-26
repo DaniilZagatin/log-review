@@ -106,8 +106,9 @@ class ScenarioRenderTests(unittest.TestCase):
         self.assertTrue(any(attrs.get("id") == "empty-map" for _, attrs in document.elements))
         tabs = [attrs for _, attrs in document.elements if attrs.get("role") == "tab"]
         panels = {attrs["id"] for _, attrs in document.elements if attrs.get("role") == "tabpanel"}
-        self.assertEqual(len(tabs), 3)
-        self.assertTrue(all(tab["aria-controls"] in panels for tab in tabs))
+        self.assertEqual(tabs, [])
+        self.assertEqual(panels, set())
+        self.assertTrue(any(attrs.get("id") == "stage-select" for _, attrs in document.elements))
         self.assertIn("prefers-reduced-motion:reduce", result)
         self.assertIn("focus-visible", result)
         self.assertIn("<noscript>", result)
@@ -120,11 +121,12 @@ class ScenarioRenderTests(unittest.TestCase):
                 model["run"] = {"status": status, "reason": "Причина результата", "demo": True}
                 document = Document(render_scenario_map(model))
                 elements = {attrs.get("id"): attrs for _, attrs in document.elements if "id" in attrs}
-                self.assertNotIn("hidden", elements["demo-badge"])
+                self.assertNotIn("demo-badge", elements)
+                self.assertTrue(json.loads(document.scripts[0]["text"])["run"]["demo"])
                 self.assertEqual("hidden" not in elements["run-note"], warning)
         model["run"] = {"status": "partial", "demo": "true"}
         elements = {attrs.get("id"): attrs for _, attrs in Document(render_scenario_map(model)).elements if "id" in attrs}
-        self.assertIn("hidden", elements["demo-badge"])
+        self.assertNotIn("demo-badge", elements)
         self.assertIn("hidden", elements["run-note"])
 
     def test_diagnostics_survive_partial_result_with_no_explicit_gaps(self):
@@ -149,7 +151,7 @@ class ScenarioRenderTests(unittest.TestCase):
         self.assertIn("height:100dvh", result)
         self.assertNotIn("Паспорт инициативы", result)
 
-    def test_long_description_remains_in_data_for_scope_disclosure(self):
+    def test_long_description_remains_in_data_with_compact_header(self):
         model = self.model()
         model["scenario"]["description"] = "Подробное описание выбранного варианта. " * 500
         result = render_scenario_map(model)
@@ -189,7 +191,7 @@ class ScenarioRenderTests(unittest.TestCase):
     def test_legacy_detail_warning_and_atomic_fields_preserve_source_data(self):
         model = self.model()
         elements = {attrs.get("id"): attrs for _, attrs in Document(render_scenario_map(model)).elements}
-        self.assertNotIn("hidden", elements["detail-badge"])
+        self.assertNotIn("detail-badge", elements)
         model["schema_version"] = "1.1"
         model["execution_reviews"] = [{"id": "review-1", "operations": [{
             "id": "op-1", "node_id": "node-1", "kind": "write",
@@ -199,7 +201,7 @@ class ScenarioRenderTests(unittest.TestCase):
         }]}]
         document = Document(render_scenario_map(model))
         elements = {attrs.get("id"): attrs for _, attrs in document.elements}
-        self.assertIn("hidden", elements["detail-badge"])
+        self.assertNotIn("detail-badge", elements)
         self.assertEqual(json.loads(document.scripts[0]["text"]), model)
 
 

@@ -73,6 +73,7 @@ class ScenarioMapTests(unittest.TestCase):
         for source, path in (("source-2", "source-2/cards.py"), ("source-3", "source-3/worker.py")):
             self.state.observe_read(path, 1, 1)
             self.good("review_source", source_id=source, disposition="out_of_scope", reason="Другой вариант сценария")
+        self.group_current_actions()
         return system, first, last
 
     def review_payload(self, system, node_ids=None):
@@ -108,10 +109,23 @@ class ScenarioMapTests(unittest.TestCase):
         return payload
 
     def review_current_operations(self):
+        self.group_current_actions()
         for system in self.state.model["systems"]:
             payload = self.review_payload(system["id"])
             if payload["operations"]:
                 self.good("review_execution", **payload)
+
+    def group_current_actions(self):
+        nodes = [n for n in self.state.model["nodes"] if n["kind"] in ("action", "decision", "wait", "external")
+                 and n["evidence_status"] != "unknown" and not n.get("group_id")]
+        if not nodes:
+            return
+        stage = self.good("upsert_group", name="Подача заявки", kind="stage", result="Обращение принято",
+                          evidence=nodes[0]["evidence"])["id"]
+        operation = self.good("upsert_group", name="Принять обращение", kind="operation", parent_id=stage,
+                              result="Получены параметры обращения", evidence=nodes[0]["evidence"])["id"]
+        for node in nodes:
+            self.good("upsert_step", **{**node, "group_id": operation})
 
     def test_unread_quote_is_rejected_and_failed_mutation_is_atomic(self):
         before = self.state.snapshot()
@@ -121,6 +135,86 @@ class ScenarioMapTests(unittest.TestCase):
         self.assertIn("read_file", response["error"])
         self.assertEqual(before, self.state.snapshot())
         self.assertEqual(self.system(), "sys-1")
+
+    def test_business_groups_are_separate_from_flow_and_can_cross_systems(self):
+        first, second = self.system(), self.system(2)
+        evidence = self.cite() + self.cite("source-2/cards.py")
+        stage = self.good("upsert_group", name="Принять заявку", kind="stage", result="Заявка доставлена", evidence=evidence)["id"]
+        operation = self.good("upsert_group", name="Передать запрос", kind="operation", parent_id=stage,
+                              result="Запрос принят получателем", evidence=evidence)["id"]
+        for system, refs in ((first, evidence[:1]), (second, evidence[1:])):
+            self.good("upsert_step", name="Обработка запроса", kind="action", system_id=system,
+                      group_id=operation, evidence_status="observed", evidence=refs)
+        self.assertEqual(len(self.state.model["nodes"]), 2)
+        self.assertEqual(self.state.model["edges"], [])
+        self.assertEqual(self.good("inspect_map", section="groups")["total"], 2)
+        before = self.state.snapshot()
+        self.assertFalse(self.state.dispatch("remove_element", {"kind": "group", "id": operation})["ok"])
+        self.assertFalse(self.state.dispatch("remove_element", {"kind": "group", "id": stage})["ok"])
+        self.assertEqual(before, self.state.snapshot())
+
+    def test_group_hierarchy_and_evidence_are_checked_transactionally(self):
+        evidence = self.cite()
+        payload = dict(name="Этап", kind="stage", result="Результат", evidence=evidence)
+        self.assertFalse(self.state.dispatch("upsert_group", {**payload, "evidence": []})["ok"])
+        stage = self.good("upsert_group", **payload)["id"]
+        for parent in (None, "missing"):
+            self.assertFalse(self.state.dispatch("upsert_group", {**payload, "kind": "operation", "parent_id": parent})["ok"])
+        operation = self.good("upsert_group", **{**payload, "kind": "operation", "parent_id": stage})["id"]
+        self.assertFalse(self.state.dispatch("upsert_group", {**payload, "id": stage, "parent_id": operation})["ok"])
+        node = self.node(self.system())
+        current = next(n for n in self.state.model["nodes"] if n["id"] == node)
+        self.assertFalse(self.state.dispatch("upsert_step", {**current, "group_id": stage})["ok"])
+        self.assertFalse(self.state.dispatch("upsert_step", {**current, "group_id": "missing"})["ok"])
+
+    def test_finish_requires_action_group_or_explicit_gap(self):
+        system, _, _ = self.complete_small_map()
+        node = next(n for n in self.state.model["nodes"] if n["kind"] == "action")
+        operation = node["group_id"]
+        stage = self.state.model["groups"][0]["id"]
+        self.good("upsert_step", **{**node, "group_id": None})
+        self.good("remove_element", kind="group", id=operation)
+        self.good("remove_element", kind="group", id=stage)
+        self.good("review_execution", **self.review_payload(system))
+        result = self.state.dispatch("finish", {"summary": "Группировка не установлена"})
+        self.assertFalse(result["ok"])
+        self.assertIn("group_id", result["error"])
+        self.good("add_gap", description="Бизнес-группировка действия не установлена", node_ids=[node["id"]])
+        result = self.state.dispatch("finish", {"summary": "Группировка требует уточнения"})
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "partial")
+
+    def test_empty_groups_cannot_finish(self):
+        self.complete_small_map()
+        self.review_current_operations()
+        self.good("upsert_group", name="Неиспользуемый этап", kind="stage", result="Ожидаемый результат", evidence=self.cite())
+        response = self.state.dispatch("finish", {"summary": "Исследовано"})
+        self.assertFalse(response["ok"])
+        self.assertIn("пустая группа", response["error"])
+
+    def test_terminal_outcome_is_explicit_and_not_inferred_from_name(self):
+        system = self.system()
+        first = self.good("upsert_step", name="Успех", kind="end", system_id=system, evidence=self.cite(), evidence_status="observed")["id"]
+        node = next(n for n in self.state.model["nodes"] if n["id"] == first)
+        self.assertEqual(node["outcome"], "unknown")
+        for outcome in ("success", "refusal", "failure", "cancelled"):
+            self.good("upsert_step", **{**node, "outcome": outcome})
+        self.assertFalse(self.state.dispatch("upsert_step", {**node, "outcome": "invented"})["ok"])
+        self.assertFalse(self.state.dispatch("upsert_step", {**node, "kind": "action", "outcome": "success"})["ok"])
+
+    def test_decision_requires_labels_even_for_non_branch_edges(self):
+        system, first, last = self.complete_small_map()
+        decision = self.node(system, "decision")
+        self.edge(first, decision)
+        retry = self.edge(decision, decision, "retry")
+        self.edge(decision, last, "branch", condition="Проверки пройдены")
+        self.review_current_operations()
+        rejected = self.state.dispatch("finish", {"summary": "Проверено"})
+        self.assertFalse(rejected["ok"])
+        self.assertIn("условия всех исходящих", rejected["error"])
+        edge = next(e for e in self.state.model["edges"] if e["id"] == retry)
+        self.good("upsert_transition", **{**edge, "condition": "Временная ошибка; повтор разрешён"})
+        self.assertEqual(self.good("finish", summary="Подписаны исходы")["status"], "completed")
 
     def test_only_masked_literal_exact_window_is_accepted(self):
         evidence = self.cite(start=3, end=3)
@@ -214,7 +308,7 @@ class ScenarioMapTests(unittest.TestCase):
         decision = self.node(system, "decision")
         self.edge(first, operation)
         self.edge(operation, decision)
-        self.edge(decision, operation, "retry")
+        self.edge(decision, operation, "retry", condition="Временный отказ; повтор разрешён")
         self.edge(decision, last, "branch", condition="Выпуск завершён")
         self.assertEqual(self.good("finish", summary="Повтор имеет выход")["status"], "completed")
 
@@ -299,7 +393,7 @@ class ScenarioMapTests(unittest.TestCase):
 
     def test_tool_contract_lists_all_mutation_handlers(self):
         names = [tool["function"]["name"] for tool in TOOLS]
-        self.assertEqual(len(set(names)), 10)
+        self.assertEqual(len(set(names)), 11)
         self.assertIn("inspect_map", names)
         self.assertIn("finish", names)
         for tool in TOOLS:

@@ -114,7 +114,7 @@ class _SpanHandle:
         target = tool._span if tool is not None else self._span
         try:
             if attributes:
-                target.add_event(name, attributes={k: _attribute_value(v) for k, v in attributes.items()})
+                target.add_event(name, attributes={k: _attribute_value(sanitize(v)) for k, v in attributes.items()})
             else:
                 target.add_event(name)
         except Exception:
@@ -158,7 +158,7 @@ class _SpanHandle:
         if value is None:
             return
         try:
-            self._span.set_attribute(key, _attribute_value(value))
+            self._span.set_attribute(key, _attribute_value(sanitize(value)))
         except Exception:
             pass
 
@@ -372,6 +372,11 @@ def trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict)
         _ACTIVE_TOOL.reset(token)
     content = reply.get("content") if isinstance(reply, dict) else reply
     handle.set_output(sanitize("" if content is None else str(content)))
+    payload = _parsed(content)
+    if isinstance(payload, dict) and isinstance(payload.get("ok"), bool):
+        handle.set_attribute("pko.tool.ok", payload["ok"])
+        if not payload["ok"]:
+            handle.add_event("tool_rejected", error=payload.get("error", ""))
     handle.finish()
     return reply
 

@@ -43,10 +43,16 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
     with audit_run(out_dir / "audit" / f"run_{run_id}.txt", run_id):
         init_phoenix_tracing()
         try:
-            with trace_span("scenario_map_run", run_id=run_id):
+            with trace_span("scenario_map_run", run_id=run_id) as run_span:
+                run_span.set_input({"scenario": scenario, "source_count": len(sources),
+                                    "max_steps": max_steps, "max_seconds": max_seconds})
                 with tempfile.TemporaryDirectory(prefix="belka-scenario-") as temporary:
-                    workspace = build_workspace(sources, Path(temporary) / "sources",
-                                                exclude_paths=[out_dir])
+                    with trace_span("prepare_sources") as source_span:
+                        workspace = build_workspace(sources, Path(temporary) / "sources",
+                                                    exclude_paths=[out_dir])
+                        source_span.set_output({"sources": workspace.sources,
+                                                "notes": workspace.notes,
+                                                "omissions": workspace.omissions})
                     record("scenario_sources", sources=workspace.sources, notes=workspace.notes)
                     if on_event:
                         on_event("sources_ready", {"sources": len(workspace.sources),
@@ -54,18 +60,31 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
                     def checkpoint(model):
                         model["run"]["id"] = run_id
-                        write_outputs(out_dir, {"checkpoint": ("scenario_map.checkpoint.json",
-                                      json.dumps(model, ensure_ascii=False, indent=2))})
+                        model["run"]["trace_id"] = run_span.trace_id
+                        with trace_span("save_checkpoint", step=model["run"].get("steps")):
+                            write_outputs(out_dir, {"checkpoint": ("scenario_map.checkpoint.json",
+                                          json.dumps(model, ensure_ascii=False, indent=2))})
 
                     model = run_agent(workspace, scenario, spec, client=client,
                                       max_steps=max_steps, max_seconds=max_seconds,
                                       checkpoint=checkpoint, on_event=on_event)
-                    model["run"].update(id=run_id, generated_at=datetime.now(timezone.utc).isoformat())
-                    html = render_scenario_map(model)
-                    write_outputs(out_dir, {
-                        "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
-                        "scenario-map": ("scenario_map.html", html),
-                    })
+                    model["run"].update(id=run_id, trace_id=run_span.trace_id,
+                                        generated_at=datetime.now(timezone.utc).isoformat())
+                    run_span.set_attribute("pko.run.status", model["run"]["status"])
+                    with trace_span("render_map"):
+                        html = render_scenario_map(model)
+                    with trace_span("publish_outputs") as output_span:
+                        write_outputs(out_dir, {
+                            "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+                            "scenario-map": ("scenario_map.html", html),
+                        })
+                        output_span.set_output({"files": ["scenario_map.json", "scenario_map.html"]})
+                    run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
+                                         "edges": len(model.get("edges", [])),
+                                         "gaps": len(model.get("gaps", [])),
+                                         "validation": model.get("validation", {})})
+                    if model["run"]["status"] == "failed":
+                        run_span.record_error(RuntimeError(model["run"].get("reason") or "Исследование не выполнено"))
                     record("scenario_result", status=model["run"]["status"],
                            nodes=len(model.get("nodes", [])), edges=len(model.get("edges", [])),
                            gaps=len(model.get("gaps", [])))

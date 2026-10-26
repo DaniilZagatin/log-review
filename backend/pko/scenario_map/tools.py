@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .schema import EDGE_KINDS, EVIDENCE_STATUSES, EXECUTION_CHECKS, INSPECT_SECTIONS, OPERATION_KINDS, STEP_KINDS
+from .schema import EDGE_KINDS, EVIDENCE_STATUSES, EXECUTION_CHECKS, GROUP_KINDS, INSPECT_SECTIONS, OPERATION_KINDS, OUTCOME_KINDS, STEP_KINDS
 
 
 def _string(description: str = "") -> dict[str, Any]:
@@ -66,16 +66,23 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 
 TOOLS = [
     _tool("set_scope", "Зафиксировать границы выбранного варианта сценария по входному описанию и коду. Укажите допущения явно; не подменяйте исходный сценарий.",
-          {"title": _string(), "start": _string("Событие начала"), "end": _string("Допустимые результаты завершения"),
+          {"title": _string("Название выбранного варианта"), "process_name": _string("Краткое название процесса, если установлено"), "start": _string("Событие начала"), "end": _string("Допустимые результаты завершения"),
            "exclusions": _list("Соседние сценарии вне исследования"), "assumptions": _list("Неустановленные границы и допущения")},
           ["title", "start", "end"]),
     _tool("upsert_system", "Добавить или полностью обновить АС. Директория не равна АС: source_ids может содержать несколько источников, источник может относиться к нескольким АС.",
           {"id": EDIT_ID, "name": _string(), "source_ids": _list(), "description": _string(), **SUPPORT},
           ["name", "source_ids", "evidence_status", "evidence"]),
-    _tool("upsert_step", "Добавить или полностью обновить отдельную атомарную операцию либо управляющий узел. Отдельные проверки, чтения, расчёты, записи, отправки, приём и обработка отказа должны быть отдельными узлами, если имеют свой эффект/точку отказа. Не сворачивайте несколько действий в бизнес-блок и не делите автоматически по функциям. parent_id — только группировка. Для неизвестной АС допустим system_id='unknown'.",
+    _tool("upsert_group", "Добавить или полностью обновить бизнес-группировку: этап (stage) объединяет операции общей промежуточной целью, операция (operation) объединяет атомарные действия отделимым результатом. Операция принадлежит этапу через parent_id. Группа может пересекать АС, не является исполняемым узлом и не создаёт переходы. Создайте этап, затем операции, затем привяжите действия. Все действия остаются на карте; цитаты обосновывают группировку, но не доказывают её семантическую истинность.",
+          {"id": EDIT_ID, "name": _string(), "kind": {"type": "string", "enum": list(GROUP_KINDS)},
+           "parent_id": _string("Для операции — id этапа; для этапа опустите"), "description": _string(),
+           "result": _string("Промежуточная цель этапа или отделимый результат операции"), "evidence": EVIDENCE},
+          ["name", "kind", "result", "evidence"]),
+    _tool("upsert_step", "Добавить или полностью обновить отдельное атомарное действие либо управляющий узел. Отдельные проверки, чтения, расчёты, записи, отправки, приём и обработка отказа должны быть отдельными узлами, если имеют свой эффект/точку отказа. Не сворачивайте несколько действий в бизнес-блок и не делите автоматически по функциям. group_id связывает действие с бизнес-операцией. Для неизвестной АС допустим system_id='unknown'.",
           {"id": EDIT_ID, "name": _string(), "kind": {"type": "string", "enum": list(STEP_KINDS)},
            "system_id": _string(), "description": _string(), "input": _string(), "output": _string(),
-           "condition": _string(), "parent_id": _string("Существующий шаг, который этот шаг детализирует; иначе опустите"), **SUPPORT},
+           "condition": _string(), "parent_id": _string("Устаревшая ссылка на детализируемый шаг; для бизнес-группировки используйте group_id"),
+           "group_id": _string("ID бизнес-операции. Для действия обязателен к finish, либо объясните неизвестную группировку адресным gap"),
+           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Только для end: успех, бизнес-отказ, технический сбой, отмена или неустановленный исход. Не угадывайте по названию."}, **SUPPORT},
           ["name", "kind", "system_id", "description", "evidence_status", "evidence"]),
     _tool("upsert_transition", "Добавить/обновить переход. data — передача данных без утверждения порядка исполнения. Циклы разрешены. Любой observed межсистемный переход, независимо от kind, требует цитат отправителя и получателя, адресного channel и содержательного contract; совпадение имён само по себе связь не доказывает. Без этого используйте inferred/unknown.",
           {"id": EDIT_ID, "source": _string(), "target": _string(), "kind": {"type": "string", "enum": list(EDGE_KINDS)},
@@ -98,7 +105,7 @@ TOOLS = [
                       "properties": {name: EXECUTION_CHECK for name in EXECUTION_CHECKS}, "required": list(EXECUTION_CHECKS)}},
           ["name", "system_id", "evidence", "operations", "checks"]),
     _tool("remove_element", "Удалить ошибочный элемент карты. Если на него ссылаются другие элементы, сначала обновите или удалите эти ссылки. Удаление не каскадное.",
-          {"kind": {"type": "string", "enum": ["system", "step", "transition", "gap", "execution_review"]}, "id": _string()}, ["kind", "id"]),
+          {"kind": {"type": "string", "enum": ["system", "group", "step", "transition", "gap", "execution_review"]}, "id": _string()}, ["kind", "id"]),
     _tool("inspect_map", "Получить сводку или раздел карты постранично. По умолчанию summary с количеством объектов и замечаниями. Для восстановления ID после сокращения контекста читайте systems/nodes/edges. Длинные поля сокращены, цитаты показаны ссылками; полный результат сохранён.",
           {"section": {"type": "string", "enum": list(INSPECT_SECTIONS), "default": "summary"},
            "offset": {"type": "integer", "minimum": 1, "default": 1},
