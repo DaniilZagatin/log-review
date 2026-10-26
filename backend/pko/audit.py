@@ -1,0 +1,162 @@
+"""A durable record of observable actions and evidence, independent of Phoenix."""
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from pko.util.paths import harden_file
+
+_CURRENT: ContextVar[Any] = ContextVar("pko_audit", default=None)
+_PRIVATE = re.compile(r"reasoning|chain.of.thought|thinking|api.?key|password|secret|authorization|credential|access.?token", re.I)
+
+
+def sanitize(value: Any) -> Any:
+    """Best-effort credential masking; never export provider private reasoning."""
+    if isinstance(value, dict):
+        if str(value.get("type", "")).lower() in ("reasoning", "thinking", "redacted_thinking"):
+            return {"type": "omitted_private_reasoning"}
+        return {str(k): sanitize(v) for k, v in value.items() if not _PRIVATE.search(str(k))}
+    if isinstance(value, (list, tuple)):
+        return [sanitize(v) for v in value]
+    if not isinstance(value, str):
+        return value if value is None or isinstance(value, (bool, int, float)) else str(value)
+    # Tool arguments and OpenInference messages can contain nested JSON strings.
+    if value.lstrip().startswith(("{", "[")):
+        try:
+            return json.dumps(sanitize(json.loads(value)), ensure_ascii=False)
+        except (ValueError, TypeError, RecursionError):
+            pass
+    for key, secret in os.environ.items():
+        if _PRIVATE.search(key) and len(secret) >= 8:
+            value = value.replace(secret, "[REDACTED]")
+    value = re.sub(r"<(think|thinking|reasoning)>.*?</\1>", "[OMITTED]", value, flags=re.S | re.I)
+    value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[REDACTED]", value, flags=re.S)
+    value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
+    value = re.sub(r"\bsk-[A-Za-z0-9_-]{12,}\b", "[REDACTED]", value)
+    value = re.sub(r"(?i)((?:password|api[_-]?key|secret|access[_-]?token)\s*[=:]\s*)[\"']?[^\s,;\"']+", r"\1[REDACTED]", value)
+    return re.sub(r"(https?://)[^/@\s]+:[^/@\s]+@", r"\1[REDACTED]@", value)
+
+
+class RunAudit:
+    def __init__(self, path: Path, run_id: str):
+        self.path, self.run_id = path, run_id
+        self.sequence = 0
+        self.failed = False
+        self.clients: list[AuditedClient] = []
+
+    def emit(self, event: str, **fields: Any) -> None:
+        if self.failed:
+            return
+        try:
+            self.sequence += 1
+            entry = sanitize({"event": event, "run_id": self.run_id, **fields})
+            stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+                harden_file(self.path)
+                stream.write(f"\n=== {self.sequence} | {stamp} | {event} ===\n")
+                stream.write(json.dumps(entry, ensure_ascii=False, indent=2) + "\n")
+        except Exception as exc:
+            self.failed = True
+            print(f"Журнал анализа недоступен ({type(exc).__name__}): {self.path}", file=sys.stderr)
+
+    def flush(self) -> None:
+        for client in self.clients:
+            client.flush()
+
+
+def record(event: str, **fields: Any) -> None:
+    audit = _CURRENT.get()
+    if audit is not None:
+        audit.emit(event, **fields)
+
+
+def current_audit() -> RunAudit | None:
+    """Current run identity for the optional trace exporter."""
+    return _CURRENT.get()
+
+
+@contextmanager
+def audit_run(path: Path, run_id: str):
+    audit = RunAudit(path, run_id)
+    token = _CURRENT.set(audit)
+    audit.emit("run_started", scope="Наблюдаемые действия, материалы, ответы инструментов и объяснения выводов. Внутренние рассуждения не записываются.")
+    try:
+        yield audit
+    except BaseException as exc:
+        audit.flush()
+        audit.emit("run_finished", result="interrupted" if isinstance(exc, KeyboardInterrupt) else "error",
+                   error_type=type(exc).__name__, error_message=str(exc), hint=getattr(exc, "hint", ""))
+        raise
+    else:
+        audit.flush()
+        audit.emit("run_finished", result="success")
+    finally:
+        _CURRENT.reset(token)
+
+
+def flush() -> None:
+    audit = _CURRENT.get()
+    if audit is not None:
+        audit.flush()
+
+
+@contextmanager
+def audit_span(name: str, attributes: dict):
+    record("span_started", name=name, attributes=attributes)
+    try:
+        yield
+    except BaseException as exc:
+        record("span_failed", name=name, error_type=type(exc).__name__, error_message=str(exc))
+        raise
+    finally:
+        if name == "scenario_research":
+            flush()
+        record("span_finished", name=name)
+
+
+class AuditedClient:
+    """Record supplied context and public tool proposals, excluding reasoning."""
+    def __init__(self, delegate):
+        self.delegate = delegate
+        self.messages = None
+        self.seen: dict[int, Any] = {}
+        audit = _CURRENT.get()
+        if audit is not None:
+            audit.clients.append(self)
+
+    def __getattr__(self, name):
+        return getattr(self.delegate, name)
+
+    def flush(self):
+        for message in self.messages or []:
+            if id(message) not in self.seen:
+                self.seen[id(message)] = message
+                record("context_message", message=message)
+
+    def chat(self, messages, **kwargs):
+        self.flush()
+        if self.messages is not messages:
+            self.messages, self.seen = messages, {}
+            record("tool_schemas", tools=kwargs.get("tools"))
+        self.flush()
+        record("model_request", model=self.delegate.spec.model,
+               parameters={k: v for k, v in kwargs.items() if k != "tools"})
+        started = time.monotonic()
+        try:
+            result = self.delegate.chat(messages, **kwargs)
+        except BaseException as exc:
+            record("model_error", error_type=type(exc).__name__, error_message=str(exc), hint=getattr(exc, "hint", ""))
+            raise
+        record("model_response", text=result.text, tool_calls=result.tool_calls,
+               usage=result.usage, from_cache=result.from_cache,
+               duration_seconds=round(time.monotonic() - started, 3))
+        return result

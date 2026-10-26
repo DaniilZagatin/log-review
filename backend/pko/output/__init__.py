@@ -1,0 +1,1 @@
+"""Atomic local output publishing."""

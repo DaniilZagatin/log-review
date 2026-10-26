@@ -1,0 +1,45 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.test-deps/
+build/
+dist/
+*.egg-info/
+# frontend-app/dist/ уже покрыт правилом dist/ выше — не собранный
+# React-бандл, не коммитится, собирается локально (см. README).
+node_modules/
+pko-progress-out/
+scenario-map-out/
+*.bak
+tests/fixtures/mini_repo/
+.pko-cache/
+monitoring/data/
+# Реальные ключи/endpoint'ы — только в .env, шаблон .env.example коммитится,
+# сам .env никогда.
+.env*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+archive/
+Review_reports/
+
+# Сертификаты и приватные ключи SberCA (внутренние УЦ Сбера) — никогда
+# в git. Если файлы уже закоммичены, .gitignore их не отменит — нужен
+# `git rm --cached certs/` + переписывание истории.
+certs/
+
+# Внутренние документы Сбера (стандарт автономного процесса, описание
+# агента) — не публиковать за пределами контура.
+autonomous_process_standard_v1_1.md
+ОПИСАНИЕ_АГЕНТА.md
+# Запись прогона тестов: артефакт конкретного запуска. Коммитить его значит
+# однажды показать зелёный отчёт для кода, которого он не касался.
+reports/
+# Лог-файлы прогонов тестов (test_results*.txt) — артефакты конкретных
+# запусков, содержат внутренние URL'ы Сбера. Не публиковать.
+test_results*.txt

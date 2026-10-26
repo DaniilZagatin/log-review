@@ -1,0 +1,5 @@
+# Трассировка в Phoenix — только когда задан PKO_PHOENIX_ENABLED=true.
+# Отдельным файлом, как и Postgres: OTel SDK с экспортёрами тянет protobuf и
+# grpcio, а без трассировки CLI в них не нуждается. Сам сервер Phoenix сюда не
+# входит — его ставят отдельно (`pip install arize-phoenix`) или в контейнере.
+arize-phoenix-otel==0.17.2

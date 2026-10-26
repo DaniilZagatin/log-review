@@ -1,0 +1,14 @@
+.git
+.venv
+.env*
+!.env.example
+certs
+archive
+reports
+Review_reports
+scenario-map-out
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+build
+dist

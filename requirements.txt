@@ -1,0 +1,4 @@
+# Зависимости CLI; диапазоны совместимости заданы в pyproject.toml.
+openai==1.109.1
+httpx==0.28.1
+python-dotenv==1.2.3
