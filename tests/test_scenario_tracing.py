@@ -9,6 +9,8 @@ import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
+import httpx
+import openai
 from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 
@@ -49,7 +51,12 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                 self.end_headers()
 
         class FinalBatchClient(ScriptedClient):
+            connection_failed = False
+
             def chat(self, messages, **kwargs):
+                if len(messages) > 8 and not self.connection_failed:
+                    self.connection_failed = True
+                    raise openai.APIConnectionError(request=httpx.Request('POST', 'http://model.invalid'))
                 result = super().chat(messages, **kwargs)
                 if result.tool_calls[0]['function']['name'] == 'finish':
                     result.tool_calls.append({'id': 'after-finish', 'type': 'function',
@@ -61,6 +68,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             with tempfile.TemporaryDirectory() as raw, \
+                    patch('pko.scenario_map.model_retry.time.sleep'), \
                     patch.multiple(tracing, _tracer=None, _provider=None, _initialized=False), \
                     patch.dict(os.environ, {
                         'PKO_PHOENIX_ENABLED': 'true',
@@ -107,7 +115,12 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                         llms = [s for s in tree if attrs(s)['openinference.span.kind'].string_value == 'LLM']
                         if model is completed:
                             self.assertEqual(len(tools), len(research_calls()) + 1)
-                            self.assertEqual(len(llms), model['run']['steps'])
+                            self.assertEqual(len(llms), model['run']['steps'] + 1)
+                            self.assertIn('model_retry_wait', names)
+                            self.assertEqual(sum(s.status.code == 2 for s in llms), 1)
+                            self.assertNotEqual(root.status.code, 2)
+                            steps = [s for s in tree if attrs(s).get('pko.span') and attrs(s)['pko.span'].string_value == 'scenario_step']
+                            self.assertTrue(all(s.status.code != 2 for s in steps), 'Recovered step must not remain failed')
                             rejected = [s for s in tools if attrs(s)['pko.tool_call.id'].string_value == 'after-finish']
                             self.assertEqual(len(rejected), 1)
                             self.assertFalse(attrs(rejected[0])['pko.tool.ok'].bool_value)

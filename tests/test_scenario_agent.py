@@ -187,6 +187,35 @@ class ScenarioAgentTests(unittest.TestCase):
         self.assertIn("Connection error.", model["run"]["reason"])
         self.assertNotIn("private-key", model["run"]["reason"])
 
+    def test_connection_exhaustion_keeps_existing_map_and_checkpoints(self):
+        import httpx
+        import openai
+        first_node = next(index for index, (name, _) in enumerate(research_calls())
+                          if name == 'upsert_step') + 1
+
+        class Disconnected(ScriptedClient):
+            requests = 0
+
+            def chat(self, messages, **kwargs):
+                self.requests += 1
+                if self.requests > first_node:
+                    raise openai.APIConnectionError(request=httpx.Request('POST', 'http://model.invalid'))
+                return super().chat(messages, **kwargs)
+
+        client, saved, retries = Disconnected(), [], []
+        with patch('pko.scenario_map.model_retry.time.sleep'):
+            model = run_agent(self.workspace, SCENARIO, SPEC, client=client,
+                              checkpoint=saved.append,
+                              on_event=lambda event, data: retries.append(data) if event == 'model_retry' else None)
+        self.assertEqual(model['run']['status'], 'partial')
+        self.assertEqual(len(model['nodes']), 1)
+        self.assertEqual(client.requests, first_node + 4)
+        self.assertEqual(len(retries), 3)
+        self.assertIn('4 попыток', model['run']['reason'])
+        self.assertEqual(saved[-1]['nodes'], model['nodes'])
+        self.assertEqual(saved[-1]['run']['status'], 'partial')
+        self.assertTrue(all(item['nodes'] == model['nodes'] for item in saved[-4:]))
+
 
 if __name__ == "__main__":
     unittest.main()

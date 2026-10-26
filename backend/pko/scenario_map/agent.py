@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 import time
 from pathlib import Path
@@ -15,17 +16,20 @@ from pko.llm.tracing import trace_client, trace_span, trace_tool_call
 from pko.code_tools.tools import TOOL_SCHEMAS, ToolBox
 from pko.scenario_map.schema import MapState
 from pko.scenario_map.tools import TOOLS
+from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
 MAX_TOOL_CHARS = 24000
 DEFAULT_MAX_STEPS = 180
-DEFAULT_MAX_SECONDS = 1200
+DEFAULT_MAX_SECONDS = 7200
+DEFAULT_MODEL_TIMEOUT = 900
 
 
 class DeadlineClient(ChatClient):
     """Reuse response serialization; cap I/O waits by the remaining soft budget.
 
-    No nested SDK/client retry loop is used in this read-only investigation.
+    SDK retries stay disabled; the agent retries transient model errors once
+    through call_model, within the same run deadline.
     Remaining time is rechecked before every dispatch. HTTPX timeouts bound each
     I/O wait, not total request duration; a continuously trickling response can
     exceed the soft budget. Provider timeouts preserve a partial result.
@@ -134,12 +138,14 @@ class ResearchTools:
 
 def run_agent(workspace, scenario: str, spec, *, client=None,
               max_steps: int = DEFAULT_MAX_STEPS, max_seconds: float = DEFAULT_MAX_SECONDS,
+              model_timeout: float = DEFAULT_MODEL_TIMEOUT,
               checkpoint: Callable[[dict], None] | None = None,
               on_event: Callable[[str, dict], None] | None = None) -> dict:
-    if max_steps < 1 or max_seconds <= 0:
-        raise ValueError("Лимиты исследования должны быть положительными")
+    if max_steps < 1 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
+        raise ValueError("Лимиты исследования и ожидания модели должны быть конечными положительными числами")
     state = MapState(workspace, scenario)
-    state.model["run"].update({"status": "running", "steps": 0, "model": spec.model})
+    state.model["run"].update({"status": "running", "steps": 0, "model": spec.model,
+                               "model_timeout_seconds": model_timeout, "max_seconds": max_seconds})
     toolkit = ResearchTools(state, workspace)
     schemas = copy.deepcopy(TOOL_SCHEMAS) + copy.deepcopy(TOOLS)
     for tool in schemas:
@@ -170,7 +176,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
         if sum(len(_json(m)) for m in messages) + 1600 > context_budget:
             raise ValueError("Окно модели слишком мало для инструментов и описания сценария; используйте модель с большим контекстом или сократите описание.")
         if client is None:
-            client = DeadlineClient(spec=spec)
+            client = DeadlineClient(spec=spec, timeout=model_timeout)
             client.deadline = started + max_seconds
         client = trace_client(client, spec)
         audited_client = client if isinstance(client, AuditedClient) else AuditedClient(client)
@@ -187,7 +193,9 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                 if sum(len(_json(m)) for m in messages) > context_budget:
                     raise ValueError("Сохранённый контекст не помещается в окно модели; карта сохранена частично.")
                 with trace_span("scenario_step", step=step):
-                    reply = audited_client.chat(messages, tools=schemas, temperature=0, max_tokens=response_tokens)
+                    reply = call_model(audited_client, messages, deadline=started + max_seconds,
+                                       before_retry=save, on_event=on_event,
+                                       tools=schemas, temperature=0, max_tokens=response_tokens)
                     calls = reply.tool_calls or []
                     assistant = {"role": "assistant", "content": reply.text or ""}
                     if calls:
@@ -241,6 +249,8 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             "Сохрани найденные шаги и переходы, перечисли оставшиеся пробелы и заверши через finish."})
             else:
                 state.model["run"].update(status="partial", reason="Достигнут лимит шагов исследования.")
+    except ModelDeadlineExceeded as exc:
+        state.model["run"].update(status="partial", reason=str(exc))
     except KeyboardInterrupt:
         state.model["run"].update(status="partial", reason="Исследование прервано пользователем.", interrupted=True)
     except Exception as exc:

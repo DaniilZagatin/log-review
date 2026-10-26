@@ -446,7 +446,7 @@ class TracedClient:
         for key, value in attributes.items():
             handle._raw(key, value)
         handle.set_input(incoming)
-        if step is not None:
+        if step is not None and incoming:
             step.set_input(incoming)
         if session is not None and first:
             session.handle.set_input(incoming)
@@ -458,8 +458,8 @@ class TracedClient:
         except BaseException as exc:
             handle.record_error(exc)
             handle.finish()
-            if step is not None:
-                step.record_error(exc)
+            # The step may recover through a bounded retry. Its context manager
+            # marks it failed only if the exception ultimately leaves the step.
             raise
 
         reply = sanitize({"role": "assistant", "content": result.text or "",
