@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 import httpx
@@ -58,6 +59,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                     self.connection_failed = True
                     raise openai.APIConnectionError(request=httpx.Request('POST', 'http://model.invalid'))
                 result = super().chat(messages, **kwargs)
+                result.reasoning_content = 'private-thinking-trace-test'
                 if result.tool_calls[0]['function']['name'] == 'finish':
                     result.tool_calls.append({'id': 'after-finish', 'type': 'function',
                                              'function': {'name': 'inspect_map', 'arguments': '{}'}})
@@ -68,7 +70,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
         thread.start()
         try:
             with tempfile.TemporaryDirectory() as raw, \
-                    patch('pko.scenario_map.model_retry.time.sleep'), \
+                    patch('pko.scenario_map.model_retry.time', SimpleNamespace(monotonic=time.monotonic, sleep=Mock())), \
                     patch.multiple(tracing, _tracer=None, _provider=None, _initialized=False), \
                     patch.dict(os.environ, {
                         'PKO_PHOENIX_ENABLED': 'true',
@@ -84,7 +86,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                                              spec=SPEC, client=FinalBatchClient())
                     provider = tracing._provider
                     self.assertIsNotNone(provider)
-                    self.assertEqual(completed['run']['status'], 'completed')
+                    self.assertEqual(completed['run']['status'], 'completed', completed['run'])
                     failing = SimpleNamespace(spec=SPEC, chat=Mock(side_effect=RuntimeError('password=private-test unavailable')))
                     failed = run_scenario(SCENARIO, sources(), output / 'failed', spec=SPEC, client=failing)
                     self.assertEqual(failed['run']['status'], 'failed')
@@ -129,6 +131,7 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                             self.assertEqual(len(llms), 1)
                             self.assertEqual(llms[0].status.code, 2)
                     self.assertNotIn(b'private-test', b''.join(b.SerializeToString() for b in batches))
+                    self.assertNotIn(b'private-thinking-trace-test', b''.join(b.SerializeToString() for b in batches))
                 finally:
                     if tracing._provider is not None:
                         tracing._provider.shutdown()

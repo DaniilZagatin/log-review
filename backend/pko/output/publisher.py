@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,8 +67,23 @@ def _validate_staged(paths: list[Path]) -> None:
 
 
 def _replace(source: Path, target: Path) -> None:
-    """Отдельная точка атомарной замены, в том числе для fault-injection тестов."""
-    source.replace(target)
+    """Atomic replace with a short, bounded retry for Windows access conflicts.
+
+    Access denied can be permanent as well as temporary. Retry only the native
+    access/sharing/lock errors; after 0.75 seconds of backoff the original OS
+    failure still reaches the caller's transaction rollback. Permissions and
+    file guards remain unchanged.
+    """
+    delays = (0.05, 0.1, 0.2, 0.4)
+    for attempt in range(len(delays) + 1):
+        try:
+            source.replace(target)
+            return
+        except OSError as exc:
+            if (sys.platform != "win32" or getattr(exc, "winerror", None) not in (5, 32, 33)
+                    or attempt == len(delays)):
+                raise
+            time.sleep(delays[attempt])
 
 
 def _commit_staged(staged: list[tuple[Path, Path]]) -> None:

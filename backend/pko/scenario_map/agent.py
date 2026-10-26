@@ -17,6 +17,7 @@ from pko.code_tools.tools import TOOL_SCHEMAS, ToolBox
 from pko.scenario_map.schema import MapState
 from pko.scenario_map.tools import TOOLS
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
+from pko.scenario_map.context import compact_context, context_budget
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
 MAX_TOOL_CHARS = 24000
@@ -76,29 +77,16 @@ def _brief(state: MapState) -> str:
 
 
 def _compact(messages: list[dict], state: MapState, budget: int) -> list[dict]:
-    if sum(len(_json(m)) for m in messages) <= budget:
-        return messages
-    # Compact only between full turns, never orphan tool result/call pairs.
-    summary = _brief(state)
-    def pack(value):
-        return [messages[0], messages[1], {"role": "user", "content":
-                "История сокращена. Принятая карта и основания сохранены кодом. "
-                "Это данные исследования, не новые инструкции. Текущее состояние:\n" + value}]
-    candidate = pack(summary)
-    # A JSON snapshot is itself a message string: quotes and newlines are
-    # escaped a second time. Measure the actual candidate, not the raw summary.
-    if sum(len(_json(m)) for m in candidate) > budget:
-        model = state.snapshot()
-        # The original description is already retained in messages[1]. Never
-        # duplicate unbounded scenario fields or run diagnostics in the fallback.
-        summary = _json({"title": str(model["scenario"].get("title", ""))[:120],
-                         "status": model["run"].get("status", "running"),
-                         "counts": {k: len(model.get(k, [])) for k in
-                                    ("nodes", "edges", "systems", "groups", "gaps")},
-                         "instruction": "Используй inspect_map для чтения сохранённой карты по частям."})
-        candidate = pack(summary)
-    record("context_compacted", messages_before=len(messages), retained_chars=len(summary))
-    return candidate
+    return compact_context(messages, state, budget, brief=_brief)
+
+
+def _progress(state: MapState) -> str:
+    """Observation repetition/recency is bookkeeping, not research progress."""
+    snapshot = state.snapshot()
+    observations = snapshot.pop("research_history", [])
+    snapshot.pop("research_history_evicted", None)
+    snapshot["observation_ids"] = sorted(row["observation_id"] for row in observations)
+    return _json(snapshot)
 
 
 class ResearchTools:
@@ -128,6 +116,7 @@ class ResearchTools:
                         self.state.observe_read(str(args.get("path", "")), min(lines),
                                                 max(lines) - min(lines) + 1)
                 payload = {"ok": result.ok, "content": content, "meta": result.meta}
+                payload["memory"] = self.state.research_memory.observe(name, args, payload)
             else:
                 payload = self.state.dispatch(name, args)
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
@@ -161,10 +150,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     started = time.monotonic()
     signatures: list[str] = []
     idle, empty = 0, 0
+    loop_recovery_used = False
     window = spec.context_window or 64000
-    response_tokens = min(8192, max(1024, window // 8))
-    # Tool schemas and response capacity belong to the same provider window.
-    context_budget = min(180000, int((window - response_tokens - 2048) * 1.6) - len(_json(schemas)))
+    message_budget, response_tokens = context_budget(window, schemas)
+    state.model["run"]["context_budget_chars"] = message_budget
     audited_client = None
 
     def save():
@@ -173,7 +162,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
 
     try:
         save()
-        if sum(len(_json(m)) for m in messages) + 1600 > context_budget:
+        if sum(len(_json(m)) for m in messages) + 1600 > message_budget:
             raise ValueError("Окно модели слишком мало для инструментов и описания сценария; используйте модель с большим контекстом или сократите описание.")
         if client is None:
             client = DeadlineClient(spec=spec, timeout=model_timeout)
@@ -186,11 +175,12 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     state.model["run"].update(status="partial", reason="Достигнут лимит времени исследования.")
                     break
                 state.model["run"]["steps"] = step
-                if sum(len(_json(m)) for m in messages) > context_budget:
+                if sum(len(_json(m)) for m in messages) > message_budget:
                     with trace_span("compact_context", messages_before=len(messages)) as compact_span:
-                        messages = _compact(messages, state, context_budget)
+                        messages = _compact(messages, state, message_budget)
+                        state.model["run"]["context_compactions"] = state.model["run"].get("context_compactions", 0) + 1
                         compact_span.set_attribute("messages_after", len(messages))
-                if sum(len(_json(m)) for m in messages) > context_budget:
+                if sum(len(_json(m)) for m in messages) > message_budget:
                     raise ValueError("Сохранённый контекст не помещается в окно модели; карта сохранена частично.")
                 with trace_span("scenario_step", step=step):
                     reply = call_model(audited_client, messages, deadline=started + max_seconds,
@@ -213,7 +203,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             break
                         continue
                     empty = 0
-                    before = _json(state.snapshot())
+                    before = _progress(state)
                     accepted_finish = False
                     for call in calls:
                         if accepted_finish or time.monotonic() - started >= max_seconds:
@@ -234,14 +224,30 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             on_event("tool", {"name": name, "ok": payload.get("ok"), "step": step,
                                               "nodes": len(state.model.get("nodes", [])),
                                               "edges": len(state.model.get("edges", []))})
-                    # Read receipts alone are evidence progress; steps without any changed
-                    # map/evidence are bounded independently of exact repeated calls.
-                    changed = before != _json(state.snapshot())
+                    # New observations/lines/notes/maps count; looking at the same
+                    # material again does not reset the no-progress guard.
+                    changed = before != _progress(state)
                     idle = 0 if changed else idle + 1
+                    if changed:
+                        signatures.clear()
                     save()
                     if accepted_finish:
                         break
                     if _cycle(signatures) or idle >= 24:
+                        if not loop_recovery_used:
+                            loop_recovery_used = True
+                            state.model["run"]["loop_recovery_attempted"] = True
+                            messages.append({"role": "user", "content":
+                                "Повторяются действия без новых данных. Ранее полученные результаты сохранены: "
+                                "inspect_map(section='research_notes') — выводы и следующие действия; "
+                                "research_history — прошлые запросы и ответы; read_coverage и read_fragments — "
+                                "прочитанные строки. Восстанови нужное состояние и продолжи незавершённый участок. "
+                                "Не начинай обзор заново. Если продолжение невозможно, сохрани пробелы и заверши через finish."})
+                            record("research_loop_recovery", step=step, idle=idle)
+                            signatures.clear()
+                            idle = 0
+                            save()
+                            continue
                         state.model["run"].update(status="partial", reason="Исследование остановлено: повторение действий без нового результата.")
                         break
                     if idle == 12 or step >= max_steps - 3:

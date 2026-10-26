@@ -393,7 +393,8 @@ class ScenarioMapTests(unittest.TestCase):
 
     def test_tool_contract_lists_all_mutation_handlers(self):
         names = [tool["function"]["name"] for tool in TOOLS]
-        self.assertEqual(len(set(names)), 11)
+        self.assertEqual(len(set(names)), 12)
+        self.assertIn("save_research_note", names)
         self.assertIn("inspect_map", names)
         self.assertIn("finish", names)
         for tool in TOOLS:
