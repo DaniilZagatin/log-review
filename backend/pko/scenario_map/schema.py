@@ -11,6 +11,7 @@ from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 import hashlib
 import json
+import re
 from typing import Any
 
 from pko.extractors.base import is_vendor
@@ -18,6 +19,7 @@ from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
 from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
+from pko.scenario_map.code_references import code_only
 
 SCHEMA_VERSION = "2.0"
 STEP_KINDS = ("operation",)
@@ -323,19 +325,97 @@ class MapState(ResearchQuality):
             except (MapValidationError, TypeError, ValueError) as exc:
                 return {"ok": False, "code": getattr(exc, "code", "invalid_arguments"), "error": str(exc)}
         original, counters = deepcopy(self.model), self._counters.copy()
+        created = name in self.REQUIRED_NEW and args.get("id") in (None, "")
         try:
             result = getattr(self, f"_{name}")(args)
+            if created:
+                self._require_new_fields(name, result["id"])
             errors = self._reference_errors()
             if errors:
                 raise MapValidationError("; ".join(errors))
             if name != "finish":
                 self.model["run"].update(status="running", reason="")
-            return {"ok": True, **result}
+            hints = self._hints(name, result)
+            return {"ok": True, **result, **({"hints": hints} if hints else {})}
         except (MapValidationError, TypeError, KeyError, ValueError) as exc:
             self.model = original
             self._counters = counters
             code = getattr(exc, "code", None) or ("quality_check" if isinstance(exc, QualityError) else "invalid_arguments")
             return {"ok": False, "code": code, "error": str(exc), **({"details": exc.details} if isinstance(exc, QualityError) else {})}
+
+    # Missing basis or code explanations used to surface only at finish, after
+    # the whole map was built on them. A new object is complete when created;
+    # an edit by id still names only the changed fields.
+    REQUIRED_NEW = {"upsert_step": "nodes", "upsert_transition": "edges"}
+
+    def _require_new_fields(self, name: str, identifier: str) -> None:
+        item = next(row for row in self.model[self.REQUIRED_NEW[name]] if row["id"] == identifier)
+        missing = []
+        if name == "upsert_step" and not item.get("description", "").strip():
+            missing.append("description")
+        if not item.get("basis", "").strip():
+            missing.append("basis")
+        if item.get("evidence_status") != "unknown" and not item.get("code_explanations"):
+            missing.append("code_explanations")
+        if missing:
+            raise MapValidationError(f"{name}: для нового объекта заполните {', '.join(missing)}; "
+                                     "при последующей правке по id передаются только изменяемые поля", "missing_fields")
+
+    BRANCH = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\b|^\s*(?:switch|when)\b|^\s*case\b|^\s*elif\b|^\s*default\s*:")
+
+    def _atomicity_hint(self, node: dict[str, Any]) -> str:
+        """Advisory: a node resting on several branches or executor calls that no
+        other operation shows is likely to merge several process steps."""
+        others = [ref for row in self.model["nodes"] if row["id"] != node["id"] for ref in row.get("evidence", [])]
+        lines = {(ref["path"], line) for ref in node.get("evidence", [])
+                 for line in range(ref["line_start"], ref["line_end"] + 1)}
+        own = {(path, line) for path, line in lines
+               if not any(o["path"] == path and o["line_start"] <= line <= o["line_end"] for o in others)}
+        branches = 0
+        for path, line in own:
+            text = self._reads.get(path, {}).get(line, "")
+            if self.BRANCH.search(code_only(text)):
+                branches += 1
+        calls = sum(1 for task in self.model["research_tasks"] if task.get("automatic")
+                    for ref in task["evidence"][:1] if (ref["path"], ref["line_start"]) in own)
+        long_range = len(own) >= 60
+        if branches < 3 and calls < 2 and not long_range:
+            return ""
+        parts = [f"{branches} ветвлений" if branches else "", f"{calls} вызовов других исполнителей" if calls else "",
+                 f"{len(own)} строк" if long_range else ""]
+        return (f"{node['id']}: основания охватывают {', '.join(p for p in parts if p)}, которые не показаны другими операциями. "
+                "Каждый шаг процесса должен быть отдельной операцией: если здесь несколько проверок, вызовов, расчётов "
+                "или результатов, раздели эту операцию и свяжи части переходами.")
+
+    def _hints(self, name: str, result: dict[str, Any]) -> list[str]:
+        """Immediate, non-blocking feedback; finish still enforces the hard rules."""
+        hints = []
+        terminals = set(self.model["scenario"].get("terminal_operation_ids", []))
+        nodes = {row["id"]: row for row in self.model["nodes"]}
+        if name == "upsert_step" and result.get("id") in nodes:
+            node = nodes[result["id"]]
+            hint = self._atomicity_hint(node)
+            if hint:
+                hints.append(hint)
+            if re.search(r"\s(?:и|или|а также)\s", node.get("name", "")):
+                hints.append(f"{node['id']}: в названии несколько действий через «и»/«или»; если это отдельные шаги процесса, "
+                             "сделай из них отдельные операции.")
+            if node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown":
+                hints.append(f"{node['id']}: у операции с выбором продолжения нет единственного исхода; outcome не указывай, "
+                             "исходы выражаются переходами к операциям, формирующим результат.")
+        if name == "upsert_transition" and result.get("id"):
+            edge = next((row for row in self.model["edges"] if row["id"] == result["id"]), None)
+            if edge and edge["source"] in terminals and not nodes.get(edge["source"], {}).get("completion_condition"):
+                hints.append(f"{edge['source']}: операция объявлена конечной, но получила продолжение; задай completion_condition "
+                             "или убери её из terminal_operation_ids.")
+        if name == "review_execution":
+            review = next((row for row in self.model["execution_reviews"] if row["id"] == result.get("id")), None)
+            for operation in (review or {}).get("operations", []):
+                if operation["node_id"] in nodes:
+                    hint = self._atomicity_hint(nodes[operation["node_id"]])
+                    if hint:
+                        hints.append(hint)
+        return hints[:12]
 
     def _inspect_map(self, args: dict[str, Any]) -> dict[str, Any]:
         section = _choice(args.get("section", "summary"), "section", INSPECT_SECTIONS)

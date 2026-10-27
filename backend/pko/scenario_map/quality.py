@@ -72,6 +72,8 @@ class ResearchQuality:
         return result
 
     def _dependency_files(self, task):
+        if task.get('implementation'):
+            return sorted({ref['path'] for ref in task['implementation']})
         owner = task['target'].rsplit('.', 1)[0] if '.' in task['target'] else task['target']
         basename = owner.rsplit('.', 1)[-1]
         candidates = [p for p in self._files if p.endswith('/'+basename+'.java') or p.endswith('/'+basename+'.py')]
@@ -87,6 +89,11 @@ class ResearchQuality:
         return candidates
 
     def _dependency_implementation(self, task, evidence):
+        if task.get('implementation'):
+            # A locally defined executor: its definition was delivered with the
+            # call site, so it is read once every line of the range was read.
+            return [self._range(ref) for ref in task['implementation']
+                    if all(line in self._reads.get(ref['path'], {}) for line in range(ref['line_start'], ref['line_end'] + 1))]
         symbol = task['target'].rsplit('.', 1)[-1]
         files = self._dependency_files(task)
         # Identical class/function names in other packages are not proof that a
@@ -135,9 +142,23 @@ class ResearchQuality:
     def discover_work(self, path):
         for item in dependencies(path, self._reads.get(path, {})):
             key = (item['target'], item['evidence'][0]['path'], item['evidence'][0]['line_start'])
-            if any((t['target'], t['evidence'][0]['path'], t['evidence'][0]['line_start']) == key
-                   for t in self.model['research_tasks'] if t.get('automatic')):
+            automatic = [t for t in self.model['research_tasks'] if t.get('automatic')]
+            if any((t['target'], t['evidence'][0]['path'], t['evidence'][0]['line_start']) == key or
+                   any(self._range(ref) == item['evidence'][0] for ref in t['evidence']) and t['target'] == item['target']
+                   for t in automatic):
                 continue
+            if not item.get('implementation'):
+                # The same implementation called from several places is one unit
+                # of research. Merge only when both resolve to exactly the same
+                # file: same-named classes in other packages stay separate. Each
+                # call site is kept, and repeated calls remain separate operations.
+                files = self._dependency_files(item)
+                same = next((t for t in automatic if t['target'] == item['target'] and t['kind'] == item['kind'] and
+                             not t.get('implementation') and len(files) == 1 and self._dependency_files(t) == files and
+                             len(t['evidence']) < 12), None)
+                if same is not None:
+                    same['evidence'] = same['evidence'] + self._evidence(item['evidence'][:1])
+                    continue
             if len(self.model['research_tasks']) >= 500:
                 self.model['run']['research_tasks_overflow'] = True
                 break
@@ -153,19 +174,27 @@ class ResearchQuality:
         seen.add(task['id'])
         implementation = self._dependency_implementation(task, task['evidence'])
         if task.get('automatic') and not implementation:
-            return 'mapped требует прочитанного объявления/реализации зависимости, не только места её регистрации'
+            files = self._dependency_files(task)
+            where = (f"реализация ожидается в {', '.join(files[:3])}; прочитайте её объявление" if len(files) == 1 else
+                     f"возможные реализации: {', '.join(files[:3])}; по импортам определите нужную и прочитайте её" if files else
+                     'реализации нет в переданных источниках: зафиксируйте пробел missing_source либо обоснуйте out_of_scope')
+            return f'mapped требует прочитанной реализации зависимости, а не места её вызова; {where}'
         children = task.get('child_task_ids', [])
         index = {t['id']: t for t in self.model['research_tasks']}
         discovered = {t['id'] for t in index.values() if t.get('automatic') and t['id'] != task['id'] and
                       any(self._overlap(ref, scope) for ref in t['evidence'][:1] for scope in implementation)}
-        if any(index[x]['status'] != 'out_of_scope' for x in discovered - set(children)):
-            return 'добавьте все найденные дочерние зависимости либо обоснованно исключите их'
+        pending = sorted(x for x in discovered - set(children) if index[x]['status'] != 'out_of_scope')
+        if pending:
+            return ('добавьте в child_task_ids найденные в реализации дочерние задачи либо обоснованно исключите их: ' +
+                    ', '.join(f"{x} ({index[x]['target']})" for x in pending[:12]))
         if children:
             index = {t['id']: t for t in self.model['research_tasks']}
             for identifier in children:
                 child = index.get(identifier)
                 if not child or child['status'] != 'mapped':
-                    return 'дочерняя задача ещё не отображена в карте'
+                    unfinished = [x for x in children if x in index and index[x]['status'] != 'mapped']
+                    return ('сначала закройте дочерние задачи: ' +
+                            ', '.join(f"{x} ({index[x]['target']}, {index[x]['status']})" for x in unfinished[:12]))
                 if not any(self._overlap(ref, scope) for ref in child['evidence'][:1] for scope in implementation):
                     return 'дочерняя задача не обнаружена в прочитанной реализации родителя'
                 if self._task_mapping_error(child, seen):
@@ -224,6 +253,9 @@ class ResearchQuality:
                 "resolution": text(args.get('resolution'), 'resolution') if status != 'open' else '',
                 "evidence": evidence, "node_ids": node_ids, "gap_ids": gap_ids,
                 "child_task_ids": child_ids, "automatic": bool(old and old.get('automatic'))}
+        if old and old.get('implementation'):
+            # A discovered local definition keeps its location across updates.
+            item['implementation'] = old['implementation']
         if old and old.get('automatic') and (item['target'] != old['target'] or item['kind'] != old['kind']):
             raise QualityError("Нельзя менять цель или вид автоматически обнаруженной зависимости")
         if status in ('read', 'analyzed') and item['automatic'] and not self._dependency_implementation(item, evidence):
@@ -302,43 +334,89 @@ class ResearchQuality:
             "signature": self.quality_signature(), "brief_revision": (self.model['research_brief'] or {}).get('revision')}
         return {"status": "model_reviewed_not_verified", "semantic_verification": False}
 
+    @staticmethod
+    def _range(ref):
+        return {'path': ref['path'], 'line_start': ref['line_start'], 'line_end': ref['line_end']}
+
     def _route_cases(self, rows):
         if not isinstance(rows, list) or len(rows) > 500:
             raise QualityError('route_cases: ожидается до 500 конкретных случаев')
-        result = []
-        nodes = {n['id'] for n in self.model['nodes']}
+        result, problems = [], []
+        node_index = {n['id']: n for n in self.model['nodes']}
         edges = [e for e in self.model['edges'] if e['kind'] != 'data']
         pairs = {(e['source'], e['target']) for e in edges}
-        for row in rows:
+        for number, row in enumerate(rows, 1):
+            # Validate every case and report all problems at once: one wrong
+            # route must not cost a full resubmission per discovered error.
+            name = row.get('name', '') if isinstance(row, dict) else ''
+
+            def problem(field, message, **extra):
+                problems.append({'case_index': number, 'case': str(name)[:200], 'field': field, 'problem': message, **extra})
             if not isinstance(row, dict) or set(row) - {'name','input','path','expected_result','evidence','edge_ids'} or not {'name','input','path','expected_result','evidence'}.issubset(row):
-                raise QualityError('route_cases: нужны name, input, path, expected_result, evidence')
+                problem('route_cases', 'нужны name, input, path, expected_result, evidence')
+                continue
             path = row['path']
-            if not isinstance(path, list) or not 1 <= len(path) <= 1000 or any(not isinstance(n,str) or n not in nodes for n in path):
-                raise QualityError('route_cases.path: нужны существующие операции в порядке выполнения')
-            if any((a,b) not in pairs for a,b in zip(path,path[1:])):
-                raise QualityError('route_cases.path: путь содержит отсутствующий переход')
-            refs = self._evidence(row['evidence'])
+            if not isinstance(path, list) or not 1 <= len(path) <= 1000 or any(not isinstance(n,str) or n not in node_index for n in path):
+                problem('path', 'нужны существующие операции в порядке выполнения',
+                        unknown_ids=[n for n in path if not isinstance(n, str) or n not in node_index][:10] if isinstance(path, list) else [])
+                continue
+            missing_pairs = [[a, b] for a, b in zip(path, path[1:]) if (a, b) not in pairs]
+            if missing_pairs:
+                problem('path', 'между этими операциями нет перехода', missing_transitions=missing_pairs[:10])
+                continue
+            try:
+                refs = self._evidence(row['evidence'])
+            except (QualityError, ValueError) as exc:
+                problem('evidence', str(exc))
+                continue
             if not refs:
-                raise QualityError('route_cases: нужны прочитанные основания случая')
-            if len(path)==1:
-                node = next(n for n in self.model['nodes'] if n['id']==path[0])
-                if node.get('evidence') and not any(self._overlap(a,b) for a in refs for b in node['evidence']):
-                    raise QualityError('route_cases: основания остановки должны относиться к конечной операции')
+                problem('evidence', 'нужны прочитанные основания входной ситуации и ожидаемого результата')
+                continue
             selected = row.get('edge_ids')
             if selected is not None and (not isinstance(selected, list) or len(selected) != len(path)-1):
-                raise QualityError('route_cases.edge_ids: один переход для каждой пары операций')
-            traversed = []
-            for i, (a,b) in enumerate(zip(path,path[1:])):
+                problem('edge_ids', 'нужен один переход для каждой пары соседних операций пути')
+                continue
+            traversed, ambiguous = [], []
+            for i, (a, b) in enumerate(zip(path, path[1:])):
                 candidates = [e for e in edges if e['source']==a and e['target']==b and (selected is None or e['id']==selected[i])]
                 if len(candidates) != 1:
-                    raise QualityError('route_cases: неоднозначный переход; укажите edge_ids по порядку пути')
-                edge = candidates[0]
-                support = edge.get('evidence', []) + edge.get('sender_evidence', []) + edge.get('receiver_evidence', [])
-                if support and not any(self._overlap(a,b) for a in refs for b in support):
-                    raise QualityError('route_cases: основания случая должны относиться к пройденным переходам')
-                traversed.append(edge['id'])
-            result.append({key: self.business_text(row[key], 'route_cases.'+key) for key in ('name','input','expected_result')} |
-                          {'path': list(path), 'edge_ids': traversed, 'evidence': refs})
+                    ambiguous.append({'from': a, 'to': b, 'edge_ids': [e['id'] for e in edges if e['source']==a and e['target']==b]})
+                    continue
+                traversed.append(candidates[0])
+            if ambiguous:
+                problem('edge_ids', 'между операциями несколько переходов; укажи edge_ids по порядку пути', transitions=ambiguous[:10])
+                continue
+            # The traversed transitions already carry their own checked evidence;
+            # the harness collects it. The case cites what supports the situation
+            # and the expected result, which must belong to this route.
+            route = [r for n in path for r in node_index[n].get('evidence', [])] + \
+                    [r for e in traversed for r in e.get('evidence', []) + e.get('sender_evidence', []) + e.get('receiver_evidence', [])]
+            if len(path) == 1:
+                stop = node_index[path[0]].get('evidence', [])
+                if stop and not any(self._overlap(a, b) for a in refs for b in stop):
+                    problem('evidence', 'основания остановки должны относиться к конечной операции',
+                            node_id=path[0], expected_ranges=[self._range(r) for r in stop[:3]])
+                    continue
+            elif route and not any(self._overlap(a, b) for a in refs for b in route):
+                problem('evidence', 'основания случая не относятся ни к одной операции или переходу этого маршрута',
+                        expected_ranges=[self._range(r) for r in route[:4]])
+                continue
+            try:
+                texts = {key: self.business_text(row[key], 'route_cases.'+key) for key in ('name','input','expected_result')}
+            except QualityError as exc:
+                problem('name/input/expected_result', str(exc))
+                continue
+            transition_evidence = []
+            for edge in traversed:
+                for ref in edge.get('evidence', []):
+                    if self._range(ref) not in transition_evidence:
+                        transition_evidence.append(self._range(ref))
+            result.append(texts | {'path': list(path), 'edge_ids': [e['id'] for e in traversed], 'evidence': refs,
+                                   'transition_evidence': transition_evidence[:50]})
+        if problems:
+            raise QualityError(f'route_cases: требуют исправления случаи {", ".join(str(n) for n in sorted({p["case_index"] for p in problems})[:20])}; '
+                               'остальные случаи корректны и могут быть отправлены без изменений',
+                               cases=problems[:20], problem_count=len(problems))
         return result
 
     def quality_errors(self):

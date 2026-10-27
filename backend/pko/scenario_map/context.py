@@ -183,9 +183,14 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     counts = {field: len(model.get(field, [])) for field in
               ("groups", "nodes", "edges", "gaps", "read_coverage",
                "research_history", "research_notes", "research_tasks")}
+    rejections = (model.get("run") or {}).get("recent_rejections") or []
     result: dict[str, Any] = {
         "counts": counts,
         "open_task_count": sum(task.get('status') in UNFINISHED_TASK_STATUSES for task in _rows(model, 'research_tasks')),
+        # Unresolved rejections come from harness state: after compaction the
+        # agent still sees which case, object and range to fix.
+        "unresolved_rejections": rejections[-3:] if detail else [
+            {key: row.get(key, "") for key in ("tool", "code")} for row in rejections[-3:]],
         "recovery": {
             "research_tasks": "inspect_map(section='research_tasks'): незавершённые функции, промпты, вложенные исполнители; до finish раскрыть либо связать с gap",
             "semantic_review": "inspect_map(section='semantic_review'): публичная смысловая проверка исходов, порядка, маршрутов и атомарности; не доказанная полнота",

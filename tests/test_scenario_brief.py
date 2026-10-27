@@ -33,7 +33,8 @@ class ScenarioBriefTests(unittest.TestCase):
 
     def test_first_node_requires_saved_orientation_after_actual_read(self):
         node = {"name": "Приём заявки", "kind": "operation",
-                "description": "Вход варианта", "evidence_status": "unknown", "evidence": []}
+                "description": "Вход варианта", "basis": "Вход варианта пока не подтверждён кодом.",
+                "evidence_status": "unknown", "evidence": []}
         rejected = self.call("upsert_step", node)
         self.assertFalse(rejected["ok"])
         self.assertIn("save_research_brief", rejected["error"])

@@ -28,6 +28,7 @@ def explain_args(args):
     args.setdefault('code_explanations', [{'kind':'fragment','symbol':'',
         'explanation': args['basis'], 'evidence': args['evidence'][:1]}] if args.get('evidence') else [])
     if 'source' not in args:
+        args.setdefault('description', 'Самостоятельный шаг тестового процесса.')
         args.setdefault('kind', 'operation')
         args.setdefault('effect_kind','result')
     return args

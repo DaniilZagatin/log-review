@@ -41,6 +41,9 @@ def symbol_valid(name: str, kind: str, text: str) -> bool:
     return kind == "fragment" and not name
 
 
+BUILDER_METHODS = frozenset({"builder", "newBuilder"})
+
+
 def dependencies(path: str, lines: dict[int, str]) -> list[dict]:
     """Explicit orchestration/prompt references are work, not proof of execution."""
     found = []
@@ -66,11 +69,32 @@ def dependencies(path: str, lines: dict[int, str]) -> list[dict]:
         if symbols(code):
             current_scope[window] = number
         scopes[number] = (window, current_scope.get(window, 0))
+    code_at = dict(cleaned_lines)
+
+    def statement_end(start):
+        """Last line of the statement starting at start, within its read window."""
+        depth, window = 0, window_for[start]
+        for number in windows[window]:
+            if number < start:
+                continue
+            code = code_at[number]
+            depth += code.count('(') + code.count('{') - code.count(')') - code.count('}')
+            if depth <= 0 and ';' in code:
+                return number
+        return windows[window][-1]
+
+    def inline(match_class, match_method, number):
+        # A builder call defines the executor here; its handler is local code,
+        # while the library builder itself is never the implementation to read.
+        if match_method not in BUILDER_METHODS:
+            return None
+        return [{"path": path, "line_start": number, "line_end": statement_end(number)}]
+
     for number, code in cleaned_lines:
         for match in re.finditer(r'\b(?:Agent|AgentNode|Role|var|final\s+var)\s+(\w+)\s*=\s*([A-Z]\w*)\.(\w+)\s*\(', code):
-            bindings.setdefault((scopes[number], match[1]), []).append((match[2]+'.'+match[3], number))
+            bindings.setdefault((scopes[number], match[1]), []).append((match[2]+'.'+match[3], number, match[1]))
     seen = set()
-    def add(kind, target, number, binding_line=None):
+    def add(kind, target, number, binding_line=None, implementation=None):
         key = (kind, target, number)
         if key in seen:
             return
@@ -78,16 +102,24 @@ def dependencies(path: str, lines: dict[int, str]) -> list[dict]:
         evidence = [{"path": path, "line_start": number, "line_end": number}]
         if binding_line is not None and binding_line != number:
             evidence.append({"path": path, "line_start": binding_line, "line_end": binding_line})
-        found.append({"kind": kind, "target": target, "evidence": evidence})
+        item = {"kind": kind, "target": target, "evidence": evidence}
+        if implementation:
+            item["implementation"] = implementation
+        found.append(item)
     for number, code in cleaned_lines:
         for match in re.finditer(r'\.(systemPrompt|addChild|runAgent)\(\s*([A-Z]\w*)\.(\w+)', code):
-            add("prompt" if match[1] == "systemPrompt" else "executor", match[2]+'.'+match[3], number)
+            kind = "prompt" if match[1] == "systemPrompt" else "executor"
+            local = inline(match[2], match[3], number) if kind == "executor" else None
+            add(kind, f"встроенная роль в строке {number} ({match[2]}.{match[3]})" if local else match[2]+'.'+match[3],
+                number, implementation=local)
         for match in re.finditer(r'\.(addChild|runAgent)\(\s*([a-zA-Z_]\w*)\s*[,)]', code):
-            candidates = [(target, line) for target, line in bindings.get((scopes[number], match[2]), []) if line < number]
+            candidates = [(target, line, name) for target, line, name in bindings.get((scopes[number], match[2]), []) if line < number]
             # Reused variable names or declarations in multiple methods are
             # ambiguous, not proof of a global binding.
             if len(candidates) == 1:
-                add('executor', candidates[0][0], number, candidates[0][1])
+                target, line, name = candidates[0]
+                local = inline(*target.split('.', 1), line)
+                add('executor', f"{name} ({target})" if local else target, number, line, implementation=local)
         for match in re.finditer(r'\breturn\s+([A-Z]\w*)\.(createAgent)\s*\(', code):
             add('executor', match[1]+'.'+match[2], number)
     return found

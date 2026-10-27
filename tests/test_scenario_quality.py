@@ -1,5 +1,6 @@
 """Regressions distilled from the two P3283 runs; no bank sources required."""
 import copy
+import json
 import unittest
 
 from pko.scenario_map.schema import MapState
@@ -308,13 +309,13 @@ class OperationMethodologyQualityTests(unittest.TestCase):
         self.branches();payload=review_payload(self.state)
         payload['route_cases'][0]['path'].reverse()
         result=self.state.dispatch('review_semantics',payload)
-        self.assertFalse(result['ok']);self.assertIn('отсутствующий переход',result['error'])
+        self.assertFalse(result['ok']);self.assertIn('нет перехода',json.dumps(result['details'],ensure_ascii=False))
 
     def test_same_pair_different_conditions_require_exact_edges(self):
         self.branches(same_target=True);payload=review_payload(self.state)
         payload['route_cases'][0].pop('edge_ids')
         result=self.state.dispatch('review_semantics',payload)
-        self.assertFalse(result['ok']);self.assertIn('неоднозначный',result['error'])
+        self.assertFalse(result['ok']);self.assertIn('несколько переходов',json.dumps(result['details'],ensure_ascii=False))
         payload=review_payload(self.state);payload['route_cases'].pop()
         self.assertFalse(self.state.dispatch('review_semantics',payload)['ok'])
         self.assertTrue(self.state.dispatch('review_semantics',review_payload(self.state))['ok'])
@@ -324,7 +325,9 @@ class OperationMethodologyQualityTests(unittest.TestCase):
         payload=review_payload(self.state)
         payload['route_cases'][0]['evidence']=[{'path':'source-1/Worker.java','line_start':1,'line_end':3}]
         result=self.state.dispatch('review_semantics',payload)
-        self.assertFalse(result['ok']);self.assertIn('пройденным переходам',result['error'])
+        self.assertFalse(result['ok'])
+        self.assertEqual(result['details']['cases'][0]['case_index'],1)
+        self.assertIn('не относятся ни к одной операции или переходу',result['details']['cases'][0]['problem'])
 
     def test_routing_check_cannot_omit_edges(self):
         self.branches();payload=review_payload(self.state);payload['checks']['routing']['edge_ids']=[]
@@ -387,8 +390,8 @@ class OperationMethodologyQualityTests(unittest.TestCase):
         a=self.node();b=self.node()
         args={'source':a,'target':b,'kind':'branch','evidence_status':'observed','evidence':[self.ref]}
         for condition in ['days > 365','Срок > 365','category_id == 4','taskTypeName']:
-            self.assertFalse(self.state.dispatch('upsert_transition',{**args,'condition':condition})['ok'])
-        self.assertTrue(self.state.dispatch('upsert_transition',{**args,'condition':'С момента перевода прошло более 365 дней'})['ok'])
+            self.assertFalse(self.state.dispatch('upsert_transition',explain_args({**args,'condition':condition}))['ok'])
+        self.assertTrue(self.state.dispatch('upsert_transition',explain_args({**args,'condition':'С момента перевода прошло более 365 дней'}))['ok'])
 
     def test_obvious_code_names_rejected_but_business_acronyms_remain(self):
         for name in ['CheckAgent.createAgent()','ATM_83','Проверка idEcm','DateAgent.java']:

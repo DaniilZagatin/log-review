@@ -203,8 +203,8 @@ class ScenarioMapTests(unittest.TestCase):
         args = {"name": "Получение обращения", "evidence_status": "observed", "evidence": evidence}
         raw = deepcopy(args)
         raw["evidence"][0]["quote"] = "password = 'not-for-output'"
-        self.assertFalse(self.state.dispatch("upsert_step", raw)["ok"])
-        self.assertTrue(self.state.dispatch("upsert_step", args)["ok"])
+        self.assertFalse(self.state.dispatch("upsert_step", explain_args(raw))["ok"])
+        self.assertTrue(self.state.dispatch("upsert_step", explain_args(args))["ok"])
         other = deepcopy(args)
         other["evidence"][0]["line_start"] = 1
         self.assertFalse(self.state.dispatch("upsert_step", other)["ok"])

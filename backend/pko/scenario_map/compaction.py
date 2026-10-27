@@ -69,6 +69,9 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             "open_tasks": bounded([_public(task) for task in open_tasks[:12]]),
             "open_task_count": len(open_tasks), "open_tasks_listed_all": len(open_tasks) <= 12,
             "recover_tasks": "inspect_map(section='research_tasks')",
+            # Taken from harness state, not from model prose: the summary must
+            # not drop a rejection that is still unresolved.
+            "recent_rejections": bounded(snapshot.get("run", {}).get("recent_rejections", [])),
         },
         "completed_exchanges": history,
         "omitted_exchange_count": 0,
@@ -84,8 +87,9 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
                 {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}]
 
     # This separate request also fits the same provider window. No tools are
-    # advertised; use no more than the existing message budget.
-    limit = min(budget, 60000)
+    # advertised; use no more than the budget derived from that window. A fixed
+    # small cap left the summarizer only the last few exchanges of a long run.
+    limit = budget
     if _size(request()) > limit:
         # Find the largest fitting suffix in logarithmic probes. Repeatedly
         # serializing and sanitizing an ever-shorter history is quadratic.

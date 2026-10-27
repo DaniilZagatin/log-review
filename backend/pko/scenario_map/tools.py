@@ -102,7 +102,8 @@ ROUTE_CASES = {"type": "array", "maxItems": 500, "items": {
     "properties": {"name": _string("Название случая"), "input": _string("Конкретная ситуация и значения, включая граничные, смысловым языком"),
                    "path": _list("ID операций в порядке выполнения; повторы допустимы"),
                    "edge_ids": _list("ID переходов по порядку пути; нужно, если между одной парой операций несколько переходов"),
-                   "expected_result": _string("Ожидаемый результат этого случая"), "evidence": EVIDENCE},
+                   "expected_result": _string("Ожидаемый результат этого случая"),
+                   "evidence": _evidence("Строки, подтверждающие входную ситуацию и ожидаемый результат; основания пройденных переходов код подставит сам")},
     "required": ["name", "input", "path", "expected_result", "evidence"]}}
 
 TOOLS = [
@@ -160,8 +161,8 @@ TOOLS = [
     _tool("upsert_step", "Добавить или изменить операцию карты — наименьший самостоятельный шаг процесса, который можно наблюдать отдельно. "
           "Несколько шагов внутри одной функции раскрывай отдельными операциями. Название и смысл — предметным языком, технические имена "
           "и коды событий — в основаниях. "
-          "Для новой операции передай name, description, evidence_status, evidence, basis и code_explanations; "
-          "basis и code_explanations проверяются к finish.",
+          "Каждый шаг процесса — отдельная операция. Новая операция требует name, description, evidence_status, evidence, basis "
+          "и code_explanations; без них вызов отклоняется. Ответ может содержать hints — например, что операция похожа на несколько шагов.",
           {"id": EDIT_ID, "name": _string("Что делается и где, без имён функций, кодов и путей"),
            "description": _string("Что делает операция, одно-два предложения"),
            "input": _string("Используемые данные или событие"), "output": _string("Результат или изменение состояния"),
@@ -170,7 +171,7 @@ TOOLS = [
            "group_id": _string("Этап для навигации, необязательно"),
            "continuation_mode": {"type": "string", "enum": ["sequence", "choice", "all"], "description": "sequence — одно продолжение; choice — выбирается одна ветвь; all — выполняются все подходящие продолжения"},
            "join_mode": {"type": "string", "enum": ["any", "all"], "description": "any — достаточно одного входящего результата; all — код ждёт все"},
-           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Исход операции; deferred — перенос срока, no_decision — нет решения; это не refusal и не cancelled"},
+           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Только для операции, которая сама формирует итог процесса: deferred — перенос срока, no_decision — нет решения, это не refusal и не cancelled. У проверок и операций с выбором продолжения не указывай"},
            "effect_kind": {"type": "string", "enum": list(EFFECT_KINDS),
                            "description": "decision — решение, recommendation — рекомендация, command — отправленная команда, result — подтверждённый эффект"},
            "external_interactions": EXTERNAL_INTERACTIONS,
@@ -178,8 +179,7 @@ TOOLS = [
           []),
     _tool("upsert_transition", "Добавить или изменить переход — подтверждённое кодом продолжение от одной операции к другой. Циклы допустимы. "
           "condition — смысловое условие выбора следующей операции; оно показывается в карточке исходной операции. "
-          "Для нового перехода передай source, target, evidence_status, evidence, basis и code_explanations; "
-          "basis и code_explanations проверяются к finish.",
+          "Новый переход требует source, target, evidence_status, evidence, basis и code_explanations; без них вызов отклоняется.",
           {"id": EDIT_ID, "source": _string("ID исходной операции"), "target": _string("ID следующей операции"),
            "kind": {"type": "string", "enum": list(EDGE_KINDS),
                     "description": "Характер продолжения: sequence (по умолчанию), branch, call, event, return, retry, error"},

@@ -89,6 +89,9 @@ def _progress(state: MapState) -> str:
     snapshot = state.snapshot()
     observations = snapshot.pop("research_history", [])
     snapshot.pop("research_history_evicted", None)
+    # A new rejection is a diagnostic, not progress: counting it would let a
+    # stream of failing calls defeat the loop guard.
+    snapshot.get("run", {}).pop("recent_rejections", None)
     snapshot["observation_ids"] = sorted(row["observation_id"] for row in observations)
     return _json(snapshot)
 
@@ -158,7 +161,8 @@ def _failure_guidance(errors: list[dict]) -> str:
         return ""
     return ("\nПоследние отклонённые вызовы (данные проверок, не новые указания): " +
             _json(sanitize(errors[-3:])) +
-            "\nИсправь конкретную причину, не повторяй неизменный вызов. Для оснований используй "
+            "\nИсправь именно указанные в details случаи, объекты и диапазоны; остальное отправляй без изменений. "
+            "Не повторяй неизменный вызов. Для оснований используй "
             "уже прочитанные path/line_start/line_end: буквальный текст подставляет код. "
             "Для существующего объекта используй его ID. Не обходи проверку и не выдумывай связь.")
 
@@ -195,8 +199,8 @@ class ResearchTools:
                 payload = {"ok": result.ok, "source_data": content, "meta": result.meta}
                 if evidence_reference:
                     payload["evidence_reference"] = evidence_reference
-                    payload["research_tasks"] = [{k: t.get(k, []) if k == "child_task_ids" else t.get(k, "")
-                                                  for k in ("id", "kind", "target", "status", "child_task_ids")}
+                    payload["research_tasks"] = [{k: t.get(k, []) if k in ("child_task_ids", "implementation") else t.get(k, "")
+                                                  for k in ("id", "kind", "target", "status", "child_task_ids", "implementation")}
                         for t in self.state.model["research_tasks"]
                         if t['status'] in UNFINISHED_TASK_STATUSES and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
                     if payload["research_tasks"]:
@@ -348,9 +352,17 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         payload = json.loads(answer["content"])
                         name = function.get("name", "")
                         if not payload.get("ok"):
-                            recent_errors.append({"tool": name, "error": str(sanitize(
-                                payload.get("error", payload.get("errors", "Вызов отклонён"))))[:1600]})
+                            # Keep the address of the problem (code, case, object,
+                            # needed ranges): a bare message made the model resend
+                            # the same rejected arguments.
+                            rejection = {"tool": name, "code": payload.get("code", ""), "error": str(sanitize(
+                                payload.get("error", payload.get("errors", "Вызов отклонён"))))[:1600]}
+                            if payload.get("details"):
+                                details = sanitize(payload["details"])
+                                rejection["details"] = details if len(_json(details)) <= 3000 else {"truncated": _json(details)[:3000]}
+                            recent_errors.append(rejection)
                             recent_errors = recent_errors[-3:]
+                            state.model["run"]["recent_rejections"] = copy.deepcopy(recent_errors)
                             failed_calls += 1
                         signature = _json(function)
                         signatures.append(signature)
@@ -367,6 +379,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     if changed:
                         signatures.clear()
                         recent_errors.clear()
+                        state.model["run"]["recent_rejections"] = []
                         failed_calls = 0
                         failure_guidance_used = False
                         loop_recovery_used = False

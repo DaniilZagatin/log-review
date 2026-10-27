@@ -11,6 +11,7 @@ from unittest.mock import patch
 from pko.scenario_map.schema import MapState
 from pko.scenario_map.tools import TOOLS
 import test_scenario_schema as fixtures
+from quality_helpers import explain_args
 
 
 class EvidenceRangeTests(unittest.TestCase):
@@ -31,10 +32,10 @@ class EvidenceRangeTests(unittest.TestCase):
         return {"path": self.path, "line_start": start, "line_end": end, **extra}
 
     def system(self, evidence, **extra):
-        return self.state.dispatch("upsert_step", {
+        return self.state.dispatch("upsert_step", explain_args({
             "name": "Обработка обращения",
             "evidence_status": "observed", "evidence": evidence, **extra,
-        })
+        }))
 
     def test_manager_range_uses_exact_delivered_lines_without_rereading_source(self):
         self.state.observe_read(self.path, 43, 25)
@@ -144,12 +145,12 @@ class EvidenceRangeTests(unittest.TestCase):
         self.assertTrue(group["ok"], group)
         nodes = []
         for name in ("Проверить обращение", "Сохранить обращение"):
-            result = self.state.dispatch("upsert_step", {"name": name, "group_id": group["id"],
-                "evidence_status": "observed", "evidence": evidence})
+            result = self.state.dispatch("upsert_step", explain_args({"name": name, "group_id": group["id"],
+                "evidence_status": "observed", "evidence": evidence}))
             self.assertTrue(result["ok"], result)
             nodes.append(result["id"])
-        transition = self.state.dispatch("upsert_transition", {"source": nodes[0], "target": nodes[1], "kind": "sequence",
-            "evidence_status": "observed", "evidence": evidence})
+        transition = self.state.dispatch("upsert_transition", explain_args({"source": nodes[0], "target": nodes[1], "kind": "sequence",
+            "evidence_status": "observed", "evidence": evidence}))
         self.assertTrue(transition["ok"], transition)
         for collection in ("research_notes", "groups", "nodes", "edges"):
             for item in self.state.model[collection]:
