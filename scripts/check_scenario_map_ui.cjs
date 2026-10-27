@@ -1,5 +1,5 @@
 /* Optional browser acceptance check. Requires Playwright and installed Edge.
- * Reads a generated, synthetic HTML fixture; uses a fresh offline browser.
+ * Reads a generated HTML map; uses a fresh offline browser without source execution.
  * Usage: node scripts/check_scenario_map_ui.cjs report.html [screenshot-folder]
  */
 const fs = require('node:fs');
@@ -24,6 +24,9 @@ async function main() {
       await page.waitForFunction(() => document.querySelectorAll('.node').length > 0);
       assert.equal(await page.locator('.node').count(), model.nodes.length);
       assert.equal(await page.locator('.edge').count(), model.edges.length);
+      assert(await page.locator('.edge-visible').evaluateAll(edges=>edges.every(e=>{
+        const d=e.getAttribute('d');return d.includes('C ')&&!/[LQHV]/.test(d);
+      })), 'Every link must be drawn with cubic curves');
       const geometry = await page.evaluate(() => {
         const stage = document.getElementById('stage');
         const nodes = [...document.querySelectorAll('.node')].map(n => ({id:n.dataset.nodeId,x:n.offsetLeft,y:n.offsetTop,w:n.offsetWidth,h:n.offsetHeight}));
@@ -39,6 +42,22 @@ async function main() {
       for (const node of geometry.nodes) {
         assert(node.x>=0&&node.y>=0&&node.x+node.w<=geometry.width+1&&node.y+node.h<=geometry.height+1, 'Node must remain inside canvas');
       }
+      const edgeGeometry = await page.evaluate(edges => {
+        const boxes=[...document.querySelectorAll('.node')].map(n=>({id:n.dataset.nodeId,x:n.offsetLeft,y:n.offsetTop,w:n.offsetWidth,h:n.offsetHeight}));
+        const crossings=[];
+        for(const edge of edges){
+          const path=document.querySelector('[data-edge-id="'+edge.id+'"] .edge-visible');
+          const length=path.getTotalLength(),steps=Math.ceil(length/4);
+          const others=boxes.filter(n=>n.id!==edge.source&&n.id!==edge.target);
+          for(let i=0;i<=steps;i++){
+            const point=path.getPointAtLength(length*i/steps);
+            const box=others.find(n=>point.x>n.x+1&&point.x<n.x+n.w-1&&point.y>n.y+1&&point.y<n.y+n.h-1);
+            if(box){crossings.push([edge.id,box.id]);break;}
+          }
+        }
+        return crossings;
+      }, model.edges);
+      assert.deepEqual(edgeGeometry, [], 'Curves must avoid unrelated node boxes');
       await page.locator('#notation-toggle').click();
       assert.equal(await page.locator('#notation-items .notation-item').count(), 8);
       assert.match(await page.locator('#notation-panel').innerText(), /АС — автоматизированная система/);
@@ -85,6 +104,16 @@ async function main() {
       if(member.basis){
         assert.equal(await page.locator('#inspector-content dl').filter({has:page.locator('dt',{hasText:/^Обоснование$/})}).locator('dd').innerText(),member.basis);
       }
+      if(member.code_explanations?.length){
+        const explanations=page.locator('#inspector-content .code-explanation');
+        assert.equal(await explanations.count(),member.code_explanations.length);
+        for(let i=0;i<member.code_explanations.length;i++){
+          const entry=member.code_explanations[i],content=await explanations.nth(i).innerText();
+          assert(content.includes(entry.explanation));
+          if(entry.symbol)assert(content.includes(entry.symbol));
+        }
+      }
+      if(output&&width>900)await page.screenshot({path:path.join(output,`explanation-${width}x${height}.png`)});
       assert.equal(await page.locator('#inspector-content details[open]').count(),0,'Literal citations and system details start collapsed');
       const system=model.systems.find(s=>s.id===member.system_id);
       if(system?.basis){
@@ -109,7 +138,7 @@ async function main() {
         await page.screenshot({path:path.join(output,`map-${width}x${height}.png`)});
       }
       assert.deepEqual(errors, [], 'No browser runtime errors');
-      console.log(`PASS ${width}x${height}: compact header, all nodes, stage framing, adjacent nodes, readable explanations, AS boundaries, keyboard, zoom`);
+      console.log(`PASS ${width}x${height}: smooth curves, no card crossings, all nodes, stages, explanations, AS boundaries, keyboard, zoom`);
       await page.close();
     }
   } finally {

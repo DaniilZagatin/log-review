@@ -167,6 +167,20 @@ class ScenarioAgentTests(unittest.TestCase):
         audit = next((output / "audit").glob("run_*.txt")).read_text(encoding="utf-8")
         self.assertIn("scenario_tool", audit)
         self.assertNotIn("reasoning_content", audit)
+        final_event = json.loads(audit[audit.rfind('\n{')+1:])
+        self.assertEqual((final_event['event'], final_event['result']), ('run_finished', 'completed'))
+
+    def test_partial_run_is_reported_as_partial_in_audit_and_records_mode(self):
+        from dataclasses import replace
+        spec = replace(SPEC, extra_body={'chat_template_kwargs': {'enable_thinking':True}})
+        output = self.root / 'partial'
+        with patch.dict(os.environ, {'PKO_PHOENIX_ENABLED':'false'}):
+            result = run_scenario(SCENARIO, sources(), output, spec=spec, client=ScriptedClient(), max_steps=2)
+        self.assertEqual(result['run']['model_mode'], 'reasoning')
+        audit = next((output/'audit').glob('run_*.txt')).read_text(encoding='utf-8')
+        final_event = json.loads(audit[audit.rfind('\n{')+1:])
+        self.assertEqual((final_event['event'], final_event['result']), ('run_finished', 'partial'))
+        self.assertIn('"model_mode": "reasoning"', audit)
 
     def test_runner_rejects_output_that_would_exclude_its_sources(self):
         from pko.errors import PkoError
@@ -197,6 +211,8 @@ class ScenarioAgentTests(unittest.TestCase):
             requests = 0
 
             def chat(self, messages, **kwargs):
+                if not kwargs.get('tools'):
+                    return super().chat(messages, **kwargs)
                 self.requests += 1
                 if self.requests > first_node:
                     raise openai.APIConnectionError(request=httpx.Request('POST', 'http://model.invalid'))

@@ -79,6 +79,26 @@ class ScenarioCompactionTests(unittest.TestCase):
                 self.assertEqual(result[-2:], self.exchange(2))
                 self.assertNotIn("PRIVATE_SENTINEL", json.dumps(result))
 
+    def test_open_task_truncation_is_explicit_and_durable_across_summaries(self):
+        ref = {'path':'source-1/channel.py', 'line_start':1, 'line_end':2}
+        for number in range(15):
+            result = self.state.dispatch('save_research_task', {'kind':'function', 'target':f'work-{number}',
+                'evidence':[ref], 'status':'open'})
+            self.assertTrue(result['ok'], result)
+        requests = []
+        def summarize(request):
+            requests.append(json.loads(request[1]['content']))
+            return scripted_summary()
+        current = self.history()
+        for revision in (1, 2):
+            current = self.compress(summarize, current, budget=24000)
+            self.assertEqual(self.state.model['context_summary']['revision'], revision)
+            self.assertFalse(self.state.model['context_summary']['input_open_tasks_complete'])
+            self.assertEqual(requests[-1]['current_state']['open_task_count'], 15)
+            self.assertEqual(len(requests[-1]['current_state']['open_tasks']), 12)
+            self.assertEqual(len(self.state.dispatch('inspect_map', {'section':'research_tasks','limit':30})['items']), 15)
+            current += self.exchange(10+revision, 'new data '*6000)
+
     def test_summary_cannot_cite_unread_lines_or_replace_evidence_cache(self):
         value = json.loads(scripted_summary().text)
         value["references"] = [{"path": "source-1/channel.py", "line_start": 3, "line_end": 3}]

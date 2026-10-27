@@ -17,8 +17,9 @@ from pko.extractors.base import is_vendor
 from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
+from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
 
-SCHEMA_VERSION = "1.5"
+SCHEMA_VERSION = "1.6"
 STEP_KINDS = ("start", "action", "decision", "fork", "join", "wait", "end", "external")
 GROUP_KINDS = ("stage",)
 SYSTEM_IMPLEMENTATIONS = ("provided", "external", "unknown")
@@ -31,7 +32,7 @@ MAX_TEXT = 6000
 OPERATION_KINDS = ("action", "validation", "read", "write", "integration", "publish", "wait", "calculation", "transform", "error_handling")
 OPERATION_NODE_KINDS = ("action", "decision", "wait", "external")
 EXECUTION_CHECKS = ("branches", "failures", "integrations", "state_changes", "computations")
-INSPECT_SECTIONS = ("summary", "scenario", "systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "research_brief", "context_summary", "frontier", "validation")
+INSPECT_SECTIONS = ("summary", "scenario", "systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "research_brief", "context_summary", "research_tasks", "semantic_review", "frontier", "validation")
 LIMITATIONS = [
     "Карта ограничена выбранным вариантом сценария и переданными материалами.",
     "Статический анализ и проверка цитат не доказывают исполнение в рабочей среде, полноту анализа или правильность бизнес-интерпретации.",
@@ -69,7 +70,7 @@ def _choice(value: Any, field: str, choices: tuple[str, ...]) -> str:
     return value
 
 
-class MapState:
+class MapState(ResearchQuality):
     """Agent-facing state; JSON is deliberately independent from ProgressModel."""
 
     def __init__(self, workspace: Any, scenario_description: str):
@@ -77,7 +78,7 @@ class MapState:
         self._files = set(workspace.tree.files)
         self._reads: dict[str, dict[int, str]] = {}
         self.research_memory = ResearchMemory()
-        self._counters = {"sys": 0, "group": 0, "step": 0, "edge": 0, "gap": 0, "review": 0, "op": 0, "note": 0}
+        self._counters = {"sys": 0, "group": 0, "step": 0, "edge": 0, "gap": 0, "review": 0, "op": 0, "note": 0, "task": 0}
         sources = [asdict(s) if is_dataclass(s) else deepcopy(s) for s in workspace.sources]
         source_ids = [s.get("id") for s in sources]
         if not source_ids or any(not isinstance(s, str) or not s for s in source_ids):
@@ -91,6 +92,7 @@ class MapState:
                          "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": []},
             "sources": sources, "systems": [], "groups": [], "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,
+            "research_tasks": [], "semantic_review": None,
             "run": {"status": "running", "reason": "", "steps": 0},
             "summary": "", "limitations": list(LIMITATIONS),
             "source_notes": deepcopy(getattr(workspace, "notes", [])),
@@ -115,6 +117,7 @@ class MapState:
         visible = self._reads.setdefault(path, {})
         for number in range(offset, min(offset + limit, len(lines) + 1)):
             visible[number] = _mask_secrets(lines[number - 1])
+        self.discover_work(path)
 
     def snapshot(self) -> dict[str, Any]:
         result = deepcopy(self.model)
@@ -149,6 +152,8 @@ class MapState:
                            len(outgoing[n["id"]]) < (2 if n["kind"] in ("decision", "fork") else 1)],
             "pending_gaps": [{"id": g["id"], "node_ids": list(g["node_ids"]), "description": g["description"]}
                              for g in self.model["gaps"]],
+            "pending_tasks": [{key: task[key] for key in ('id', 'kind', 'target')}
+                              for task in self.model.get('research_tasks', []) if task['status'] == 'open'],
         }
 
     @staticmethod
@@ -249,11 +254,13 @@ class MapState:
             "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions"},
             "upsert_system": {"id", "name", "source_ids", "description", "evidence_status", "evidence", "implementation", "basis"},
             "upsert_group": {"id", "name", "kind", "parent_id", "description", "result", "evidence"},
-            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id", "group_id", "outcome", "basis"},
-            "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis"},
+            "upsert_step": {"id", "name", "kind", "system_id", "description", "input", "output", "condition", "evidence_status", "evidence", "parent_id", "group_id", "outcome", "basis", "code_explanations", "effect_kind"},
+            "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis", "code_explanations"},
             "add_gap": {"description", "node_ids", "system_ids"},
             "review_source": {"source_id", "disposition", "reason"},
             "review_execution": {"id", "name", "system_id", "evidence", "operations", "checks"},
+            "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids"},
+            "review_semantics": {"checks"},
             "save_research_note": {"id", "kind", "status", "finding", "next_action", "evidence"},
             "save_research_brief": {"project_overview", "scenario_alignment", "confirmed_facts", "flow_hypothesis", "open_questions", "next_actions", "evidence"},
             "remove_element": {"kind", "id"}, "inspect_map": {"section", "offset", "limit", "path"}, "finish": {"summary"},
@@ -280,7 +287,7 @@ class MapState:
         except (MapValidationError, TypeError, KeyError, ValueError) as exc:
             self.model = original
             self._counters = counters
-            return {"ok": False, "error": str(exc)}
+            return {"ok": False, "error": str(exc), **({"details": exc.details} if isinstance(exc, QualityError) else {})}
 
     def _inspect_map(self, args: dict[str, Any]) -> dict[str, Any]:
         section = _choice(args.get("section", "summary"), "section", INSPECT_SECTIONS)
@@ -289,7 +296,7 @@ class MapState:
             raise MapValidationError("inspect_map: offset >= 1, limit от 1 до 30")
         if args.get("path") is not None and section != "read_fragments":
             raise MapValidationError("path применяется только к read_fragments")
-        if section in {"research_brief", "context_summary"}:
+        if section in {"research_brief", "context_summary", "semantic_review"}:
             # The public brief is size-bounded at write time. Do not silently
             # truncate its meaning, questions or next actions on recovery.
             def references(value):
@@ -308,6 +315,7 @@ class MapState:
             totals = {key: len(rows) for key, rows in frontier.items()}
             for key in ("starts", "ends", "unlinked", "open_exits"):
                 frontier[key] = frontier[key][:30]
+            frontier['pending_tasks'] = frontier['pending_tasks'][:10]
             frontier["pending_gaps"] = [{"id": gap["id"], "node_ids": gap["node_ids"][:10],
                                          "node_count": len(gap["node_ids"]), "description": gap["description"][:200]}
                                         for gap in frontier["pending_gaps"][:10]]
@@ -315,7 +323,7 @@ class MapState:
                     "next_offset": next_offset if next_offset <= len(nodes) else None,
                     **frontier, "frontier_totals": totals,
                     "lists_truncated": any(totals[key] > len(rows) for key, rows in frontier.items()),
-                    "inspection_note": "Это состояние карты, не доказательство порядка исполнения. Списки ID ограничены 30, краткие пробелы — 10; все узлы доступны следующими страницами, все пробелы через section='gaps'. Продолжайте существующие узлы, связи подтверждайте кодом."}
+                    "inspection_note": "Это состояние карты, не доказательство порядка исполнения. Списки ID ограничены 30, пробелы и задачи — 10; все узлы доступны следующими страницами, пробелы через section='gaps', задачи через section='research_tasks'. Продолжайте существующие узлы, связи подтверждайте кодом."}
         if section == "read_fragments":
             # Return only the previously delivered, masked lines. This never
             # reads the source or expands the set of admissible evidence.
@@ -363,7 +371,8 @@ class MapState:
                 return {k: compact(v, k) for k, v in value.items() if k != "quote"}
             return value
 
-        counts = {key: len(self.model[key]) for key in ("systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews")}
+        counts = {key: len(self.model[key]) for key in ("systems", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "research_tasks")}
+        counts['open_tasks'] = sum(task['status'] == 'open' for task in self.model['research_tasks'])
         counts["operations"] = sum(len(review["operations"]) for review in self.model["execution_reviews"])
         if section == "summary":
             return {"section": section, "model": compact({
@@ -389,7 +398,7 @@ class MapState:
         for row in rows[offset - 1:offset - 1 + limit]:
             # Notes already have strict field limits. Do not lose the latter
             # half of a pending task when retrieving it after compaction.
-            if section == "research_notes":
+            if section in {"research_notes", "research_tasks"}:
                 item = deepcopy(row)
                 item["evidence"] = [{k: v for k, v in ref.items() if k != "quote"}
                                     for ref in item["evidence"]]
@@ -447,6 +456,7 @@ class MapState:
             return value
         if len(json.dumps(public(item), ensure_ascii=False)) > 12000:
             raise MapValidationError("Сводка слишком велика: до 12000 символов без текстов цитат; подробности сохраняйте в research_notes")
+        item["read_signature"] = self.read_signature()
         previous = self.model["research_brief"] or {}
         if item == {key: value for key, value in previous.items() if key != "revision"}:
             return {"revision": previous["revision"], "changed": False}
@@ -529,11 +539,13 @@ class MapState:
         outcome = args.get("outcome") or ""
         if item["kind"] == "end":
             item["outcome"] = _choice(outcome or "unknown", "outcome", OUTCOME_KINDS)
+            item["effect_kind"] = _choice(args.get("effect_kind", "unknown"), "effect_kind", EFFECT_KINDS)
         elif outcome:
             raise MapValidationError("outcome задаётся только для завершения kind=end")
         for field in ("description", "input", "output", "condition"):
             item[field] = _text(args.get(field, ""), field)
         item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
+        item["code_explanations"] = self.code_explanations(args.get("code_explanations", []), evidence)
         return self._put("nodes", item)
 
     def _upsert_transition(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -548,6 +560,7 @@ class MapState:
         for field in ("description", "condition", "data", "correlation", "channel", "contract"):
             item[field] = _text(args.get(field, ""), field)
         item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
+        item["code_explanations"] = self.code_explanations(args.get("code_explanations", []), evidence + item["sender_evidence"] + item["receiver_evidence"])
         if item["kind"] == "branch" and not item["condition"]:
             raise MapValidationError("Ветвление требует условия в condition")
         signature = (item["source"], item["target"], item["kind"], item["condition"])
@@ -645,10 +658,10 @@ class MapState:
                 raise MapValidationError(f"{node_id}: несколько операций нельзя свернуть в один крупный шаг; создайте отдельные узлы")
             used_nodes.add(node_id)
             citations = self._evidence(raw.get("evidence", []), "operations.evidence")
-            if not citations or not self._within(citations, evidence):
-                raise MapValidationError(f"{node_id}: основания операции должны входить в прочитанную область обзора")
-            if not self._within(nodes[node_id]["evidence"], evidence):
-                raise MapValidationError(f"{node_id}: обзор не покрывает все основания шага; изучите исполнение целиком")
+            if not citations:
+                raise MapValidationError(f"{node_id}: нужны основания операции")
+            self.require_coverage(node_id, "operations.evidence", citations, evidence)
+            self.require_coverage(node_id, "node.evidence", nodes[node_id]["evidence"], evidence)
             if node_id not in old_ids:
                 self._counters["op"] += 1
             operation = {"id": old_ids.get(node_id, f"op-{self._counters['op']}"), "node_id": node_id,
@@ -975,6 +988,7 @@ class MapState:
             if not used:
                 errors.append(f"{group['id']}: пустая группа; свяжите с действиями или удалите")
         errors.extend(self._detail_errors())
+        errors.extend(self.quality_errors())
         return errors
 
     def _finish(self, args: dict[str, Any]) -> dict[str, Any]:

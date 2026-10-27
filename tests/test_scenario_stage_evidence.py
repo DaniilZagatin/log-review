@@ -272,6 +272,7 @@ class ExternalImplementationReviewTests(unittest.TestCase):
         system, node = self.inferred_operation("external")
         self.helper.good("add_gap", description="Реализация смежной АС не передана; её внутренняя обработка не установлена",
                          node_ids=[node], system_ids=[system])
+        self.helper.good('review_semantics', **fixtures.semantic_payload(self.state))
         result = self.state.dispatch("finish", {"summary": "Исследована доступная реализация, внешний участок отмечен явно"})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["status"], "partial")
@@ -333,7 +334,9 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         self.node = deepcopy(next(node for node in self.state.model["nodes"] if node["kind"] == "action"))
 
     def finish(self):
-        # Direct dispatch deliberately does not auto-refresh the review fixture.
+        # Refresh only the separate semantic assessment; execution review
+        # fingerprints must still reject changes in behavior/evidence.
+        self.helper.good('review_semantics', **fixtures.semantic_payload(self.state))
         return self.state.dispatch("finish", {"summary": "Проверен результат уточнения карты"})
 
     def test_business_name_and_basis_can_be_refined_without_repeating_execution_review(self):
@@ -368,7 +371,8 @@ class ReviewedMapPresentationTests(unittest.TestCase):
 
     def test_changed_evidence_invalidates_execution_review(self):
         replacement = self.helper.cite(start=2, end=2)
-        self.helper.good("upsert_step", **{**self.node, "evidence": replacement})
+        explanations = [{'kind':'fragment','symbol':'','explanation':'Изменённое тестовое основание','evidence':replacement}]
+        self.helper.good("upsert_step", **{**self.node, "evidence": replacement, 'code_explanations':explanations})
         result = self.finish()
         self.assertFalse(result["ok"])
         self.assertIn("изменён после обзора", result["error"])

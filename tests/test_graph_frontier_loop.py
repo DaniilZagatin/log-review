@@ -5,12 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from pko.llm.client import ChatResult
 from pko.scenario_map.agent import GraphFrontierGuide, ResearchTools, _failure_guidance, run_agent
 from pko.scenario_map.schema import MapState
 from pko.scenario_map.sources import build_workspace
-from scenario_script import SCENARIO, SPEC, ScriptedClient, research_calls, sources
+from scenario_script import SCENARIO, SPEC, ScriptedClient, research_calls, sources, scripted_summary
 
 
 def node(number, kind="action"):
@@ -84,11 +85,19 @@ class GraphFrontierLoopTests(unittest.TestCase):
         calls = research_calls()
         fourth_action = [index for index, (name, args) in enumerate(calls)
                          if name == "upsert_step" and args["kind"] not in ("start", "end")][3]
-        client = ScriptedClient(calls=calls)
-        model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=fourth_action + 2)
+        requests = []
+        class ObservedClient(ScriptedClient):
+            def chat(self, messages, **kwargs):
+                if kwargs.get('tools'):
+                    requests.append(copy.deepcopy(messages))
+                return super().chat(messages, **kwargs)
+        client = ObservedClient(calls=calls)
+        # Isolate guidance delivery from independently tested compaction.
+        with patch('pko.scenario_map.agent.context_budget', return_value=(200000, 1024)):
+            model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=fourth_action + 2)
         self.assertEqual(model["run"]["status"], "partial", model["run"])
-        reminders = [message["content"] for message in client.seen if message["role"] == "user"
-                     and str(message.get("content", "")).startswith("[scenario-graph-frontier]")]
+        reminders = list(dict.fromkeys(message["content"] for request in requests for message in request if message["role"] == "user"
+                     and str(message.get("content", "")).startswith("[scenario-graph-frontier]")))
         self.assertEqual(len(reminders), 1)
         self.assertIn('"starts":["step-1"]', reminders[0])
         self.assertIn('"id":"step-1"', reminders[0])
@@ -101,6 +110,8 @@ class GraphFrontierLoopTests(unittest.TestCase):
                 self.requests = []
 
             def chat(self, messages, **kwargs):
+                if not kwargs.get('tools'):
+                    return scripted_summary()
                 self.requests.append(copy.deepcopy(messages))
                 number = len(self.requests)
                 return ChatResult(text="", usage={}, tool_calls=[{

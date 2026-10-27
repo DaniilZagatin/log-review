@@ -52,6 +52,7 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             for message in block
         ])))
     open_notes = [note for note in snapshot.get("research_notes", []) if note.get("status") == "open"]
+    open_tasks = [task for task in snapshot.get('research_tasks', []) if task.get('status') == 'open']
     payload = {
         "previous_summary": _public(snapshot.get("context_summary")),
         "current_state": {
@@ -60,6 +61,9 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             "counts": {key: len(snapshot.get(key, [])) for key in ("systems", "nodes", "edges", "gaps")},
             "open_notes": bounded([_public(note) for note in open_notes[:12]]),
             "open_note_count": len(open_notes), "open_notes_listed_all": len(open_notes) <= 12,
+            "open_tasks": bounded([_public(task) for task in open_tasks[:12]]),
+            "open_task_count": len(open_tasks), "open_tasks_listed_all": len(open_tasks) <= 12,
+            "recover_tasks": "inspect_map(section='research_tasks')",
         },
         "completed_exchanges": history,
         "omitted_exchange_count": 0,
@@ -152,6 +156,7 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
             "input_omitted_exchanges": input_metadata["omitted_exchange_count"],
             "input_truncated_fields": input_metadata["truncated_field_count"],
             "input_open_notes_complete": input_metadata["current_state"]["open_notes_listed_all"],
+            "input_open_tasks_complete": input_metadata["current_state"]["open_tasks_listed_all"],
             "summary": summary,
         }
         accepted = True

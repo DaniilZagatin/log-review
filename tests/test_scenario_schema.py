@@ -5,6 +5,7 @@ import unittest
 
 from pko.scenario_map.schema import EXECUTION_CHECKS, MapState, MapValidationError
 from pko.scenario_map.tools import TOOLS
+from quality_helpers import explain_args, review_payload as semantic_payload
 
 
 class MemoryTree:
@@ -34,12 +35,22 @@ class ScenarioMapTests(unittest.TestCase):
         self.state = MapState(workspace(), "Выпуск дебетовой карты действующему клиенту")
 
     def good(self, tool_name, **args):
+        if tool_name in ('upsert_step', 'upsert_transition'):
+            args = explain_args(args)
+        # Some graph fixtures add an alternative path to the existing start.
+        # Spell out those test alternatives instead of introducing unguarded fan-out.
+        if tool_name == 'upsert_transition' and args.get('kind') != 'data':
+            start = next((n for n in self.state.model['nodes'] if n['id']==args.get('source') and n['kind']=='start'), None)
+            if start:
+                args.setdefault('condition', 'Тестовый маршрут к '+args['target'])
         # Existing graph tests exercise a reviewed map. Inventory-specific tests
         # call dispatch('finish') directly to test missing/stale reviews.
         if tool_name == "finish":
             self.review_current_operations()
         response = self.state.dispatch(tool_name, args)
         self.assertTrue(response["ok"], response)
+        if tool_name == 'review_execution':
+            self.assertTrue(self.state.dispatch('review_semantics', semantic_payload(self.state))['ok'])
         return response
 
     def cite(self, path="source-1/channel.py", start=1, end=1):
@@ -176,6 +187,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("group_id", result["error"])
         self.good("add_gap", description="Этап действия не установлен", node_ids=[node["id"]])
+        self.good('review_semantics', **semantic_payload(self.state))
         result = self.state.dispatch("finish", {"summary": "Группировка требует уточнения"})
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["status"], "partial")
@@ -389,7 +401,7 @@ class ScenarioMapTests(unittest.TestCase):
 
     def test_tool_contract_lists_all_mutation_handlers(self):
         names = [tool["function"]["name"] for tool in TOOLS]
-        self.assertEqual(len(set(names)), 13)
+        self.assertEqual(len(set(names)), 15)
         self.assertIn("save_research_brief", names)
         self.assertIn("save_research_note", names)
         self.assertIn("inspect_map", names)

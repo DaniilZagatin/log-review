@@ -87,6 +87,22 @@ class ScenarioMemoryLoopTests(unittest.TestCase):
         self.assertEqual(len(model["nodes"]), NODE_COUNT)
         self.assertFalse(model["run"].get("loop_recovery_attempted", False))
 
+    def test_new_progress_rearms_recovery_but_global_cap_stays_bounded(self):
+        first = ('read_file', {'path':'source-1/app.py'})
+        second = ('read_file', {'path':'source-2/app.py'})
+        # Each new scope is genuine map progress. Four episodes may not create
+        # an unlimited series of recoveries even with progress between them.
+        batches = []
+        for number in range(4):
+            batches.append([('set_scope', {'title':f'Orientation {number}', 'start':'Input', 'end':'Output'})])
+            batches.extend([[first if number % 2 == 0 else second]] * (4 if number < 2 else 3))
+        client = BatchClient(batches + [[first]] * 20)
+        model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=60)
+        self.assertEqual(model['run']['status'], 'partial', model['run'])
+        self.assertEqual(model['run']['loop_recoveries'], 3)
+        self.assertIn('повторение', model['run']['reason'])
+        self.assertLess(len(client.requests), 24)
+
     def test_thinking_compactions_recover_pre_map_facts_and_cached_quotes_without_reread(self):
         calls = research_calls()
         first_node = next(arguments for name, arguments in calls if name == "upsert_step")

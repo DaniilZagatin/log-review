@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from .schema import EDGE_KINDS, EVIDENCE_STATUSES, EXECUTION_CHECKS, GROUP_KINDS, INSPECT_SECTIONS, OPERATION_KINDS, OUTCOME_KINDS, STEP_KINDS, SYSTEM_IMPLEMENTATIONS
+from .quality import SEMANTIC_CHECKS, EFFECT_KINDS
 
 
 def _string(description: str = "") -> dict[str, Any]:
@@ -65,7 +66,26 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
             "parameters": {"type": "object", "properties": properties, "required": required, "additionalProperties": False}}}
 
 
+CODE_EXPLANATIONS = {"type": "array", "maxItems": 12, "items": {
+    "type": "object", "additionalProperties": False, "properties": {
+        "kind": {"type": "string", "enum": ["function", "field", "lambda", "fragment"]},
+        "symbol": _string("Точное имя объявленной функции/поля без скобок; для lambda/fragment пустая строка"),
+        "explanation": _string("Что делает функция/элемент и какой вывод подтверждает, до 1000 символов"),
+        "evidence": EVIDENCE}, "required": ["kind", "symbol", "explanation", "evidence"]}}
+SEMANTIC_CHECK = {"type": "object", "additionalProperties": False, "properties": {
+    "status": {"type": "string", "enum": ["reviewed", "uncertain"]},
+    "explanation": BASIS, "evidence": EVIDENCE, "node_ids": _list(), "edge_ids": _list(), "gap_ids": _list()},
+    "required": ["status", "explanation", "evidence", "node_ids", "edge_ids", "gap_ids"]}
+
 TOOLS = [
+    _tool("save_research_task", "Зарегистрировать/обновить незавершённый участок: функцию, ветвь, вложенный исполнитель или промпт. Автоматически найденные задачи доступны в inspect_map(research_tasks). mapped означает раскрытие отдельными действиями карты, не просто чтение. Нераскрытое требует gap; исключение — конкретного обоснования границ.",
+          {"id": EDIT_ID, "kind": _string("function/branch/prompt/executor"), "target": _string("Имя исследуемого элемента"),
+           "status": {"type": "string", "enum": ["open", "mapped", "out_of_scope", "gap"]},
+           "resolution": _string("Что раскрыто, почему вне варианта или чего не хватает"), "evidence": EVIDENCE,
+           "node_ids": _list(), "gap_ids": _list()}, ["kind", "target", "status", "evidence"]),
+    _tool("review_semantics", "Отдельный заключительный проход того же агента по коду и карте. outcomes: каждый end и различие решения/рекомендации/команды/эффекта; order: порядок вызовов; routing: условия после общих участков; atomicity: самостоятельные действия, вложенные сценарии; dependencies: промпты/исполнители и незакрытые задачи. При противоречии сначала исправьте карту; при неизвестном укажите gap. Это публичное обоснование, не скрытые рассуждения и не доказанная полнота. Изменения карты/сводки/обзоров инвалидируют проверку.",
+          {"checks": {"type": "object", "additionalProperties": False,
+                      "properties": {k: SEMANTIC_CHECK for k in SEMANTIC_CHECKS}, "required": list(SEMANTIC_CHECKS)}}, ["checks"]),
     _tool("save_research_brief", "После первичного исследования и до первого узла сохрани рабочее понимание проекта, его связь с описанием сценария и гипотезу хода процесса. Затем проверяй её по коду, строя и уточняя карту. Сводка переживает сжатие; обновление полностью заменяет предыдущую версию. Факты требуют прочитанных оснований; гипотеза не является готовой картой и не подтверждает переходы. Только публичные выводы, без скрытых рассуждений. До 12000 символов без цитат.",
           {"project_overview": _string("Назначение проекта, основные части и границы одной или нескольких АС; явно отметь неустановленное. До 2000 символов"),
            "scenario_alignment": _string("Как описание пользователя соотносится с кодом: вход, признаки варианта, сущности, исходы и исключения. До 2000 символов"),
@@ -140,3 +160,14 @@ TOOLS = [
     _tool("finish", "Завершить исследование после проверки карты. Нужны границы, начальные/конечные шаги, рассмотренные источники, связи либо адресные gaps и актуальный review_execution с покрытием всех выявленных операций. Крупные шаги без отдельного перечня операций не завершают исследование. Частичный результат допустим, неизвестное не маскируется под доказанное.",
           {"summary": _string("Что восстановлено, основные границы и ограничения; без процентов готовности")}, ["summary"]),
 ]
+
+# Queue/public contracts are shared by both map mutation tools.
+for tool in TOOLS:
+    function = tool["function"]
+    if function["name"] in ("upsert_step", "upsert_transition"):
+        parameters = function["parameters"]
+        parameters["properties"]["code_explanations"] = CODE_EXPLANATIONS
+        parameters["required"] += ["basis", "code_explanations"]
+        if function["name"] == "upsert_step":
+            parameters["properties"]["effect_kind"] = {"type": "string", "enum": list(EFFECT_KINDS),
+                "description": "Для end: decision — решение, recommendation — рекомендация, command — отправленная команда, result — подтверждённый эффект. Не приравнивайте рекомендацию возврата к возврату."}

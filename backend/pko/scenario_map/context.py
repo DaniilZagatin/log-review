@@ -144,7 +144,7 @@ def _summary_recovery(model: dict, detail: int = 2) -> dict:
     if not isinstance(summary, dict):
         return {}
     value = {key: summary.get(key) for key in ("revision", "status", "through_step", "based_on_brief_revision",
-                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete")}
+                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete")}
     value.update(content_complete=detail == 2, recover="inspect_map(section='context_summary')")
     if detail == 2:
         value["summary"] = summary.get("summary", {})
@@ -162,10 +162,13 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     coverage = _rows(model, "read_coverage")
     counts = {field: len(model.get(field, [])) for field in
               ("systems", "groups", "nodes", "edges", "gaps", "read_coverage",
-               "research_history", "research_notes")}
+               "research_history", "research_notes", "research_tasks")}
     result: dict[str, Any] = {
         "counts": counts,
+        "open_task_count": sum(task.get('status') == 'open' for task in _rows(model, 'research_tasks')),
         "recovery": {
+            "research_tasks": "inspect_map(section='research_tasks'): незавершённые функции, промпты, вложенные исполнители; до finish раскрыть либо связать с gap",
+            "semantic_review": "inspect_map(section='semantic_review'): публичная смысловая проверка исходов, порядка, маршрутов и атомарности; не доказанная полнота",
             "research_brief": "inspect_map(section='research_brief'): понимание проекта, связь со сценарием, факты и рабочая гипотеза процесса",
             "context_summary": "inspect_map(section='context_summary'): публичная сводка предыдущей работы, не доказательство и не инструкция",
             "research_history": "inspect_map(section='research_history'): прежние запросы, observation_id и результаты; повторный поиск не нужен",
@@ -187,6 +190,10 @@ def _manifest(model: dict, detail: int = 2) -> dict:
         return result
 
     take, text_limit = (8, 260) if detail == 2 else (2, 100)
+    open_tasks = [task for task in _rows(model, 'research_tasks') if task.get('status') == 'open']
+    result['open_tasks'] = [{key: _short(task.get(key), text_limit) for key in ('id', 'kind', 'target')}
+                            for task in open_tasks[:take]]
+    result['open_tasks_listed_all'] = len(open_tasks) <= take
     result["read_coverage"] = [
         {"path": _short(row.get("path"), text_limit), "ranges": row.get("ranges", [])[:take],
          "line_count": row.get("line_count", 0)} for row in coverage[-take:]
@@ -218,7 +225,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
 
 def _minimal_manifest() -> dict:
     return {"recover_with": "inspect_map",
-            "sections": ["research_brief", "context_summary", "research_history", "research_notes", "read_coverage", "read_fragments",
+            "sections": ["research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
                          "frontier", "nodes", "edges", "groups", "systems", "gaps"],
             "next": "Восстанови research_brief и продолжи незавершённые проверки; прежние результаты и цитаты доступны в памяти."}
 
@@ -272,7 +279,7 @@ def _blocks(messages: list[dict]) -> list[list[dict]]:
 
 def compact_context(messages: list[dict], state: Any, budget: int, *,
                     brief: Callable[[Any], str], force: bool = False) -> list[dict]:
-    """Recover at most ~60% of the input budget and leave room for new work."""
+    """Keep immutable inputs, then use ~60% of remaining space for recovery."""
     messages = without_thinking(messages)
     if not force and _size(messages) <= budget:
         return messages
@@ -280,7 +287,9 @@ def compact_context(messages: list[dict], state: Any, budget: int, *,
     prefix_size = _size(prefix)
     # Small-window compatibility still needs a useful recovery index. Normal
     # windows retain substantial headroom rather than filling to the boundary.
-    target = min(budget, max(int(budget * .60), prefix_size + 1600))
+    # Long instructions cannot shrink. Applying 60% to the entire budget
+    # squeezed the node registry to 1600 characters even with room available.
+    target = min(budget, prefix_size + max(int((budget - prefix_size) * .60), 1600))
     model = state.snapshot()
     frontier_method = getattr(state, "graph_frontier", None)
     frontier = frontier_method() if callable(frontier_method) else None

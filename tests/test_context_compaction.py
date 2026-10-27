@@ -250,6 +250,21 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertEqual(identity["starts"], ["step-1"])
         self.assertLessEqual(self.size(result), int(6000 * .6))
 
+    def test_long_immutable_prompt_does_not_displace_node_registry(self):
+        state = self.state()
+        state.snapshot.return_value['nodes'] = [
+            {'id':f'step-{i}', 'name':f'Action {i}', 'kind':'action', 'system_id':'sys-1', 'group_id':'group-1'}
+            for i in range(28)]
+        prefix = [{'role':'system', 'content':'r'*22000}, {'role':'user', 'content':'scenario'}]
+        messages = prefix + [{'role':'assistant', 'content':'old public data '*3000}]
+        result = compact_context(messages, state, 32000, brief=lambda _: 'x'*50000)
+        identity = json.loads(result[2]['content'].split('\n')[-1])['graph_identity']
+        self.assertEqual(result[:2], prefix)
+        self.assertTrue(identity['registry_complete'])
+        self.assertTrue(identity['names_complete'])
+        self.assertEqual(len(identity['nodes']), 28)
+        self.assertGreaterEqual(32000-self.size(result), 3900, 'Reserve space for the next public tool exchange')
+
     def test_tiny_window_does_not_claim_truncated_registry_is_complete(self):
         state = self.state()
         state.snapshot.return_value["nodes"] = [

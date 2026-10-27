@@ -158,6 +158,17 @@ function layoutScenarioGraph(nodes, edges, sizes, vertical=false) {
  if(valid.some(e=>key(e.source)===key(e.target))){if(vertical)height+=70;else width+=70;}
  return {rank,positions,outerEdges,width,height};
 }
+function smoothScenarioPath(points) {
+ // Shared tangents give continuous cubic curves, including long outer routes.
+ // Bound handles by adjacent free corridors, so smoothing cannot cut a rank.
+ const tangent=points.map((p,i)=>{const before=points[Math.max(0,i-1)],after=points[Math.min(points.length-1,i+1)];
+  const left=Math.hypot(p.x-before.x,p.y-before.y),right=Math.hypot(after.x-p.x,after.y-p.y);
+  const dx=(left?(p.x-before.x)/left:0)+(right?(after.x-p.x)/right:0),dy=(left?(p.y-before.y)/left:0)+(right?(after.y-p.y)/right:0),length=Math.hypot(dx,dy)||1;
+  const handle=Math.min(32,(left&&right?Math.min(left,right):Math.max(left,right))/3);
+  return {x:dx/length*handle,y:dy/length*handle};});
+ const segments=points.slice(1).map((end,i)=>{const start=points[i];return [start,{x:start.x+tangent[i].x,y:start.y+tangent[i].y},{x:end.x-tangent[i+1].x,y:end.y-tangent[i+1].y},end];});
+ return {segments,path:`M ${points[0].x} ${points[0].y} `+segments.map(([,c1,c2,end])=>`C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`).join(' ')};
+}
 function routeScenarioOuterEdge(edge,layout,vertical,index=0) {
  const a=layout.positions.get(String(edge.source)),b=layout.positions.get(String(edge.target));
  const sourceRank=layout.rank.get(String(edge.source)),targetRank=layout.rank.get(String(edge.target));
@@ -167,11 +178,18 @@ function routeScenarioOuterEdge(edge,layout,vertical,index=0) {
  let points,label;
  if(vertical){const channel=layout.width-28-index*24,from=trailing(sourceRank)+24,to=b.y-24;points=[{x:a.x+a.w/2,y:a.y+a.h},{x:a.x+a.w/2,y:from},{x:channel,y:from},{x:channel,y:to},{x:b.x+b.w/2,y:to},{x:b.x+b.w/2,y:b.y-3}];label={x:channel-9,y:(from+to)/2};}
  else{const channel=28+index*24,from=trailing(sourceRank)+28,to=b.x-28;points=[{x:a.x+a.w,y:a.y+a.h/2},{x:from,y:a.y+a.h/2},{x:from,y:channel},{x:to,y:channel},{x:to,y:b.y+b.h/2},{x:b.x-3,y:b.y+b.h/2}];label={x:(from+to)/2,y:channel-9};}
- const segments=[];let current=points[0];
- const lineTo=target=>{segments.push([current,current,target,target]);current=target;};
- for(let i=1;i<points.length-1;i++){const before=points[i-1],corner=points[i],after=points[i+1],first=Math.hypot(corner.x-before.x,corner.y-before.y),second=Math.hypot(after.x-corner.x,after.y-corner.y),radius=Math.min(18,first/2,second/2);if(!first||!second)continue;const entry={x:corner.x+(before.x-corner.x)*radius/first,y:corner.y+(before.y-corner.y)*radius/first},exit={x:corner.x+(after.x-corner.x)*radius/second,y:corner.y+(after.y-corner.y)*radius/second};lineTo(entry);segments.push([entry,corner,corner,exit]);current=exit;}
- lineTo(points[points.length-1]);
- return {segments,label,path:`M ${points[0].x} ${points[0].y} `+segments.map(([,c1,c2,end])=>`C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`).join(' ')};
+ return {...smoothScenarioPath(points),label,outer:true};
+}
+function routeScenarioForwardEdge(edge,layout,vertical,port=0,bend=0) {
+ const a=layout.positions.get(String(edge.source)),b=layout.positions.get(String(edge.target)),rank=layout.rank.get(String(edge.source));
+ const trailing=Math.max(...[...layout.positions].filter(([id])=>layout.rank.get(id)===rank).map(([,p])=>vertical?p.y+p.h:p.x+p.w));
+ // Cards in a rank have unequal heights/widths. Turn only in the shared free
+ // gutter, otherwise a diagonal from a short card crosses its taller sibling.
+ const lane=Math.max(-8,Math.min(8,bend/3));let points;
+ if(vertical){const x=a.x+a.w/2+port,z=b.x+b.w/2+port;points=[{x,y:a.y+a.h},{x,y:trailing+16+lane},{x:z,y:b.y-16+lane},{x:z,y:b.y-3}];}
+ else{const y=a.y+a.h/2+port,z=b.y+b.h/2+port;points=[{x:a.x+a.w,y},{x:trailing+22+lane,y},{x:b.x-22+lane,y:z},{x:b.x-3,y:z}];}
+ const route=smoothScenarioPath(points),[s,c1,c2,e]=route.segments[1];
+ return {...route,label:{x:(s.x+3*c1.x+3*c2.x+e.x)/8,y:(s.y+3*c1.y+3*c2.y+e.y)/8-9},outer:false};
 }
 '''
 
@@ -250,6 +268,15 @@ function evidenceBlock(container,items,label='Основания в исходн
  }details.append(box);}container.append(details);
 }
 function relatedButton(container,label,callback){const b=el('button','text-button',label);b.type='button';b.addEventListener('click',callback);container.append(b);return b;}
+function codeExplanations(container,item){
+ const entries=array(item.code_explanations);if(!entries.length)return;
+ const section=el('section','details code-explanations');section.append(el('h3','','Функции и смысл'));
+ for(const entry of entries){const refs=array(entry.evidence),path=text(refs[0]?.path),file=path.split('/').pop();
+  const card=el('article','code-explanation'),symbol=entry.kind==='function'?text(entry.symbol)+'()':entry.kind==='lambda'?'Лямбда':entry.symbol||'Фрагмент файла';
+  const heading=el('h4','',file+' · '+symbol);heading.title=path;card.append(heading,el('p','',entry.explanation));
+  evidenceBlock(card,refs,'Строки и цитата');section.append(card);
+ }container.append(section);
+}
 function systemBlock(container,node){
  const system=systemById.get(text(node.system_id));field(container,'Автоматизированная система',systemName(node));if(!system)return;
  const details=el('details','details');details.append(el('summary','','Что известно об АС'));
@@ -303,7 +330,8 @@ function showOverview(){
 }
 function showNode(node){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',nodeKindLabel(node)),badge(node.evidence_status),el('h2','',node.name || node.id));
- field(panel,'Бизнес-смысл',node.description);field(panel,'Обоснование',node.basis);field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);systemBlock(panel,node);
+ field(panel,'Бизнес-смысл',node.description);codeExplanations(panel,node);field(panel,'Обоснование',node.basis);field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);systemBlock(panel,node);
+ if(node.kind==='end'&&node.effect_kind)field(panel,'Что установлено',{decision:'Сформировано решение',recommendation:'Сформирована рекомендация',command:'Отправлена команда',result:'Подтверждён результат',unknown:'Не установлено'}[node.effect_kind]||'Не установлено');
  const ancestry=nodeGroups(node);if(ancestry.length){const links=el('div','group-links');for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Операция: ')+group.name,()=>selectGroup(group));panel.append(links);}
  for(const {operation,review} of operationsByNode.get(text(node.id))||[]){const section=el('div','details');section.append(el('h3','','Атомарное действие'));field(section,'Действие',operation.action);field(section,'Проверяемый результат',operation.effect);field(section,'При ошибке',operation.failure);field(section,'Условие действия',operation.condition);evidenceBlock(section,operation.evidence,'Основания действия');panel.append(section);}
  if(node.parent_id && byId.has(text(node.parent_id)))field(panel,'Часть шага',byId.get(text(node.parent_id)).name);
@@ -315,7 +343,7 @@ function showNode(node){
 function showEdge(edge){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker','ПЕРЕХОД · '+(edgeNames[edge.kind] || 'Связь')),badge(edge.evidence_status));
  const from=byId.get(text(edge.source)), to=byId.get(text(edge.target));panel.append(el('h2','',(from.name || from.id)+' → '+(to.name || to.id)));
- field(panel,'Что происходит',edge.description);field(panel,'Обоснование перехода',edge.basis);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
+ field(panel,'Что происходит',edge.description);codeExplanations(panel,edge);field(panel,'Обоснование перехода',edge.basis);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
  const related=el('div','related');relatedButton(related,'Открыть: '+(from.name || from.id),()=>selectNode(from,true));relatedButton(related,'Открыть: '+(to.name || to.id),()=>selectNode(to,true));panel.append(related);
  const technical=el('details','details');technical.append(el('summary','','Способ передачи и контракт'));field(technical,'Канал',edge.channel);field(technical,'Контракт',edge.contract);panel.append(technical);
  evidenceBlock(panel,edge.sender_evidence,'Отправляющая сторона');evidenceBlock(panel,edge.receiver_evidence,'Принимающая сторона');evidenceBlock(panel,edge.evidence);
@@ -398,13 +426,12 @@ function draw(){
  for(const edge of validEdges){const a=positions.get(text(edge.source)),b=positions.get(text(edge.target)),key=JSON.stringify([edge.source,edge.target]),pairIndex=pairUsed.get(key)||0;pairUsed.set(key,pairIndex+1);const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28,port=Math.max(-18,Math.min(18,bend/2));let start,c1,c2,end,routed;
  if(text(edge.source)===text(edge.target)){const reach=65+pairIndex*24;if(vertical){start={x:a.x+a.w/2,y:a.y+a.h};c1={x:start.x,y:start.y+reach};c2={x:a.x+a.w+reach,y:a.y+a.h/2+reach};end={x:a.x+a.w+3,y:a.y+a.h/2};}else{start={x:a.x+a.w,y:a.y+a.h/2};c1={x:start.x+reach,y:start.y};c2={x:a.x+a.w/2+reach,y:a.y-reach};end={x:a.x+a.w/2,y:a.y-3};}backIndex++;}
  else if(layout.outerEdges.has(text(edge.id)))routed=routeScenarioOuterEdge(edge,layout,vertical,backIndex++);
- else if(vertical){start={x:a.x+a.w/2+port,y:a.y+a.h};end={x:b.x+b.w/2+port,y:b.y-3};const reach=Math.max(28,(end.y-start.y)*.5);c1={x:start.x+bend,y:start.y+reach};c2={x:end.x+bend,y:end.y-reach};}
- else{start={x:a.x+a.w,y:a.y+a.h/2+port};end={x:b.x-3,y:b.y+b.h/2+port};const reach=Math.max(34,(end.x-start.x)*.5);c1={x:start.x+reach,y:start.y+bend};c2={x:end.x-reach,y:end.y+bend};}
+ else routed=routeScenarioForwardEdge(edge,layout,vertical,port,bend);
  const path=routed?routed.path:`M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
  const labelX=routed?routed.label.x:(start.x+3*c1.x+3*c2.x+end.x)/8,labelY=routed?routed.label.y:(start.y+3*c1.y+3*c2.y+end.y)/8-9;
  const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','data-edge-id':text(edge.id),'aria-label':(edgeNames[edge.kind]||'Связь')+': '+(byId.get(text(edge.source)).name||edge.source)+' → '+(byId.get(text(edge.target)).name||edge.target)+(edge.condition?'. '+edge.condition:'')});
  const title=svg('title');title.textContent=[edge.description,edge.condition,evidenceNames[evidenceStatus(edge.evidence_status)]].filter(Boolean).join(' · ');group.append(title,svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
- if(edge.kind!=='sequence'||edge.condition||byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id){const forward=rank.get(text(edge.target))>rank.get(text(edge.source));const freeWidth=vertical&&routed?90:!vertical&&forward?Math.max(24,b.x-(a.x+a.w)-18):170;const lines=wrapLabel(edge.condition || (byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id?(edgeNames[edge.kind]||'Переход')+' между АС':edgeNames[edge.kind]) || 'Связь',freeWidth,vertical&&forward&&!routed?2:4);const label=svg('text',{'text-anchor':vertical&&routed?'end':'middle','class':'edge-label'});const top=labelY-(lines.length-1)*6.5;for(let line=0;line<lines.length;line++){const span=svg('tspan',{x:labelX,y:top+line*13});span.textContent=lines[line];label.append(span);}group.append(label);}
+ if(edge.kind!=='sequence'||edge.condition||byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id){const forward=rank.get(text(edge.target))>rank.get(text(edge.source)),outside=routed?.outer;const freeWidth=vertical&&outside?90:!vertical&&forward?Math.max(24,b.x-(a.x+a.w)-18):170;const lines=wrapLabel(edge.condition || (byId.get(text(edge.source)).system_id!==byId.get(text(edge.target)).system_id?(edgeNames[edge.kind]||'Переход')+' между АС':edgeNames[edge.kind]) || 'Связь',freeWidth,vertical&&forward&&!outside?2:4);const label=svg('text',{'text-anchor':vertical&&outside?'end':'middle','class':'edge-label'});const top=labelY-(lines.length-1)*6.5;for(let line=0;line<lines.length;line++){const span=svg('tspan',{x:labelX,y:top+line*13});span.textContent=lines[line];label.append(span);}group.append(label);}
  group.addEventListener('click',()=>selectEdge(edge));group.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectEdge(edge);}});drawing.append(group);edgeGroups.set(text(edge.id),group);
  }
  applyZoom(zoom);updateHighlight();

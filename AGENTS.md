@@ -33,6 +33,8 @@
 
 ## Проверки
 
+Схема 1.6: research_tasks хранит обнаруженные функции/промпты/ветви независимо от диалога. Открытые задачи блокируют finish; mapped требует действий карты, gap — зарегистрированного пробела, out_of_scope — причины. code_explanations показывает файл, проверенное имя функции/элемента и публичный смысл; end.effect_kind отличает решение/рекомендацию/команду/результат. После новых прочитанных диапазонов актуализируется research_brief. Перед finish тот же агент выполняет актуальный review_semantics по outcomes/order/routing/atomicity/dependencies; это оценка модели, не доказанная семантическая полнота. Один эпизод зацикливания получает одно восстановление, максимум три на запуск. Итоговый статус аудита совпадает со статусом исследования. Плавность связей и обход карточек проверяются также в Edge через scripts/check_scenario_map_ui.cjs.
+
 PowerShell: `.\.venv\Scripts\python.exe -B tests/run_tests.py`.
 Демо: `.\.venv\Scripts\python.exe -B scripts/demo_scenario_map.py`.
 Unix: `make test` / `make test-report`.

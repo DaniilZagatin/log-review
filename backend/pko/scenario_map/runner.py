@@ -42,7 +42,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
             raise PkoError("Каталог результата совпадает с источником кода или содержит его.",
                            hint="выберите для --out отдельную подпапку, не содержащую источники")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
-    with audit_run(out_dir / "audit" / f"run_{run_id}.txt", run_id):
+    with audit_run(out_dir / "audit" / f"run_{run_id}.txt", run_id) as journal:
         init_phoenix_tracing()
         try:
             with trace_span("scenario_map_run", run_id=run_id) as run_span:
@@ -74,7 +74,9 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                                       checkpoint=checkpoint, on_event=on_event)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
+                    journal.outcome = model['run']['status']
                     run_span.set_attribute("pko.run.status", model["run"]["status"])
+                    run_span.set_attribute("pko.model.mode", model['run'].get('model_mode', 'provider_default'))
                     with trace_span("render_map"):
                         html = render_scenario_map(model)
                     with trace_span("publish_outputs") as output_span:

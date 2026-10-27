@@ -192,6 +192,10 @@ class ResearchTools:
                 payload = {"ok": result.ok, "content": content, "meta": result.meta}
                 if evidence_reference:
                     payload["evidence_reference"] = evidence_reference
+                    payload["research_tasks"] = [{k: t[k] for k in ("id", "kind", "target", "status")}
+                        for t in self.state.model["research_tasks"]
+                        if t['status'] == 'open' and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
+                    payload["research_tasks_hint"] = "Вложенные исполнители и промпты — часть реализации. Раскройте через save_research_task; полный реестр: inspect_map(section='research_tasks')."
                     payload["evidence_hint"] = (
                         "Для основания укажи path и нужный прочитанный диапазон line_start/line_end. "
                         "Поле quote не нужно: точный маскированный текст подставляет код.")
@@ -220,6 +224,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     state = MapState(workspace, scenario)
     state.model["run"].update({"status": "running", "steps": 0, "model": spec.model,
                                "model_timeout_seconds": model_timeout, "max_seconds": max_seconds})
+    mode = (getattr(spec, 'extra_body', None) or {}).get('chat_template_kwargs', {}).get('enable_thinking')
+    state.model['run']['model_mode'] = 'reasoning' if mode is True else 'standard' if mode is False else 'provider_default'
+    record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
+           context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds)
     toolkit = ResearchTools(state, workspace)
     schemas = copy.deepcopy(TOOL_SCHEMAS) + copy.deepcopy(TOOLS)
     for tool in schemas:
@@ -236,6 +244,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     signatures: list[str] = []
     idle, empty = 0, 0
     loop_recovery_used = False
+    loop_recoveries = 0
     frontier_guide = GraphFrontierGuide()
     recent_errors: list[dict] = []
     failed_calls = 0
@@ -344,6 +353,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         recent_errors.clear()
                         failed_calls = 0
                         failure_guidance_used = False
+                        loop_recovery_used = False
                     save()
                     if accepted_finish:
                         break
@@ -353,14 +363,17 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         record("graph_frontier_guidance", step=step, nodes=len(state.model.get("nodes", [])),
                                edges=len(state.model.get("edges", [])))
                     if _cycle(signatures) or idle >= 24:
-                        if not loop_recovery_used:
+                        if not loop_recovery_used and loop_recoveries < 3:
                             loop_recovery_used = True
+                            loop_recoveries += 1
                             state.model["run"]["loop_recovery_attempted"] = True
+                            state.model["run"]["loop_recoveries"] = loop_recoveries
                             messages.append({"role": "user", "content":
                                 "Повторяются действия без новых данных. Ранее полученные результаты сохранены: "
                                 "inspect_map(section='research_notes') — выводы и следующие действия; "
                                 "research_history — прошлые запросы и ответы; read_coverage и read_fragments — "
                                 "прочитанные строки. Восстанови нужное состояние и продолжи незавершённый участок. "
+                                "research_tasks — вложенные исполнители/промпты и незавершённые участки. "
                                 "Не начинай обзор заново. Если продолжение невозможно, сохрани пробелы и заверши через finish." +
                                 _failure_guidance(recent_errors)})
                             record("research_loop_recovery", step=step, idle=idle)

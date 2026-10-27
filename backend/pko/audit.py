@@ -98,7 +98,7 @@ def audit_run(path: Path, run_id: str):
         raise
     else:
         audit.flush()
-        audit.emit("run_finished", result="success")
+        audit.emit("run_finished", result=getattr(audit, "outcome", "success"))
     finally:
         _CURRENT.reset(token)
 

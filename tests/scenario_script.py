@@ -8,6 +8,8 @@ from pathlib import Path
 
 from pko.llm.client import ChatResult
 from pko.llm.registry import ModelSpec
+from pko.scenario_map.code_references import symbols
+from pko.scenario_map.quality import SEMANTIC_CHECKS
 
 SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed")
 FIXTURE = Path(__file__).parent / "fixtures" / "scenario_banking"
@@ -225,11 +227,30 @@ def research_calls():
                                         "reason": "Прочитан выбранный обработчик и его операции. Соседний перевыпуск и неподключённый helper не включены."}))
     initial_brief = next(args for name, args in calls if name == "save_research_brief")
     calls.append(("save_research_brief", {**initial_brief, "open_questions": [], "next_actions": []}))
+    explanations = {
+        'outcomes': 'Конечные узлы ссылаются на возвращённый отказ или запись карты, а не на отправку запроса.',
+        'order': 'Последовательность чтения, проверки, записи и публикации сверена с телами трёх обработчиков.',
+        'routing': 'Ветви проверки варианта и допуска имеют отдельные положительные и отрицательные условия.',
+        'atomicity': 'Подготовка данных, HTTP-вызов, записи и публикация представлены отдельными действиями.',
+        'dependencies': 'Три обработчика прочитаны; перевыпуск явно исключён, скрытых вложенных исполнителей в фикстуре нет.'}
+    calls.append(('review_semantics', {'checks': {key: {'status': 'reviewed', 'explanation': explanations[key],
+        'evidence': [r for scope in scopes.values() for r in scope],
+        'node_ids': [n['id'] for n in nodes.values()], 'edge_ids': list(edge_ids.values()), 'gap_ids': []}
+        for key in SEMANTIC_CHECKS}}))
     calls.append(("finish", {"summary": "Учебный детерминированный пример: 18 отдельных операций, 22 узла, 21 переход и три АС. "
                                        "Показаны проверки, формирование данных, HTTP-вызов, записи, публикация, приём сообщения и выпуск, включая отказы. "
                                        "Учебные хранилища находятся в памяти. Это проверка сборки по заранее заданным ответам, не оценка качества реальной модели."}))
     if len(nodes) != NODE_COUNT or len(edge_ids) != EDGE_COUNT:
         raise AssertionError("Update fixture counts when changing the educational scenario")
+    for name, args in calls:
+        if name in ('upsert_step', 'upsert_transition'):
+            args.setdefault('basis', args['description'])
+            number = int(args['evidence'][0]['path'].split('/')[0].split('-')[1])
+            scope = scopes[number]
+            args['code_explanations'] = [{'kind':'function', 'symbol':sorted(symbols(scope[0]['quote']))[0],
+                'explanation': args['basis'], 'evidence': scope}]
+            if args['kind'] == 'end':
+                args['effect_kind'] = 'result'
     return calls
 
 

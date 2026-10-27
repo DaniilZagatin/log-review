@@ -293,9 +293,9 @@ console.log(JSON.stringify({width:result.width,height:result.height,
         runner = _GRAPH_LAYOUT_JS + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const layout=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical);
-let index=0;const routes=input.edges.filter(edge=>layout.outerEdges.has(edge.id)).map(edge=>({
+let index=0;const routes=input.edges.map(edge=>({
  id:edge.id,source:edge.source,target:edge.target,
- ...routeScenarioOuterEdge(edge,layout,input.vertical,index++)}));
+ ...(layout.outerEdges.has(edge.id)?routeScenarioOuterEdge(edge,layout,input.vertical,index++):routeScenarioForwardEdge(edge,layout,input.vertical))}));
 console.log(JSON.stringify({positions:[...layout.positions],routes,width:layout.width,height:layout.height}));
 """
         for vertical in (False, True):
@@ -308,9 +308,14 @@ console.log(JSON.stringify({positions:[...layout.positions],routes,width:layout.
                 self.assertEqual(result.returncode, 0, result.stderr)
                 routed = json.loads(result.stdout)
                 positions = dict(routed["positions"])
-                self.assertEqual({route["id"] for route in routed["routes"]}, {"edge-6", "edge-7"})
+                self.assertEqual({route["id"] for route in routed["routes"]}, {edge['id'] for edge in edges})
                 for route in routed["routes"]:
                     self.assertNotIn(" L ", route["path"])
+                    for left, right in zip(route['segments'], route['segments'][1:]):
+                        for axis in ('x', 'y'):
+                            # Adjacent cubic curves share both point and tangent.
+                            self.assertEqual(left[3][axis], right[0][axis])
+                            self.assertAlmostEqual(left[3][axis]-left[2][axis], right[1][axis]-right[0][axis])
                     for segment in route["segments"]:
                         for step in range(101):
                             t, u = step / 100, 1 - step / 100
