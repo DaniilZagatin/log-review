@@ -118,4 +118,44 @@ def build_facts(model: dict, report: dict, stage_model: StageModel, profile: dic
             errors.append(f"facts: не больше {MAX_FACTS} фактов")
         return accepted, errors
 
-    return stage_model.ask(STAGE, payload, TOOL, validate)
+    return stage_model.ask(STAGE, payload, TOOL, validate, key=lambda fact: fact["id"])
+
+
+def build_requested_facts(model: dict, report: dict, stage_model: StageModel,
+                          requested: list[dict]) -> tuple[list | None, list[str]]:
+    """Formalise facts that metric definitions asked for; existing facts are not repeated."""
+    context = report["process_context"]
+    questions = {question["id"] for question in context["measurement_questions"]}
+    operations = {node["id"] for node in model.get("nodes") or [] if node.get("kind") == "operation"}
+    bindings = {row["binding_id"]: row for row in confirmed_bindings(report)}
+    existing = {fact["id"] for fact in report["facts"]}
+    wanted = {row["id"]: row for row in requested}
+    payload = {"process_context": {key: context[key] for key in ("goal", "case", "measurement_questions")},
+               "existing_facts": [{"id": fact["id"], "meaning": fact["meaning"]} for fact in report["facts"]],
+               "requested_facts": requested, "operations": operations_view(model),
+               "event_bindings": list(bindings.values())}
+    item_schema = TOOL["parameters"]["properties"]["facts"]["items"]
+    tool = {**TOOL, "parameters": {**TOOL["parameters"], "properties": {"facts": {
+        **TOOL["parameters"]["properties"]["facts"], "items": {
+            **item_schema, "required": [*item_schema["required"], "requested_id"],
+            "properties": {**item_schema["properties"], "requested_id": {"type": "string"}}}}}}}
+
+    def validate(arguments):
+        items = arguments.get("facts")
+        if not isinstance(items, list):
+            return None, ["facts: ожидается список"]
+        accepted, errors, seen = [], [], set(existing)
+        for item in items[:len(wanted)]:
+            label = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(item, dict) or item.get("requested_id") not in wanted or label in seen:
+                errors.append(f"{label}: новый факт с id, которого нет в existing_facts, и requested_id из requested_facts")
+                continue
+            fact, problems = _validate_fact(item, questions, operations, bindings)
+            errors += problems
+            if fact is not None:
+                seen.add(fact["id"])
+                accepted.append({**fact, "requested_id": item["requested_id"],
+                                 "requested_by": wanted[item["requested_id"]]["requested_by"]})
+        return accepted, errors
+
+    return stage_model.ask(STAGE, payload, tool, validate, key=lambda fact: fact["id"])

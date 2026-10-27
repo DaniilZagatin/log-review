@@ -60,6 +60,9 @@ class RunAudit:
             return
         try:
             self.sequence += 1
+            # Every event names the span it happened in, so model calls and tool
+            # results join the stage tree without Phoenix.
+            fields.setdefault("span_id", _SPAN.get())
             entry = sanitize({"event": event, "run_id": self.run_id, **fields})
             stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,12 +116,30 @@ def flush() -> None:
         audit.flush()
 
 
+class LocalSpan:
+    """Terminal status of a local span; a handled failure is reported by its owner."""
+
+    def __init__(self, span_id: str | None):
+        self.span_id = span_id
+        self.status: str | None = None
+        self.error: dict = {}
+
+    def fail(self, exc: BaseException) -> None:
+        self.status, self.error = "error", {"error_type": type(exc).__name__, "error_message": str(exc)}
+
+    def set_status(self, status: str, reason: str = "") -> None:
+        self.status = status
+        if reason:
+            self.error = {"reason": reason}
+
+
 @contextmanager
 def audit_span(name: str, attributes: dict):
     """A local span with its own ID and parent, so the tree survives without Phoenix.
 
     Every started span ends with a terminal status, including cancellation and
-    exceptions; durations come from the monotonic clock.
+    exceptions; durations come from the monotonic clock. A failure handled
+    inside the span is reported through the yielded ``LocalSpan``.
     """
     audit = _CURRENT.get()
     parent = _SPAN.get()
@@ -129,9 +150,9 @@ def audit_span(name: str, attributes: dict):
     token = _SPAN.set(span_id)
     started = time.monotonic()
     record("span_started", name=name, span_id=span_id, parent_span_id=parent, attributes=attributes)
-    status, error = "ok", {}
+    status, error, local = "ok", {}, LocalSpan(span_id)
     try:
-        yield
+        yield local
     except BaseException as exc:
         status = "interrupted" if isinstance(exc, (KeyboardInterrupt, GeneratorExit)) else "error"
         error = {"error_type": type(exc).__name__, "error_message": str(exc)}
@@ -139,6 +160,8 @@ def audit_span(name: str, attributes: dict):
         raise
     finally:
         _SPAN.reset(token)
+        if local.status and status == "ok":
+            status, error = local.status, local.error
         if name == "scenario_research":
             flush()
         record("span_finished", name=name, span_id=span_id, parent_span_id=parent, status=status,

@@ -118,6 +118,7 @@ function applyHash(){
  if(nodeId){const node=byId.get(nodeId);if(node){setTab('map');selectNode(node,true);}else notice('Операция «'+nodeId+'» не найдена на карте.');}
 }
 window.addEventListener('hashchange',applyHash);
+mapTabHook=()=>{returnTo={tab:activeTab,rowId:null};notice('');setTab('map');writeHash('tab=map');$('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];};
 
 const L=(names,value)=>names[value]||text(value)||'—';
 const stageById=new Map(array(report.stages).map(row=>[row.id,row]));
@@ -138,9 +139,9 @@ const actionNames={map_existing:'Закрепить существующую з�
 const keyStatusNames={proposed:'предложен, не согласован',existing:'существующий',not_set:'не задан'};
 const timingNames={before_commit:'до сохранения',after_commit:'после сохранения',after_response:'после ответа',on_failure:'при сбое',unknown:'не установлен'};
 const unitNames={case:'экземпляр процесса',operation_execution:'выполнение операции',attempt:'попытка',event:'запись',other:'другое'};
-const readinessNames={proposed:'Предложена, не согласована',available:'Факты наблюдаются в коде',missing:'Не все факты наблюдаются',confirmed_in_code:'Смысл подтверждён кодом',unconfirmed:'Смысл не подтверждён',
- identified:'Связь с экземпляром есть',unestablished:'Связь с экземпляром не установлена',not_provided:'Данные не переданы',sample_only:'Только выборка',not_implemented:'Не реализовано'};
-const componentTitles={methodology:'Методика',facts:'Факты',semantics:'Смысл записей',correlation:'Связь с экземпляром',data:'Данные',calculator:'Вычисление'};
+const readinessNames={proposed:'Предложена, не согласована',available:'Все факты наблюдаются в коде',incomplete:'Не все факты наблюдаются',established:'Установлено для всех фактов',gaps:'Есть пробелы',
+ not_provided:'Данные не переданы',sample_only:'Только выборка',not_implemented:'Не реализовано'};
+const componentTitles={methodology:'Методика',facts:'Факты',semantics:'Смысл записей',correlation:'Связь с экземпляром',timing:'Момент и время',fields:'Поля',data:'Данные',calculator:'Вычисление'};
 const familyNames={volume:'объём',duration:'длительность',outcome:'исходы',quality:'качество',cost:'стоимость',other:'другое'};
 const sourceNames={scenario:'описание сценария',business:'бизнес-описание',code:'код',proposal:'предложение',hypothesis:'гипотеза',map:'карта'};
 const executionNames={not_run:'Не запускался',running:'Выполняется',completed:'Выполнен',failed:'Ошибка',blocked:'Заблокирован зависимостью',interrupted:'Прерван лимитом'};
@@ -195,7 +196,8 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
    const place=block(text(site.path)+':'+site.line_start+(site.line_end!==site.line_start?'–'+site.line_end:''));if(site.symbol)place.append(el('div','muted',site.symbol));place.append(el('div','muted',site.read_by_researcher?'Прочитано исследователем':'Не прочитано исследователем'));
    const call=block(callNames[site.kind]||site.kind,el('code','',site.callee));
    const key=el('div');if(site.event_key)key.append(el('code','',site.event_key));key.append(el('div','muted',L(keyNames,site.key_status)));
-   const flds=block(array(site.fields).length?array(site.fields).join(', '):'Не найдены');if(site.fields_status==='partial'&&array(site.fields).length)flds.append(el('div','muted','Перечень может быть неполным'));
+   const flds=block(array(site.fields).length?array(site.fields).join(', '):'Не найдены');if(array(site.context_fields).length)flds.append(el('div','muted','Из контекста MDC выше вызова: '+array(site.context_fields).join(', ')));
+   if(site.fields_status==='partial'&&array(site.fields).length)flds.append(el('div','muted','Перечень может быть неполным'));
    const meaning=block(el('div','',L(reviewNames,site.review_status||'not_reviewed')));
    for(const reason of array(site.review_reasons))meaning.append(el('div','muted',reason));
    const operations=new Set();
@@ -262,7 +264,7 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
 // Basis: context, provenance, stage states and limits of this report.
 (()=>{const root=$('basis-content'),context=report.process_context,runNames={completed:'Исследование завершено',partial:'Частичная карта',failed:'Исследование не выполнено'};
  fields(root,[['Карта',L(runNames,report.map_status)],['Ревизия карты',report.map_revision],['Запуск',report.run_id],['Версия отчёта',report.report_version],
-  ['Запросы к модели',report.budget?report.budget.used_requests+' из '+report.budget.max_requests:'Этапы с моделью не выполнялись'],
+  ['Запросы к модели',report.budget?report.budget.used_requests+' из '+report.budget.max_requests+(report.budget.cache_hits?'; повторно использовано проверенных ответов: '+report.budget.cache_hits:''):'Этапы с моделью не выполнялись'],
   ['Комплект передачи','Папка handoff рядом с этим файлом: описание процесса, onboarding.json, CSV событий, доработок и метрик, manifest с контрольными суммами.']]);
  root.append(el('h3','','Контекст процесса'));
  if(!context)root.append(el('p','report-empty','Контекст процесса не построен.'));

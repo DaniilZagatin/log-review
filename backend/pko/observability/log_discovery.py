@@ -26,6 +26,11 @@ _HINT = re.compile(r"\b(?:appender|handler|exporter|logstash|fluent.?bit|otel|Fi
 _DELIVERY_HINT = re.compile(r"\b(?:KafkaProducer|bootstrap\.servers|OTLP\w*Exporter|Logstash\w*Appender)\b", re.I)
 _CONFIG_SUFFIXES = (".xml", ".conf", ".ini", ".cfg", ".config", ".yaml", ".yml", ".properties", ".toml")
 _CONFIG_NAME = re.compile(r"(?:logging|logback|log4j|fluent|otel)", re.I)
+# Structured arguments (logstash-logback-encoder and similar) name fields inside the call.
+_STRUCTURED = re.compile(r"""\b(?:kv|keyValue|value|entry|v)\(\s*["']([A-Za-z_][\w.-]{0,63})["']""")
+# Mapped diagnostic context set shortly before a call travels with the record.
+_CONTEXT = re.compile(r"""\b(?:MDC\.put(?:Closeable)?\(|withLoggingContext\()\s*["']([A-Za-z_][\w.-]{0,63})["']""")
+CONTEXT_WINDOW = 40
 _ODD_LINES = re.compile(r"[\v\f\x1c-\x1e\x85  ]")
 
 LIMITATIONS = [
@@ -154,6 +159,7 @@ def _python(path, text, custom, max_lines):
 
 def _heuristic(path, text, custom, max_lines):
     lines, receivers, sites = text.splitlines(), set(), []
+    context = [(number, key) for number, line in enumerate(lines, 1) for key in _CONTEXT.findall(line)]
     for line in lines:
         factory = re.search(r"([A-Za-z_]\w*)\s*=.*(?:getLogger|get_logger|createLogger|pino|KotlinLogging\.logger)", line)
         if factory:
@@ -195,9 +201,15 @@ def _heuristic(path, text, custom, max_lines):
                         status = "literal"
                     except (ValueError, SyntaxError):
                         status = "unparsed"
-            fields = re.findall(r'''["']([A-Za-z_][\w.-]{0,63})["']\s*:|\b([A-Za-z_]\w*)\s*[:=](?!=)''', span)
-            sites.append(_record(path, number, min(end, len(lines)), name, kind, key, status,
-                                 [a or b for a, b in fields], None, "heuristic", True, match.start()))
+            fields = [a or b for a, b in re.findall(r'''["']([A-Za-z_][\w.-]{0,63})["']\s*:|\b([A-Za-z_]\w*)\s*[:=](?!=)''', span)]
+            fields += _STRUCTURED.findall(span)
+            # Context keys are candidates only: a later remove or another method may drop them.
+            inherited = sorted({name for line_number, name in context if number - CONTEXT_WINDOW <= line_number < number})
+            site = _record(path, number, min(end, len(lines)), name, kind, key, status,
+                           fields + inherited, None, "heuristic", True, match.start())
+            if inherited:
+                site["context_fields"] = inherited
+            sites.append(site)
     return sites, []
 
 

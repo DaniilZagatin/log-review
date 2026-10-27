@@ -48,32 +48,57 @@ TOOL = {
 }
 
 
-def readiness(metric: dict, coverage: dict, runtime: dict | None) -> dict:
-    """Each component is a reason; no component can be satisfied by the model."""
+# Why a fact cannot yet feed a metric, by coverage axis and value.
+GAP_TEXT = {
+    ("emit", "not_found"): "запись не найдена в прочитанном коде",
+    ("emit", "unexplained_candidates"): "есть места логирования, смысл которых не установлен",
+    ("semantics", "incompatible"): "смысл найденной записи не соответствует нужной границе",
+    ("semantics", "unknown"): "смысл записи не установлен",
+    ("fields", "missing"): "в записи нет нужных полей",
+    ("fields", "partial"): "в записи есть не все нужные поля",
+    ("fields", "unknown"): "полнота полей записи не установлена",
+    ("correlation", "missing"): "запись не связана с экземпляром процесса",
+    ("correlation", "unknown"): "связь записи с экземпляром не установлена",
+    ("timing", "premature"): "запись делается раньше, чем результат установлен",
+    ("timing", "unknown"): "момент записи не установлен",
+    ("time_source", "missing"): "нет времени события",
+    ("time_source", "unknown"): "источник времени не установлен",
+    ("runtime", "no_records"): "в переданных логах нет записей с этим ключом",
+    ("runtime", "key_unknown"): "ключ записи не установлен, наличие в логах не проверено",
+    ("quality", "issues"): "в переданных логах есть нарушения качества",
+}
+_AXIS_COMPONENTS = {"semantics": ("semantics",), "correlation": ("correlation",), "timing": ("timing", "time_source"),
+                    "fields": ("fields",)}
+
+
+def readiness(metric: dict, coverage: dict, runtime: dict | None, facts: dict | None = None) -> dict:
+    """Each component is a reason; every coverage gap of every fact is named.
+
+    No component can be satisfied by the model; the calculator does not exist,
+    so a metric is never ready in this version.
+    """
+    facts = facts or {}
     rows = [coverage[fact_id] for fact_id in metric["fact_ids"] if fact_id in coverage]
     missing = [fact["meaning"] for fact in metric["missing_facts"]]
-    unobservable = [row["fact_id"] for row in rows if row["axes"]["emit"] != "found"]
     undefined = not metric["fact_ids"] and not missing
-    meaning = [row["fact_id"] for row in rows if row["axes"]["emit"] == "found" and row["axes"]["semantics"] != "compatible"]
-    correlation = [row["fact_id"] for row in rows if row["axes"]["emit"] == "found" and row["axes"]["correlation"] != "identified"]
-    components = {
-        "methodology": "proposed",
-        "facts": "missing" if missing or unobservable or undefined else "available",
-        "semantics": "unconfirmed" if meaning or unobservable else "confirmed_in_code",
-        "correlation": "unestablished" if correlation or unobservable else "identified",
-        "data": "not_provided" if runtime is None else "sample_only",
-        "calculator": "not_implemented"}
+    components = {"methodology": "proposed",
+                  "facts": "available" if rows and not missing and all(row["observable_in_code"] for row in rows)
+                  else "incomplete"}
+    for component, axes in _AXIS_COMPONENTS.items():
+        components[component] = "gaps" if any(
+            (axis, row["axes"].get(axis)) in GAP_TEXT for row in rows for axis in axes) or not rows else "established"
+    components.update(data="not_provided" if runtime is None else "sample_only", calculator="not_implemented")
     blockers = ["Методика не согласована уполномоченным специалистом."]
     if undefined:
         blockers.append("Факты для этого направления не определены.")
     if missing:
         blockers.append("Нужны факты, которых нет в перечне: " + "; ".join(missing) + ".")
-    if unobservable:
-        blockers.append("Факты не наблюдаются в коде: " + ", ".join(unobservable) + ".")
-    if meaning:
-        blockers.append("Смысл записи не соответствует нужной границе: " + ", ".join(meaning) + ".")
-    if correlation:
-        blockers.append("Не установлена связь записи с экземпляром процесса: " + ", ".join(correlation) + ".")
+    for row in rows:
+        reasons = [GAP_TEXT[(axis, row["axes"][axis])] for axis in row["axes"] if (axis, row["axes"][axis]) in GAP_TEXT
+                   and (axis not in ("runtime", "quality") or runtime is not None)]
+        if reasons:
+            meaning = facts.get(row["fact_id"], {}).get("meaning")
+            blockers.append(f"{row['fact_id']}" + (f" ({meaning})" if meaning else "") + ": " + "; ".join(reasons) + ".")
     blockers.append("Данные выполнения не переданы." if runtime is None else
                     "Передана только выборка записей; полнота за период не установлена.")
     blockers.append("Вычисление метрик не реализовано; значения не рассчитываются.")
@@ -173,7 +198,7 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel, profile: d
                 "provenance": "model_proposal", "authority_status": "proposed"})
         return accepted, errors
 
-    return stage_model.ask(STAGE, payload, TOOL, validate)
+    return stage_model.ask(STAGE, payload, TOOL, validate, key=lambda metric: metric["id"])
 
 
 def register_missing_facts(report: dict) -> list[dict]:

@@ -226,7 +226,8 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
               summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
               summary_mode: str = DEFAULT_SUMMARY_MODE,
               checkpoint: Callable[[dict], None] | None = None,
-              on_event: Callable[[str, dict], None] | None = None) -> dict:
+              on_event: Callable[[str, dict], None] | None = None,
+              business: dict | None = None) -> dict:
     if max_steps < 1 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
         raise ValueError("Лимиты исследования и ожидания модели должны быть конечными положительными числами")
     if (isinstance(summary_max_tokens, bool) or not isinstance(summary_max_tokens, int) or
@@ -264,6 +265,15 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     window = spec.context_window or 64000
     summary_tokens = min(summary_max_tokens, max(512, window // 4))
     message_budget, response_tokens = context_budget(window, schemas)
+    if business:
+        # Requirements and vocabulary only; bounded so the research context keeps room for code.
+        limit = max(0, message_budget // 4)
+        opening = json.loads(messages[1]["content"])
+        opening["business_description"] = {"name": business["name"], "text": business["text"][:limit],
+                                           "truncated": business.get("truncated") or len(business["text"]) > limit}
+        messages[1]["content"] = _json(opening)
+        state.model["run"]["business_description"] = {"name": business["name"], "sha256": business["sha256"],
+                                                      "truncated": opening["business_description"]["truncated"]}
     state.model["run"]["context_budget_chars"] = message_budget
     state.model["run"].update(summary_max_tokens=summary_tokens, summary_mode=summary_mode)
     state.model["run"]["summary_effective_mode"] = (

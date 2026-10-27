@@ -595,7 +595,9 @@ function updateHighlight(){
 }
 function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
-function openInspector(){if($('inspector').hidden)restoreFocus=document.activeElement;$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
+// Set by the report tabs: the operation panel is shown only over a visible map.
+let mapTabHook=null;
+function openInspector(){if($('panel-map').inert&&mapTabHook)mapTabHook();if($('inspector').hidden)restoreFocus=document.activeElement;$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
 function closeInspector(restore=true){selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore&&restoreFocus&&document.contains(restoreFocus))restoreFocus.focus({preventScroll:true});restoreFocus=null;}
 function selectNode(node,center=false){closePopovers();selected={type:'node',id:node.id};showNode(node);openInspector();updateHighlight();announce('Выбрана операция: '+(node.name||node.id));if(center){requestAnimationFrame(()=>centerNode(node));}else if(window.innerWidth>700)centerNode(node);}
 function selectEdge(edge){closePopovers();selected={type:'edge',id:edge.id,edge};showEdge(edge);openInspector();updateHighlight();announce('Выбран переход: '+(edge.description||edgeNames[edge.kind]||'Связь'));}
@@ -724,7 +726,9 @@ viewport.addEventListener('gesturestart',event=>{if(!nodes.length)return;event.p
 viewport.addEventListener('gesturechange',event=>{if(gestureZoom===null)return;event.preventDefault();if(Number.isFinite(event.scale)&&event.scale>0)applyZoom(gestureZoom*event.scale,cursorAnchor(event));},{passive:false});
 viewport.addEventListener('gestureend',event=>{if(gestureZoom===null)return;event.preventDefault();gestureZoom=null;},{passive:false});
 let drag=null;viewport.addEventListener('pointerdown',event=>{if(event.button!==0||event.pointerType==='touch'||event.target.closest('button,.edge'))return;drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};viewport.setPointerCapture(event.pointerId);viewport.classList.add('dragging');});viewport.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;viewport.scrollLeft=drag.left-(event.clientX-drag.x);viewport.scrollTop=drag.top-(event.clientY-drag.y);});const stopDrag=()=>{drag=null;viewport.classList.remove('dragging');};viewport.addEventListener('pointerup',stopDrag);viewport.addEventListener('pointercancel',stopDrag);viewport.addEventListener('lostpointercapture',stopDrag);
-let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{draw();initialView();});});
+// Under a report tab the map keeps the user's zoom and scroll; only its geometry is redrawn.
+let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{
+ if($('panel-map').inert){const view=$('viewport'),left=view.scrollLeft,top=view.scrollTop;draw();view.scrollLeft=left;view.scrollTop=top;}else{draw();initialView();}});});
 showOverview();draw();initialView();updateHighlight();
 if(document.fonts?.ready)document.fonts.ready.then(()=>{draw();initialView();});
 /*__REPORT_JS__*/

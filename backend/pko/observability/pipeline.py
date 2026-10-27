@@ -13,10 +13,10 @@ from pko.audit import record
 from pko.llm.tracing import trace_span
 from pko.observability.binding import review_bindings
 from pko.observability.context import build_context
-from pko.observability.contracts import REPORT_VERSION, STAGES, map_revision, stage_result, validate_report
+from pko.observability.contracts import REPORT_VERSION, STAGES, ReportError, map_revision, stage_result, validate_report
 from pko.observability.coverage import assess_coverage
 from pko.observability.evidence import EvidenceRegistry
-from pko.observability.facts import build_facts
+from pko.observability.facts import build_facts, build_requested_facts
 from pko.observability.instrumentation import build_changes
 from pko.observability.log_discovery import discover_logging, logging_config_paths
 from pko.observability.mapping import link_sites, researched_paths
@@ -58,8 +58,50 @@ def _run_stage(report: dict, stage_id: str, requires: tuple[str, ...], body, *, 
             except Exception as exc:  # A later stage must not cost the saved map or earlier results.
                 span.record_error(exc)
                 row = stage_result(stage_id, "failed", reasons=[f"{type(exc).__name__}: {exc}"[:500]])
+        if row["execution_status"] not in ("completed", "failed"):
+            span.set_status(row["execution_status"], " ".join(row["reasons"])[:500])
     report["stages"].append(row)
     return row["execution_status"] == "completed"
+
+
+# Later sections refer to earlier ones, so a broken section takes its successors with it.
+_SECTIONS = (("process_context", ("process_context",)), ("fact_requirements", ("facts",)),
+             ("logging_coverage", ("coverage",)), ("instrumentation_plan", ("instrumentation",)),
+             ("metric_catalog", ("metrics", "requested_facts")),
+             ("requirement_reconciliation", ("reconciled_facts",)))
+
+
+def _validated(report: dict, model: dict) -> None:
+    """Validate; a section that breaks the contract is dropped with its successors, not the report."""
+    try:
+        validate_report(report, model)
+        return
+    except ReportError as error:
+        original = error
+    held = {key: report.pop(key) for _, keys in _SECTIONS for key in keys if key in report}
+    try:
+        validate_report(report, model)
+    except ReportError:
+        raise original
+    rows = {row["id"]: row for row in report["stages"]}
+    broken = None
+    for stage_id, keys in _SECTIONS:
+        if broken is None:
+            report.update({key: held[key] for key in keys if key in held})
+            try:
+                validate_report(report, model)
+                continue
+            except ReportError as error:
+                broken = stage_id
+                for key in keys:
+                    report.pop(key, None)
+                rows[stage_id].update(execution_status="failed", result_status="none",
+                                      reasons=[f"Результат нарушил контракт отчёта и не сохранён: {error}"[:500]])
+        elif stage_id in rows and rows[stage_id]["execution_status"] == "completed":
+            rows[stage_id].update(execution_status="blocked", result_status="none",
+                                  reasons=[f"Не выполнен этап «{STAGES[broken]}»."])
+    record("process_report_salvaged", broken_stage=broken, error=str(original)[:500])
+    validate_report(report, model)
 
 
 class _Rejected(RuntimeError):
@@ -180,7 +222,8 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         uncovered = profile_gaps(metrics or [], report, options.profile)
         metrics = (metrics or []) + uncovered
         for metric in _accepted(metrics, errors):
-            metric["readiness"] = readiness(metric, coverage_rows, options.runtime)
+            metric["readiness"] = readiness(metric, coverage_rows, options.runtime,
+                                            {fact["id"]: fact for fact in report["facts"]})
         report["metrics"] = metrics
         report["requested_facts"] = register_missing_facts(report)
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
@@ -190,6 +233,39 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         return ("partial" if reasons else "complete"), reasons, {
             "metrics": len(metrics), "requested_facts": len(report["requested_facts"])}
 
+    def reconciliation():
+        """The single round: requested facts are formalised, assessed and linked; no further metric round."""
+        requested = report.get("requested_facts") or []
+        if not requested:
+            return "complete", ["Метрики не запросили дополнительных фактов."], {"requested": 0}
+        facts, errors = build_requested_facts(model, report, stage_model, requested)
+        facts = facts or []
+        report["facts"] = report["facts"] + facts
+        report["coverage"] = assess_coverage(report["facts"], report, options.runtime)
+        new_ids = {fact["id"] for fact in facts}
+        changes, change_errors, pending = (build_changes(model, report, stage_model, registry, options.profile,
+                                                         fact_ids=new_ids) if new_ids else ([], [], []))
+        report["instrumentation"] = (report.get("instrumentation") or []) + changes
+        by_request = {fact["requested_id"]: fact["id"] for fact in facts}
+        coverage_rows = {row["fact_id"]: row for row in report["coverage"]["facts"]}
+        fact_index = {fact["id"]: fact for fact in report["facts"]}
+        for metric in report["metrics"]:
+            needs = [(f"{metric['id']}-need-{index}", fact) for index, fact in enumerate(metric["missing_facts"], 1)]
+            metric["fact_ids"] += [by_request[need] for need, _ in needs
+                                   if need in by_request and by_request[need] not in metric["fact_ids"]]
+            metric["missing_facts"] = [fact for need, fact in needs if need not in by_request]
+            metric["readiness"] = readiness(metric, coverage_rows, options.runtime, fact_index)
+        for row in requested:
+            row["status"], row["fact_id"] = (("assessed", by_request[row["id"]]) if row["id"] in by_request
+                                             else ("unassessed", None))
+        report["reconciled_facts"] = sorted(new_ids)
+        open_requests = [row["id"] for row in requested if row["status"] == "unassessed"]
+        reasons = ([f"Отклонено проверками: {len(errors) + len(change_errors)}."] if errors or change_errors else []) + \
+            ([f"Остались неоформленными: {', '.join(open_requests)}."] if open_requests else []) + \
+            ([f"Факты без рассмотренных доработок: {', '.join(pending)}."] if pending else [])
+        return ("partial" if reasons else "complete"), reasons, {
+            "requested": len(requested), "facts": len(facts), "changes": len(changes)}
+
     _run_stage(report, "process_context", (), process_context, model_stage=True, stage_model=stage_model)
     _run_stage(report, "fact_requirements", ("process_context",), fact_requirements,
                model_stage=True, stage_model=stage_model)
@@ -198,9 +274,11 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
                model_stage=True, stage_model=stage_model)
     _run_stage(report, "metric_catalog", ("logging_coverage",), metric_catalog,
                model_stage=True, stage_model=stage_model)
+    _run_stage(report, "requirement_reconciliation", ("metric_catalog",), reconciliation,
+               model_stage=True, stage_model=stage_model)
     if stage_model is not None:
-        report["budget"] = stage_model.budget.snapshot()
-    validate_report(report, model)
+        report["budget"] = {**stage_model.budget.snapshot(), "cache_hits": stage_model.cache_hits}
+    _validated(report, model)
     record("process_report", stages={row["id"]: row["execution_status"] for row in report["stages"]},
            sites=len(report["logging"].get("sites") or []),
            event_bindings=len(report["logging"].get("event_bindings") or []),

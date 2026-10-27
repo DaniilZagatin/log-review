@@ -85,8 +85,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     model = run_agent(workspace, scenario, spec, client=client,
                                       max_steps=max_steps, max_seconds=max_seconds,
                                       model_timeout=model_timeout, summary_max_tokens=summary_max_tokens,
-                                      summary_mode=summary_mode,
-                                      checkpoint=checkpoint, on_event=on_event)
+                                      summary_mode=summary_mode, checkpoint=checkpoint, on_event=on_event,
+                                      business=(report_options or ReportOptions()).business)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
                     journal.outcome = model['run']['status']
@@ -130,8 +130,8 @@ def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace
     """
     try:
         with trace_span("process_observability") as report_span:
-            report = run_observability(model, workspace.tree, options=options, run_id=run_id,
-                                       stage_model=_report_model(options, client, spec, model_timeout))
+            stage_model = _report_model(options, client, spec, model_timeout, _load_cache(out_dir))
+            report = run_observability(model, workspace.tree, options=options, run_id=run_id, stage_model=stage_model)
             report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
         with trace_span("render_report"):
             html = render_scenario_map(model, report)
@@ -140,6 +140,7 @@ def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace
             write_outputs(out_dir, {
                 "process-report": ("process_report.json", report_json),
                 "scenario-map": ("scenario_map.html", html),
+                "report-cache": (CACHE_FILE, json.dumps(stage_model.cache, ensure_ascii=False)),
             })
             output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
         model["run"]["process_report"] = "process_report.json"
@@ -240,7 +241,20 @@ def run_report_from_map(map_path, sources: list, out_dir: Path, *, spec=None, th
             flush_tracing()
 
 
-def _report_model(options: ReportOptions, research_client, spec, model_timeout: float) -> StageModel:
+CACHE_FILE = "report_cache.json"
+
+
+def _load_cache(out_dir: Path) -> dict:
+    """Accepted report answers of earlier runs; each is revalidated before reuse."""
+    try:
+        cache = json.loads((out_dir / CACHE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return cache if isinstance(cache, dict) else {}
+
+
+def _report_model(options: ReportOptions, research_client, spec, model_timeout: float,
+                  cache: dict | None = None) -> StageModel:
     """Report stages use the research provider with their own request and time budget."""
     deadline = time.monotonic() + options.max_seconds
     client = options.client or research_client
@@ -249,7 +263,7 @@ def _report_model(options: ReportOptions, research_client, spec, model_timeout: 
         client.deadline = deadline
     client = trace_client(client, spec)
     audited = client if isinstance(client, AuditedClient) else AuditedClient(client)
-    return StageModel(audited, ReportBudget(max_requests=options.max_requests, deadline=deadline))
+    return StageModel(audited, ReportBudget(max_requests=options.max_requests, deadline=deadline), cache)
 
 
 def add_cli_command(subparsers):
@@ -277,7 +291,7 @@ def add_cli_command(subparsers):
     command.add_argument("--observability-max-seconds", type=float, default=1800,
                          help="Лимит времени этапов отчёта в секундах, отдельный от исследования (по умолчанию 1800)")
     command.add_argument("--business-file", default="",
-                         help="Бизнес-описание процесса (UTF-8, до 200 КБ) для этапов отчёта; источник требований, не кода")
+                         help="Бизнес-описание процесса (UTF-8, до 200 КБ): термины и требования для исследования и отчёта, не доказательство реализации")
     command.add_argument("--runtime-log", default="",
                          help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
     command.add_argument("--domain-profile", default=None, choices=profile_names(),
@@ -302,8 +316,8 @@ def command_main(args) -> int:
             raise PkoError(f"Не удалось прочитать описание сценария: {exc}",
                            hint="проверьте путь и кодировку UTF-8") from exc
 
-    if (args.business_file or args.runtime_log or args.domain_profile) and not args.observability:
-        raise PkoError("Бизнес-описание, файл логов и профиль используются только с --observability.")
+    if (args.runtime_log or args.domain_profile) and not args.observability:
+        raise PkoError("Файл логов и профиль используются только с --observability.")
     if args.from_map and not args.observability:
         raise PkoError("--from-map перестраивает отчёт наблюдаемости: добавьте --observability.")
     out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()

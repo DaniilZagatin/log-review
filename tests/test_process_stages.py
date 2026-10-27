@@ -186,9 +186,9 @@ class MetricTests(unittest.TestCase):
             answer["metrics"][0]["missing_facts"] = [{"meaning": "Клиент оценил обслуживание", "lifecycle": "result"}]
         report = run(ScriptedReportClient({"submit_metric_definitions": [scripted("submit_metric_definitions", need)]}))
         [requested] = report["requested_facts"]
-        self.assertEqual((requested["requested_by"], requested["status"]), ("m-1", "unassessed"))
+        self.assertEqual((requested["requested_by"], requested["status"]), ("m-1", "assessed"))
         metric = report["metrics"][0]
-        self.assertEqual(metric["readiness"]["components"]["facts"], "missing")
+        self.assertEqual((metric["missing_facts"], metric["readiness"]["components"]["facts"]), ([], "incomplete"))
 
     def test_runtime_sample_changes_only_the_data_component(self):
         runtime = {"event_counts": {}, "fields_by_event": {}, "missing_case_count": 0, "invalid_time_count": 0,

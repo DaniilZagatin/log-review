@@ -201,7 +201,8 @@ def review_bindings(model: dict, sites: list[dict], wrappers: list[dict], regist
             return accepted, problems
 
         try:
-            accepted, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve)
+            accepted, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve,
+                                                 key=lambda item: item["site_id"])
         except PacketTooLarge as exc:
             if len(batch) > 1:
                 middle = len(batch) // 2

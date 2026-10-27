@@ -82,6 +82,15 @@ class ScriptedReportClient:
                 "hypotheses": [], "open_questions": ["Какие отказы считаются ошибкой процесса?"]}
 
     def submit_fact_requirements(self, payload):
+        if payload.get("requested_facts"):
+            start = len(payload["existing_facts"])
+            questions = [row["id"] for row in payload["process_context"]["measurement_questions"]][:1]
+            operation = payload["operations"][0]["operation_id"]
+            return {"facts": [{"id": f"f-{start + number}", "requested_id": row["id"], "meaning": row["meaning"],
+                               "question_ids": questions, "lifecycle": row["lifecycle"],
+                               "operation_ids": row.get("operation_ids") or [operation], "applicability": "applicable",
+                               "needed": ["case_id"], "observed_by": [], "rationale": "Запрошено определением метрики."}
+                              for number, row in enumerate(payload["requested_facts"], 1)]}
         operations = payload["operations"]
         bindings = payload["event_bindings"]
         lifecycle = {"success": "result", "refusal": "refusal"}
@@ -104,8 +113,8 @@ class ScriptedReportClient:
         return {"facts": facts}
 
     def submit_instrumentation_changes(self, payload):
-        changes = []
-        for number, fact in enumerate(payload["facts_with_gaps"], 1):
+        changes, start = [], len(payload["earlier_changes"])
+        for number, fact in enumerate(payload["facts_with_gaps"], start + 1):
             fragment = next((row for row in payload["fragments"]
                              if row["about"].get("operation_id") in fact["operation_ids"]), None)
             axes = fact["coverage"]["axes"]

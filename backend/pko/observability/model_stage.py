@@ -76,31 +76,68 @@ def _arguments(reply, tool_name: str) -> tuple[Any, str | None, dict | None]:
     return value, None, calls[0] if calls else None
 
 
+def _label(error: str) -> str:
+    return error.split(":", 1)[0].strip()
+
+
+def _merge(first, first_errors, result, errors, key):
+    """Accepted items of the first answer survive a repair that omits them."""
+    if key is None or not isinstance(first, list) or not isinstance(result, list) or result is first:
+        return result, errors
+    fresh = {key(item) for item in result}
+    merged = result + [item for item in first if key(item) not in fresh]
+    accepted = {key(item) for item in merged}
+    mentioned = {_label(error) for error in errors}
+    kept = [error for error in errors if _label(error) not in accepted]
+    # An item rejected first and silently dropped by the repair stays reported.
+    kept += [error for error in first_errors if _label(error) not in accepted | mentioned]
+    return merged, kept
+
+
 class StageModel:
-    def __init__(self, client, budget: ReportBudget):
+    def __init__(self, client, budget: ReportBudget, cache: dict | None = None):
         self.client = client
         self.budget = budget
+        # Accepted answers by packet digest; reused only after revalidation.
+        self.cache = cache if cache is not None else {}
+        self.cache_hits = 0
 
     def _limits(self, schema: dict) -> tuple[int, int]:
         window = getattr(getattr(self.client, "spec", None), "context_window", None) or 64000
         return context_budget(window, [schema])
 
+    def _cache_key(self, rules: dict, schema: dict, payload: dict) -> str:
+        model = getattr(getattr(self.client, "spec", None), "model", "")
+        data = json.dumps([rules["sha256"], schema, payload, model], ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
     def ask(self, stage: str, payload: dict, tool: dict,
-            validate: Callable[[dict], tuple[Any, list[str]]], *, reserve: int = 0) -> tuple[Any, list[str]]:
+            validate: Callable[[dict], tuple[Any, list[str]]], *, reserve: int = 0,
+            key: Callable[[Any], str] | None = None) -> tuple[Any, list[str]]:
         """Return ``(result, remaining_errors)``; ``result`` is None if nothing valid came back.
 
         ``validate`` returns the accepted result and addressed errors; items it
-        rejects are excluded from the result, never repaired silently.
+        rejects are excluded from the result, never repaired silently. With
+        ``key``, items accepted in the first answer are kept when the repair
+        omits them.
         """
         rules = methodology(stage)
         schema = {"type": "function", "function": tool}
         messages = [{"role": "system", "content": rules["text"]},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]
+        cache_key = self._cache_key(rules, schema, payload)
+        cached = self.cache.get(cache_key)
+        if cached is not None:
+            result, errors = validate(cached)
+            if result is not None and not errors:
+                self.cache_hits += 1
+                record("report_cache_hit", stage=stage, key=cache_key)
+                return result, errors
         budget, response_tokens = self._limits(schema)
         size = sum(len(json.dumps(message, ensure_ascii=False)) for message in messages)
         if size > budget:
             raise PacketTooLarge(f"Пакет этапа {stage} ({size} символов) не помещается в окно модели ({budget}).")
-        result, errors = None, []
+        result, errors, first, first_errors, clean = None, [], None, [], None
         for attempt in (1, 2):
             if attempt == 2:
                 if sum(len(json.dumps(message, ensure_ascii=False)) for message in messages) > budget:
@@ -121,15 +158,20 @@ class StageModel:
                     raise BudgetExhausted(str(exc)) from exc
                 arguments, problem, call = _arguments(reply, tool["name"])
                 if problem is None:
-                    result, errors = validate(arguments)
-                elif result is None:
-                    errors = [problem]
+                    answer, answer_errors = validate(arguments)
+                    if answer is not None or result is None:
+                        result, errors = answer, answer_errors
+                    else:
+                        errors = errors + answer_errors
+                    if answer is not None and not answer_errors:
+                        clean = arguments
                 else:
                     # A malformed repair keeps the first validated answer.
                     errors = errors + [problem]
-                    break
                 span.set_output({"errors": len(errors)})
             record("report_stage_answer", stage=stage, attempt=attempt, errors=errors[:20])
+            if attempt == 1:
+                first, first_errors = result, list(errors)
             if not errors or attempt == 2:
                 break
             # One addressed repair: the model sees exactly what was rejected.
@@ -142,4 +184,7 @@ class StageModel:
                                          "content": json.dumps(feedback, ensure_ascii=False)}]
             else:
                 messages += [assistant, {"role": "user", "content": json.dumps(feedback, ensure_ascii=False)}]
-        return result, errors
+        merged, errors = _merge(first, first_errors, result, errors, key)
+        if clean is not None and merged is result and not errors:
+            self.cache[cache_key] = clean
+        return merged, errors

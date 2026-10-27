@@ -22,7 +22,8 @@ STAGES = {"logging_inventory": "Каталог мест логирования",
           "fact_requirements": "Необходимые бизнес-факты",
           "logging_coverage": "Покрытие фактов логированием",
           "instrumentation_plan": "Доработки логирования",
-          "metric_catalog": "Определения метрик"}
+          "metric_catalog": "Определения метрик",
+          "requirement_reconciliation": "Факты, запрошенные метриками"}
 BINDING_STATUSES = ("confirmed", "no_operation", "unresolved", "conflict")
 EVIDENCE_DECISIONS = ("bind", "no_operation")
 

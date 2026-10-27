@@ -166,7 +166,8 @@ class ReportContractTests(unittest.TestCase):
                          [("logging_inventory", "completed", "complete"), ("event_operation_mapping", "completed", "complete"),
                           ("event_binding_review", "not_run", "none"), ("process_context", "not_run", "none"),
                           ("fact_requirements", "blocked", "none"), ("logging_coverage", "blocked", "none"),
-                          ("instrumentation_plan", "blocked", "none"), ("metric_catalog", "blocked", "none")])
+                          ("instrumentation_plan", "blocked", "none"), ("metric_catalog", "blocked", "none"),
+                          ("requirement_reconciliation", "blocked", "none")])
         self.assertEqual(report["logging"]["scope"]["files_scanned"], 2)
 
     def test_partial_map_gives_partial_mapping_result(self):
@@ -181,7 +182,7 @@ class ReportContractTests(unittest.TestCase):
             report = run_observability(model(), tree())
         self.assertEqual([(s["execution_status"], s["result_status"]) for s in report["stages"]],
                          [("failed", "none"), ("blocked", "none"), ("blocked", "none"), ("not_run", "none")]
-                         + [("blocked", "none")] * 4)
+                         + [("blocked", "none")] * 5)
         self.assertEqual(report["logging"], {})
 
     def test_report_cannot_refer_to_another_revision_or_claim_acceptance(self):
@@ -266,7 +267,7 @@ class RunnerReportTests(unittest.TestCase):
         started = {row["span_id"]: row for row in entries if row["event"] == "span_started"}
         finished = {row["span_id"]: row for row in entries if row["event"] == "span_finished"}
         self.assertEqual(set(started), set(finished), "every started span ends")
-        self.assertTrue(all(row["status"] in ("ok", "error", "interrupted") for row in finished.values()))
+        self.assertTrue(all(row["status"] in ("ok", "error", "interrupted", "blocked", "not_run") for row in finished.values()))
         roots = [row for row in started.values() if row["parent_span_id"] is None]
         self.assertEqual([row["name"] for row in roots], ["scenario_map_run"])
         by_name = {row["name"]: row for row in started.values()}

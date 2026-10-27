@@ -290,9 +290,9 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
     Исключение внутри блока помечается на спане (`record_error`) и
     пробрасывается дальше — трассировка не глотает ошибки.
     """
-    with audit_span(name, attributes):
+    with audit_span(name, attributes) as local:
         if _tracer is None:
-            yield _AuditedSpan(_NoopSpan())
+            yield _AuditedSpan(_NoopSpan(), local)
             return
 
         from opentelemetry import trace as otel_trace
@@ -313,7 +313,7 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
             record("phoenix_span", name=name, trace_id=f"{context.trace_id:032x}", span_id=f"{context.span_id:016x}")
         except Exception:
             pass
-        observed = _AuditedSpan(handle)
+        observed = _AuditedSpan(handle, local)
         for key, value in attributes.items():
             observed.set_attribute(key, value)
         handle._opened = True
@@ -505,8 +505,9 @@ class TracedClient:
 class _AuditedSpan:
     """Mirror bounded span metadata to the CLI journal, even without Phoenix."""
 
-    def __init__(self, delegate: Any) -> None:
+    def __init__(self, delegate: Any, local: Any = None) -> None:
         self._delegate = delegate
+        self._local = local
 
     @property
     def trace_id(self) -> str:
@@ -519,9 +520,16 @@ class _AuditedSpan:
 
     def set_input(self, value: Any) -> None:
         self._delegate.set_input(value)
+        record("span_input", value=_bounded(value))
 
     def set_output(self, value: Any) -> None:
         self._delegate.set_output(value)
+        record("span_output", value=_bounded(value))
+
+    def set_status(self, status: str, reason: str = "") -> None:
+        """Local terminal status for a failure the span's owner handled."""
+        if self._local is not None:
+            self._local.set_status(status, reason)
 
     def add_event(self, name: str, **attributes: Any) -> None:
         self._delegate.add_event(name, **attributes)
@@ -529,6 +537,14 @@ class _AuditedSpan:
 
     def record_error(self, exc: BaseException) -> None:
         self._delegate.record_error(exc)
+        if self._local is not None:
+            self._local.fail(exc)
+
+
+def _bounded(value: Any, limit: int = 4000) -> Any:
+    """Span payloads in the local journal are capped; truncation is explicit."""
+    text = _dumps(value)
+    return value if len(text) <= limit else {"truncated": True, "chars": len(text), "head": text[:limit]}
 
 
 def _display_name(name: str, step: Any) -> str:

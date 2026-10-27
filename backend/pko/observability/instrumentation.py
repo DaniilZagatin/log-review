@@ -67,6 +67,23 @@ def find_cycle(changes: list[dict]) -> list[str]:
     return sorted(name for name, count in waiting.items() if count)
 
 
+def settle_dependencies(changes: list[dict], earlier: list[dict] = ()) -> tuple[list[dict], list[str]]:
+    """Keep only changes whose dependencies resolve, transitively and without cycles."""
+    kept, problems = list(changes), []
+    while True:
+        known = {change["id"] for change in [*earlier, *kept]}
+        broken = [change for change in kept if any(ref not in known for ref in change["depends_on"])]
+        for change in broken:
+            missing = [ref for ref in change["depends_on"] if ref not in known]
+            problems.append(f"{change['id']}: depends_on ссылается на отсутствующие изменения {', '.join(missing)}")
+        cycle = set(find_cycle([*earlier, *kept])) - {change["id"] for change in earlier}
+        if cycle:
+            problems.append(f"Зависимости образуют цикл: {', '.join(sorted(cycle))}")
+        if not broken and not cycle:
+            return kept, problems
+        kept = [change for change in kept if change not in broken and change["id"] not in cycle]
+
+
 def _fragments(model: dict, report: dict, facts: list[dict], registry: EvidenceRegistry) -> list[dict]:
     """Issue the emit sites observing these facts and the cited code of their operations."""
     nodes = {node["id"]: node for node in model.get("nodes") or []}
@@ -95,7 +112,8 @@ def _fragments(model: dict, report: dict, facts: list[dict], registry: EvidenceR
 
 
 def build_changes(model: dict, report: dict, stage_model: StageModel, registry: EvidenceRegistry,
-                  profile: dict | None = None, reserve: int = 0) -> tuple[list, list[str], list[str]]:
+                  profile: dict | None = None, reserve: int = 0,
+                  fact_ids: set[str] | None = None) -> tuple[list, list[str], list[str]]:
     """Return accepted changes, errors and IDs of gap facts left without a packet.
 
     A packet too large for the provider window is split; a single fact that
@@ -103,11 +121,14 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
     """
     coverage = {row["fact_id"]: row for row in report["coverage"]["facts"]}
     facts = {fact["id"]: fact for fact in report["facts"]}
-    gap_facts = [facts[fact_id] for fact_id, row in coverage.items() if row["gaps"] or row["unknowns"]]
+    gap_facts = [facts[fact_id] for fact_id, row in coverage.items()
+                 if (row["gaps"] or row["unknowns"]) and (fact_ids is None or fact_id in fact_ids)]
     operations = {node["id"] for node in model.get("nodes") or [] if node.get("kind") == "operation"}
     bindings = {row["binding_id"]: row for row in confirmed_bindings(report)}
     context = report["process_context"]
-    accepted: list[dict] = []
+    # Changes already in the report stay referable; new IDs never collide with them.
+    accepted: list[dict] = list(report.get("instrumentation") or []) if fact_ids is not None else []
+    earlier = len(accepted)
     errors: list[str] = []
     pending: list[str] = []
     queue = [gap_facts[index:index + FACTS_PER_PACKET] for index in range(0, len(gap_facts), FACTS_PER_PACKET)]
@@ -136,20 +157,12 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
                 if change is not None:
                     seen.add(change["id"])
                     result.append(change)
-            known = seen
-            for change in result:
-                unknown = [ref for ref in change["depends_on"] if ref not in known]
-                if unknown:
-                    problems.append(f"{change['id']}: depends_on ссылается на неизвестные изменения {', '.join(unknown)}")
-            result = [change for change in result if all(ref in known for ref in change["depends_on"])]
-            cycle = find_cycle(accepted + result)
-            if cycle:
-                problems.append(f"Зависимости образуют цикл: {', '.join(cycle)}")
-                result = [change for change in result if change["id"] not in cycle]
-            return result, problems
+            result, dependency_problems = settle_dependencies(result, accepted)
+            return result, problems + dependency_problems
 
         try:
-            result, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve)
+            result, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve,
+                                               key=lambda change: change["id"])
         except PacketTooLarge as exc:
             if len(packet) > 1:
                 middle = len(packet) // 2
@@ -160,10 +173,12 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
             continue
         except BudgetExhausted as exc:
             errors.append(str(exc))
-            return accepted, errors, pending + [fact["id"] for rest in [packet, *queue] for fact in rest]
-        accepted += result or []
-        errors += problems
-    return accepted, errors, pending
+            return accepted[earlier:], errors, pending + [fact["id"] for rest in [packet, *queue] for fact in rest]
+        # Items kept across a repair are settled again against everything accepted so far.
+        settled, dependency_problems = settle_dependencies(result or [], accepted)
+        accepted += settled
+        errors += problems + [problem for problem in dependency_problems if problem not in problems]
+    return accepted[earlier:], errors, pending
 
 
 def _validate_change(item, packet_ids, operations, bindings, registry: EvidenceRegistry, seen) -> tuple[dict | None, list[str]]:
