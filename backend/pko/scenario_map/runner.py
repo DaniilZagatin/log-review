@@ -12,6 +12,8 @@ from uuid import uuid4
 from pko.audit import AuditedClient, audit_run, record
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
+from pko.observability.export import build_handoff
+from pko.observability.inputs import load_business_text, parse_field_map, profile_runtime_log
 from pko.observability.model_stage import ReportBudget, StageModel
 from pko.observability.pipeline import ReportOptions, run_observability
 from pko.output.publisher import write_outputs
@@ -97,8 +99,9 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     with trace_span("render_map"):
                         html = render_scenario_map(model)
                     with trace_span("publish_outputs") as output_span:
+                        map_json = json.dumps(model, ensure_ascii=False, indent=2)
                         write_outputs(out_dir, {
-                            "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+                            "scenario-model": ("scenario_map.json", map_json),
                             "scenario-map": ("scenario_map.html", html),
                         })
                         output_span.set_output({"files": ["scenario_map.json", "scenario_map.html"]})
@@ -106,14 +109,16 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         # The map is already published; a report failure leaves it as is.
                         try:
                             with trace_span("process_observability") as report_span:
-                                report = run_observability(model, workspace.tree, stage_model=_report_model(
-                                    report_options or ReportOptions(), client, spec, model_timeout))
+                                options = report_options or ReportOptions()
+                                report = run_observability(model, workspace.tree, options=options,
+                                                           stage_model=_report_model(options, client, spec, model_timeout))
                                 report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
                             with trace_span("render_report"):
                                 html = render_scenario_map(model, report)
                             with trace_span("publish_report") as output_span:
+                                report_json = json.dumps(report, ensure_ascii=False, indent=2)
                                 write_outputs(out_dir, {
-                                    "process-report": ("process_report.json", json.dumps(report, ensure_ascii=False, indent=2)),
+                                    "process-report": ("process_report.json", report_json),
                                     "scenario-map": ("scenario_map.html", html),
                                 })
                                 output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
@@ -121,6 +126,20 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         except Exception as exc:
                             record("process_report_failed", error_type=type(exc).__name__, error=str(exc)[:500])
                             model["run"]["process_report_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                        else:
+                            # The handoff is derived from the published report; its failure keeps both.
+                            try:
+                                with trace_span("export_handoff") as export_span:
+                                    files = build_handoff(model, report, {"scenario_map.json": map_json,
+                                                                          "process_report.json": report_json},
+                                                          {"run_id": run_id, "trace_id": run_span.trace_id or None,
+                                                           "local_audit": f"audit/run_{run_id}.txt"})
+                                    write_outputs(out_dir / "handoff", files)
+                                    export_span.set_output({"files": [name for name, _ in files.values()]})
+                                model["run"]["handoff"] = "handoff/manifest.json"
+                            except Exception as exc:
+                                record("handoff_failed", error_type=type(exc).__name__, error=str(exc)[:500])
+                                model["run"]["handoff_error"] = f"{type(exc).__name__}: {exc}"[:500]
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
                                          "gaps": len(model.get("gaps", [])),
@@ -169,6 +188,12 @@ def add_cli_command(subparsers):
                          help="Лимит запросов к модели для этапов отчёта, 1–200 (по умолчанию 24)")
     command.add_argument("--observability-max-seconds", type=float, default=1800,
                          help="Лимит времени этапов отчёта в секундах, отдельный от исследования (по умолчанию 1800)")
+    command.add_argument("--business-file", default="",
+                         help="Бизнес-описание процесса (UTF-8, до 200 КБ) для этапов отчёта; источник требований, не кода")
+    command.add_argument("--runtime-log", default="",
+                         help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
+    command.add_argument("--runtime-fields", default="",
+                         help="Имена полей JSONL: event_key=...,case_id=...,occurred_at=...,event_id=...")
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -187,6 +212,13 @@ def command_main(args) -> int:
             raise PkoError(f"Не удалось прочитать описание сценария: {exc}",
                            hint="проверьте путь и кодировку UTF-8") from exc
 
+    if (args.business_file or args.runtime_log) and not args.observability:
+        raise PkoError("Бизнес-описание и файл логов используются только с --observability.")
+    # Inputs are checked before research so a bad file does not waste the research budget.
+    business = load_business_text(args.business_file) if args.business_file else None
+    runtime = (profile_runtime_log(args.runtime_log, parse_field_map(args.runtime_fields))
+               if args.runtime_log else None)
+
     def event(name, data):
         if args.quiet:
             return
@@ -204,7 +236,8 @@ def command_main(args) -> int:
                          thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
                          summary_mode=args.summary_mode, observability=args.observability,
                          report_options=ReportOptions(max_requests=args.observability_max_requests,
-                                                      max_seconds=args.observability_max_seconds),
+                                                      max_seconds=args.observability_max_seconds,
+                                                      business=business, runtime=runtime),
                          on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
@@ -216,6 +249,10 @@ def command_main(args) -> int:
     print(f"Данные: {(Path(args.out).resolve() / 'scenario_map.json')}")
     if model["run"].get("process_report"):
         print(f"Отчёт наблюдаемости: {(Path(args.out).resolve() / 'process_report.json')}")
+        if model["run"].get("handoff"):
+            print(f"Комплект передачи: {(Path(args.out).resolve() / 'handoff')}")
+        elif model["run"].get("handoff_error"):
+            print(f"Комплект передачи не построен: {model['run']['handoff_error']}")
     elif model["run"].get("process_report_error"):
         print(f"Отчёт наблюдаемости не построен: {model['run']['process_report_error']}")
     if model["run"].get("interrupted"):

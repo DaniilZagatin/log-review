@@ -33,7 +33,8 @@ def write_outputs(out_dir: Path, files: dict[str, tuple[str, str]]) -> list[Writ
         staged: list[tuple[str, Path, Path]] = []
         for kind, (name, content) in files.items():
             source = stage / name
-            source.write_text(content, encoding="utf-8")
+            # Exact bytes: no platform newline translation, so manifests can fingerprint content.
+            source.write_bytes(content.encode("utf-8"))
             staged.append((kind, source, out_dir / name))
         _validate_staged([source for _, source, _ in staged])
         _commit_staged([(source, target) for _, source, target in staged])

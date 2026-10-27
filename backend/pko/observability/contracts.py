@@ -17,7 +17,12 @@ LINK_STATUSES = ("linked", "ambiguous", "unlinked", None)
 LINK_BASES = ("operation_evidence", "code_explanation", None)
 STAGES = {"logging_inventory": "Каталог мест логирования",
           "event_operation_mapping": "Кандидаты связи с операциями",
-          "event_binding_review": "Смысл мест логирования"}
+          "event_binding_review": "Смысл мест логирования",
+          "process_context": "Контекст процесса и вопросы измерения",
+          "fact_requirements": "Необходимые бизнес-факты",
+          "logging_coverage": "Покрытие фактов логированием",
+          "instrumentation_plan": "Доработки логирования",
+          "metric_catalog": "Определения метрик"}
 BINDING_STATUSES = ("confirmed", "no_operation", "unresolved", "conflict")
 EVIDENCE_DECISIONS = ("bind", "no_operation")
 
@@ -89,3 +94,62 @@ def validate_report(report: dict, model: dict) -> None:
             raise ReportError(f"{name}: refers to an operation outside the map")
         if binding.get("decision") in EVIDENCE_DECISIONS and not binding.get("evidence"):
             raise ReportError(f"{name}: an interpretation of a logging site needs cited lines")
+
+    _validate_downstream(report, operations, binding_ids, {
+        row["id"] for row in logging.get("event_bindings") or [] if row.get("status") == "confirmed"})
+
+
+def _proposal(row: dict, label: str) -> None:
+    if row.get("authority_status") != "proposed":
+        raise ReportError(f"{label}: only a specialist can accept a proposal")
+
+
+def _validate_downstream(report: dict, operations: set, binding_ids: set, confirmed: set) -> None:
+    from pko.observability.instrumentation import find_cycle
+    context = report.get("process_context")
+    questions = set()
+    if context is not None:
+        _proposal(context, "process_context")
+        questions = {row["id"] for row in context.get("measurement_questions") or []}
+        if any(ref not in operations for row in context.get("outcomes") or [] for ref in row.get("operation_ids") or []):
+            raise ReportError("process_context: outcome refers to an operation outside the map")
+    facts = {}
+    for fact in report.get("facts") or []:
+        label = fact.get("id")
+        _proposal(fact, label)
+        if label in facts or any(ref not in questions for ref in fact.get("question_ids") or []):
+            raise ReportError(f"{label}: duplicate fact or unknown measurement question")
+        if any(ref not in operations for ref in fact.get("operation_ids") or []):
+            raise ReportError(f"{label}: refers to an operation outside the map")
+        if any(ref not in confirmed for ref in fact.get("observed_by") or []):
+            raise ReportError(f"{label}: observed only by confirmed event bindings")
+        facts[label] = fact
+    coverage = report.get("coverage")
+    if coverage is not None:
+        if {row["fact_id"] for row in coverage.get("facts") or []} != set(facts):
+            raise ReportError("coverage must assess exactly the listed facts")
+        if coverage.get("summary", {}).get("obligations_status") != "proposed":
+            raise ReportError("coverage obligations are proposed until a specialist accepts them")
+    changes = report.get("instrumentation") or []
+    change_ids = {change.get("id") for change in changes}
+    for change in changes:
+        label = change.get("id")
+        _proposal(change, label)
+        if any(ref not in facts for ref in change.get("fact_ids") or []) or                 any(ref not in change_ids for ref in change.get("depends_on") or []):
+            raise ReportError(f"{label}: refers to unknown facts or changes")
+        if any(ref not in operations for ref in change.get("operation_ids") or []):
+            raise ReportError(f"{label}: refers to an operation outside the map")
+        if change.get("event", {}).get("key_status") not in ("not_set", "proposed", "existing"):
+            raise ReportError(f"{label}: an event key is never agreed by code or model")
+        location = change.get("location") or {}
+        if location.get("status") == "anchored" and "quote" not in location:
+            raise ReportError(f"{label}: an anchored change needs cited lines")
+    if find_cycle(changes):
+        raise ReportError("instrumentation dependencies form a cycle")
+    for metric in report.get("metrics") or []:
+        label = metric.get("id")
+        _proposal(metric, label)
+        if metric.get("value") is not None or metric.get("readiness", {}).get("status") != "not_ready":
+            raise ReportError(f"{label}: metric values are not computed in this version")
+        if any(ref not in facts for ref in metric.get("fact_ids") or []) or                 any(ref not in change_ids for ref in metric.get("change_ids") or []):
+            raise ReportError(f"{label}: refers to unknown facts or changes")

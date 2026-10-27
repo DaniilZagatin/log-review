@@ -1,6 +1,7 @@
 """Process report over a saved map: static logging catalog, linkage and tabs."""
 
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -12,9 +13,11 @@ from unittest.mock import patch
 from pko.observability.contracts import ReportError, map_revision, validate_report
 from pko.observability.log_discovery import discover_logging, logging_config_paths
 from pko.observability.mapping import link_sites
-from pko.observability.pipeline import run_observability
+from pko.observability.export import safe_cell
+from pko.observability.pipeline import ReportOptions, run_observability
 from pko.render.scenario_map import render_scenario_map
 from pko.scenario_map.runner import run_scenario
+from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
 
 PYTHON = '''import logging
@@ -160,7 +163,9 @@ class ReportContractTests(unittest.TestCase):
         self.assertEqual(data, before)
         self.assertEqual([(s["id"], s["execution_status"], s["result_status"]) for s in report["stages"]],
                          [("logging_inventory", "completed", "complete"), ("event_operation_mapping", "completed", "complete"),
-                          ("event_binding_review", "not_run", "none")])
+                          ("event_binding_review", "not_run", "none"), ("process_context", "not_run", "none"),
+                          ("fact_requirements", "blocked", "none"), ("logging_coverage", "blocked", "none"),
+                          ("instrumentation_plan", "blocked", "none"), ("metric_catalog", "blocked", "none")])
         self.assertEqual(report["logging"]["scope"]["files_scanned"], 2)
 
     def test_partial_map_gives_partial_mapping_result(self):
@@ -174,7 +179,8 @@ class ReportContractTests(unittest.TestCase):
         with patch("pko.observability.pipeline.discover_logging", side_effect=RuntimeError("boom")):
             report = run_observability(model(), tree())
         self.assertEqual([(s["execution_status"], s["result_status"]) for s in report["stages"]],
-                         [("failed", "none"), ("blocked", "none"), ("blocked", "none")])
+                         [("failed", "none"), ("blocked", "none"), ("blocked", "none"), ("not_run", "none")]
+                         + [("blocked", "none")] * 4)
         self.assertEqual(report["logging"], {})
 
     def test_report_cannot_refer_to_another_revision_or_claim_acceptance(self):
@@ -208,9 +214,9 @@ class ReportRenderTests(unittest.TestCase):
         report["logging"]["sites"][0]["event_key"] = '</script><img src=x onerror="alert(1)">'
         document = Elements(render_scenario_map(data, report))
         tabs = [attrs for _, attrs in document.elements if attrs.get("role") == "tab"]
-        self.assertEqual([tab["data-tab"] for tab in tabs], ["map", "logging", "basis"])
+        self.assertEqual([tab["data-tab"] for tab in tabs], ["map", "logging", "changes", "metrics", "basis"])
         panels = {attrs["id"] for _, attrs in document.elements if attrs.get("role") == "tabpanel"}
-        self.assertEqual(panels, {"panel-logging", "panel-basis"})
+        self.assertEqual(panels, {"panel-logging", "panel-changes", "panel-metrics", "panel-basis"})
         self.assertIn("process-report", [attrs.get("id") for attrs in document.scripts])
         self.assertFalse(any(tag == "img" for tag, _ in document.elements))
         with self.assertRaises(ReportError):
@@ -228,16 +234,31 @@ class RunnerReportTests(unittest.TestCase):
     def test_observability_run_publishes_report_next_to_unchanged_map(self):
         output = self.root / "out"
         with patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}):
-            result = run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True)
+            result = run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True,
+                                  report_options=ReportOptions(client=ScriptedReportClient()))
         self.assertEqual(result["run"]["status"], "completed")
         saved = json.loads((output / "scenario_map.json").read_text(encoding="utf-8"))
         report = json.loads((output / "process_report.json").read_text(encoding="utf-8"))
         validate_report(report, saved)
         self.assertEqual(report["run_id"], result["run"]["id"])
+        self.assertEqual({row["execution_status"] for row in report["stages"]}, {"completed"})
         self.assertIn('role="tablist"', (output / "scenario_map.html").read_text(encoding="utf-8"))
         audit = next((output / "audit").glob("run_*.txt")).read_text(encoding="utf-8")
-        for span in ("logging_inventory", "event_operation_mapping", "publish_report"):
+        for span in ("logging_inventory", "event_operation_mapping", "process_context", "metric_catalog",
+                     "publish_report", "export_handoff"):
             self.assertIn(span, audit)
+        manifest = json.loads((output / "handoff" / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["map_revision"], report["map_revision"])
+        for row in manifest["files"]:
+            content = (output / "handoff" / row["name"]).read_bytes()
+            self.assertEqual(hashlib.sha256(content).hexdigest(), row["sha256"], row["name"])
+        self.assertTrue((output / "handoff" / "metrics.csv").read_text(encoding="utf-8-sig").startswith("metric_id,"))
+
+    def test_csv_cells_cannot_start_a_formula(self):
+        self.assertEqual(safe_cell("=HYPERLINK(1)"), "'=HYPERLINK(1)")
+        self.assertEqual(safe_cell("-1"), "'-1")
+        self.assertEqual(safe_cell(["a", "b"]), "a; b")
+        self.assertEqual(safe_cell(None), "")
 
     def test_report_failure_keeps_the_published_map(self):
         output = self.root / "failed"

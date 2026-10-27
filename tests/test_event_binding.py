@@ -19,6 +19,10 @@ def by_site(report):
     return {(site["path"], site["line_start"]): site for site in report["logging"]["sites"]}
 
 
+def stage_row(report, stage_id):
+    return next(row for row in report["stages"] if row["id"] == stage_id)
+
+
 def bindings_for(report, site):
     return [row for row in report["logging"]["event_bindings"] if row["site_id"] == site["id"]]
 
@@ -35,14 +39,13 @@ class EventBindingTests(unittest.TestCase):
         self.assertIn('logger.info(ACCEPTED', binding["evidence"][0]["quote"])
         self.assertEqual(sites[("src/app.py", 18)]["review_status"], "not_reviewed")
         self.assertEqual(sites[("src/Issuance.java", 4)]["review_status"], "not_reviewed")
-        stage = report["stages"][-1]
-        self.assertEqual((stage["id"], stage["execution_status"], stage["result_status"]),
-                         ("event_binding_review", "completed", "complete"))
+        stage = stage_row(report, "event_binding_review")
+        self.assertEqual((stage["execution_status"], stage["result_status"]), ("completed", "complete"))
         # Fragments shown to the model are numbered masked lines of the enclosing function.
         tool, payload = client.requests[0]
         self.assertEqual(tool, "submit_event_bindings")
         self.assertTrue(any(fragment["text"].startswith("6| def accept") for fragment in payload["fragments"]))
-        self.assertEqual(report["budget"]["used_requests"], 1)
+        self.assertEqual(report["budget"]["by_stage"]["event_binding"], 1)
 
     def test_citation_outside_issued_lines_gets_one_repair_then_is_rejected(self):
         def outside(payload, messages):
@@ -55,8 +58,8 @@ class EventBindingTests(unittest.TestCase):
         site = by_site(report)[("src/app.py", 7)]
         self.assertEqual(site["review_status"], "rejected")
         self.assertTrue(any("не входит в выданные фрагменты" in reason for reason in site["review_reasons"]))
-        self.assertEqual(len(client.requests), 2, "exactly one repair turn")
-        self.assertEqual(report["stages"][-1]["result_status"], "partial")
+        self.assertEqual(sum(tool == "submit_event_bindings" for tool, _ in client.requests), 2, "exactly one repair turn")
+        self.assertEqual(stage_row(report, "event_binding_review")["result_status"], "partial")
 
     def test_repair_turn_receives_addressed_errors_and_can_fix_the_answer(self):
         seen = {}
@@ -126,8 +129,9 @@ class EventBindingTests(unittest.TestCase):
         statuses = [site["review_status"] for site in report["logging"]["sites"]]
         self.assertEqual(statuses.count("confirmed"), 6)
         self.assertEqual(statuses.count("deferred"), 2)
-        stage = report["stages"][-1]
+        stage = stage_row(report, "event_binding_review")
         self.assertEqual((stage["execution_status"], stage["result_status"]), ("completed", "partial"))
+        self.assertEqual(stage_row(report, "process_context")["execution_status"], "interrupted")
 
     def test_report_rejects_accepted_or_uncited_interpretations(self):
         data = model()
