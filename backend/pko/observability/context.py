@@ -15,6 +15,7 @@ STAGE = "process_context"
 FAMILIES = ("volume", "duration", "outcome", "quality", "cost", "other")
 OUTCOME_KINDS = ("success", "negative", "cancellation", "open")
 QUESTION_SOURCES = ("scenario", "business", "proposal")
+ALL_QUESTION_SOURCES = QUESTION_SOURCES + ("profile",)
 IDENTIFIER_SOURCES = ("code", "business", "hypothesis")
 TERM_SOURCES = ("scenario", "business", "code")
 MAX_QUESTIONS = 12
@@ -83,7 +84,21 @@ def _strings(value, limit: int, count: int) -> list[str]:
     return [text(item, limit) for item in value[:count] if text(item, limit)] if isinstance(value, list) else []
 
 
-def build_context(model: dict, report: dict, stage_model: StageModel, business: dict | None) -> tuple[dict | None, list[str]]:
+def add_profile_questions(context: dict, profile: dict | None) -> None:
+    """Profile questions are trusted product data: code adds them, the model does not echo them."""
+    if not profile:
+        return
+    questions = context["measurement_questions"]
+    number = max((int(row["id"][2:]) for row in questions), default=0)
+    for row in profile["measurement_questions"]:
+        number += 1
+        questions.append({"id": f"q-{number}", "question": row["question"], "family": row["family"],
+                          "source": "profile", "profile_question_id": row["id"],
+                          "rationale": f"Профиль «{profile['title']}», версия {profile['version']}"})
+
+
+def build_context(model: dict, report: dict, stage_model: StageModel, business: dict | None,
+                  profile: dict | None = None) -> tuple[dict | None, list[str]]:
     operations = {node["id"] for node in model.get("nodes") or [] if node.get("kind") == "operation"}
     scenario, brief = model.get("scenario") or {}, model.get("research_brief") or {}
     payload = {
@@ -94,7 +109,8 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
         "operations": operations_view(model),
         "gaps": [gap.get("description") for gap in model.get("gaps") or []][:30],
         "event_bindings": confirmed_bindings(report),
-        "business_description": business["text"] if business else None}
+        "business_description": business["text"] if business else None,
+        "domain_profile_questions": [row["question"] for row in profile["measurement_questions"]] if profile else []}
     names = _code_names(model, report)
 
     def validate(arguments):
@@ -152,4 +168,7 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
                 "business_source": {k: business[k] for k in ("name", "sha256", "truncated")} if business else None,
                 "provenance": "model_proposal", "authority_status": "proposed"}, errors
 
-    return stage_model.ask(STAGE, payload, TOOL, validate)
+    context, errors = stage_model.ask(STAGE, payload, TOOL, validate)
+    if context is not None:
+        add_profile_questions(context, profile)
+    return context, errors

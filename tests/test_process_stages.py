@@ -10,7 +10,7 @@ from pathlib import Path
 from pko.errors import PkoError
 from pko.observability.contracts import ReportError, validate_report
 from pko.observability.coverage import assess_fact
-from pko.observability.inputs import load_business_text, parse_field_map, profile_runtime_log
+from pko.observability.inputs import load_business_text, load_profile, parse_field_map, profile_runtime_log
 from pko.observability.instrumentation import find_cycle
 from pko.observability.model_stage import ReportBudget, StageModel
 from pko.observability.pipeline import ReportOptions, run_observability
@@ -196,6 +196,46 @@ class MetricTests(unittest.TestCase):
         report = run(options=ReportOptions(runtime=runtime))
         self.assertEqual({metric["readiness"]["components"]["data"] for metric in report["metrics"]}, {"sample_only"})
         self.assertEqual(report["runtime_profile"], runtime)
+
+
+class ProfileTests(unittest.TestCase):
+    def test_profile_adds_its_questions_and_keeps_every_metric_direction(self):
+        profile = load_profile("bank-process-kpi")
+
+        def map_errors(answer, payload):
+            directions = {row["id"] for row in payload["domain_metric_directions"]}
+            self.assertIn("error_share", directions)
+            answer["metrics"][0]["profile_direction"] = "error_share"
+        client = ScriptedReportClient({"submit_metric_definitions": [scripted("submit_metric_definitions", map_errors)]})
+        data = model()
+        report = run(client, data=data, options=ReportOptions(profile=profile))
+        validate_report(report, data)
+        self.assertEqual((report["domain_profile"]["id"], report["domain_profile"]["version"]), ("bank-process-kpi", "1"))
+        sources = [row["source"] for row in report["process_context"]["measurement_questions"]]
+        self.assertEqual(sources.count("profile"), 5)
+        directions = [metric.get("profile_direction") for metric in report["metrics"]]
+        self.assertEqual(sorted(filter(None, directions)), sorted(row["id"] for row in profile["metric_directions"]))
+        added = [metric for metric in report["metrics"] if metric.get("source") == "profile"]
+        self.assertEqual(len(added), 4)
+        for metric in added:
+            self.assertIsNone(metric["value"])
+            self.assertIn("Факты для этого направления не определены.", metric["readiness"]["blockers"])
+            self.assertTrue(metric["open_questions"])
+        self.assertTrue(any("Направления профиля" in reason for reason in stage(report, "metric_catalog")["reasons"]))
+
+    def test_unknown_direction_is_rejected_and_profiles_are_closed_list(self):
+        def invent(answer, payload):
+            answer["metrics"][0]["profile_direction"] = "nps"
+        client = ScriptedReportClient({"submit_metric_definitions": [scripted("submit_metric_definitions", invent)] * 2})
+        report = run(client, options=ReportOptions(profile=load_profile("bank-process-kpi")))
+        self.assertNotIn("nps", [metric.get("profile_direction") for metric in report["metrics"]])
+        with self.assertRaises(PkoError):
+            load_profile("../secrets")
+
+    def test_without_profile_nothing_domain_specific_is_added(self):
+        report = run()
+        self.assertNotIn("domain_profile", report)
+        self.assertFalse(any(metric.get("profile_direction") for metric in report["metrics"]))
 
 
 class InputTests(unittest.TestCase):

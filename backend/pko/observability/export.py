@@ -144,7 +144,8 @@ def build_handoff(model: dict, report: dict, published: dict[str, str], trace: d
         raise ValueError("handoff must be built from the report of this map revision")
     events, changes, metrics = _events(model, report), _changes(report), _metrics(report)
     onboarding = {"format": FORMAT, "run_id": report.get("run_id"), "map_revision": report["map_revision"],
-                  "report_version": report["report_version"], "process_context": report.get("process_context"),
+                  "report_version": report["report_version"], "domain_profile": report.get("domain_profile"),
+                  "process_context": report.get("process_context"),
                   "operations": [{"operation_id": node["id"], "name": node.get("name")}
                                  for node in model.get("nodes") or [] if node.get("kind") == "operation"],
                   "events": events, "facts": report.get("facts") or [],

@@ -91,14 +91,15 @@ def _validate_fact(item, questions: set, operations: set, bindings: dict) -> tup
             "authority_status": "proposed"}, []
 
 
-def build_facts(model: dict, report: dict, stage_model: StageModel) -> tuple[list | None, list[str]]:
+def build_facts(model: dict, report: dict, stage_model: StageModel, profile: dict | None = None) -> tuple[list | None, list[str]]:
     context = report["process_context"]
     questions = {question["id"] for question in context["measurement_questions"]}
     operations = {node["id"] for node in model.get("nodes") or [] if node.get("kind") == "operation"}
     bindings = {row["binding_id"]: row for row in confirmed_bindings(report)}
     payload = {"process_context": {key: context[key] for key in ("goal", "start", "finish", "outcomes", "case",
                                                                   "measurement_questions")},
-               "operations": operations_view(model), "event_bindings": list(bindings.values())}
+               "operations": operations_view(model), "event_bindings": list(bindings.values()),
+               "domain_field_catalog": profile["event_field_catalog"] if profile else []}
 
     def validate(arguments):
         items = arguments.get("facts")

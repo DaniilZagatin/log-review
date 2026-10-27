@@ -13,7 +13,7 @@ from pko.audit import AuditedClient, audit_run, record
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
 from pko.observability.export import build_handoff
-from pko.observability.inputs import load_business_text, parse_field_map, profile_runtime_log
+from pko.observability.inputs import load_business_text, load_profile, parse_field_map, profile_names, profile_runtime_log
 from pko.observability.model_stage import ReportBudget, StageModel
 from pko.observability.pipeline import ReportOptions, run_observability
 from pko.output.publisher import write_outputs
@@ -280,6 +280,8 @@ def add_cli_command(subparsers):
                          help="Бизнес-описание процесса (UTF-8, до 200 КБ) для этапов отчёта; источник требований, не кода")
     command.add_argument("--runtime-log", default="",
                          help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
+    command.add_argument("--domain-profile", default="", choices=["", *profile_names()],
+                         help="Необязательный предметный профиль вопросов и метрик для этапов отчёта, например bank-process-kpi")
     command.add_argument("--runtime-fields", default="",
                          help="Имена полей JSONL: event_key=...,case_id=...,occurred_at=...,event_id=...")
     command.add_argument("--thinking", action="store_true", default=None)
@@ -300,8 +302,8 @@ def command_main(args) -> int:
             raise PkoError(f"Не удалось прочитать описание сценария: {exc}",
                            hint="проверьте путь и кодировку UTF-8") from exc
 
-    if (args.business_file or args.runtime_log) and not args.observability:
-        raise PkoError("Бизнес-описание и файл логов используются только с --observability.")
+    if (args.business_file or args.runtime_log or args.domain_profile) and not args.observability:
+        raise PkoError("Бизнес-описание, файл логов и профиль используются только с --observability.")
     if args.from_map and not args.observability:
         raise PkoError("--from-map перестраивает отчёт наблюдаемости: добавьте --observability.")
     out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()
@@ -323,7 +325,8 @@ def command_main(args) -> int:
                   f"из {data['max_attempts']} через {data['delay_seconds']:g} с.", flush=True)
 
     options = ReportOptions(max_requests=args.observability_max_requests, max_seconds=args.observability_max_seconds,
-                            business=business, runtime=runtime)
+                            business=business, runtime=runtime,
+                            profile=load_profile(args.domain_profile) if args.domain_profile else None)
     if args.from_map:
         model = run_report_from_map(args.from_map, args.source, out, thinking=args.thinking,
                                     model_timeout=args.model_timeout, report_options=options, on_event=event)

@@ -94,7 +94,8 @@ def _fragments(model: dict, report: dict, facts: list[dict], registry: EvidenceR
     return fragments
 
 
-def build_changes(model: dict, report: dict, stage_model: StageModel, registry: EvidenceRegistry) -> tuple[list, list[str], list[str]]:
+def build_changes(model: dict, report: dict, stage_model: StageModel, registry: EvidenceRegistry,
+                  profile: dict | None = None) -> tuple[list, list[str], list[str]]:
     """Return accepted changes, errors and IDs of gap facts left without a packet."""
     coverage = {row["fact_id"]: row for row in report["coverage"]["facts"]}
     facts = {fact["id"]: fact for fact in report["facts"]}
@@ -114,7 +115,8 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
                                              for fact in packet)],
                    "earlier_changes": [{"id": change["id"], "action": change["action"], "fact_ids": change["fact_ids"]}
                                        for change in accepted],
-                   "fragments": _fragments(model, report, packet, registry)}
+                   "fragments": _fragments(model, report, packet, registry),
+                   "domain_field_catalog": profile["event_field_catalog"] if profile else []}
         taken = {change["id"] for change in accepted}
 
         def validate(arguments, packet_ids=packet_ids, taken=taken):

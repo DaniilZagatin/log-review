@@ -43,6 +43,7 @@ TOOL = {
                                               "meaning": {"type": "string"},
                                               "lifecycle": {"type": "string", "enum": list(LIFECYCLES)},
                                               "operation_ids": _STRINGS}}},
+                        "profile_direction": {"type": "string"},
                         "open_questions": _STRINGS}}}}},
 }
 
@@ -52,16 +53,19 @@ def readiness(metric: dict, coverage: dict, runtime: dict | None) -> dict:
     rows = [coverage[fact_id] for fact_id in metric["fact_ids"] if fact_id in coverage]
     missing = [fact["meaning"] for fact in metric["missing_facts"]]
     unobservable = [row["fact_id"] for row in rows if row["axes"]["emit"] != "found"]
+    undefined = not metric["fact_ids"] and not missing
     meaning = [row["fact_id"] for row in rows if row["axes"]["emit"] == "found" and row["axes"]["semantics"] != "compatible"]
     correlation = [row["fact_id"] for row in rows if row["axes"]["emit"] == "found" and row["axes"]["correlation"] != "identified"]
     components = {
         "methodology": "proposed",
-        "facts": "missing" if missing or unobservable else "available",
+        "facts": "missing" if missing or unobservable or undefined else "available",
         "semantics": "unconfirmed" if meaning or unobservable else "confirmed_in_code",
         "correlation": "unestablished" if correlation or unobservable else "identified",
         "data": "not_provided" if runtime is None else "sample_only",
         "calculator": "not_implemented"}
     blockers = ["Методика не согласована уполномоченным специалистом."]
+    if undefined:
+        blockers.append("Факты для этого направления не определены.")
     if missing:
         blockers.append("Нужны факты, которых нет в перечне: " + "; ".join(missing) + ".")
     if unobservable:
@@ -76,7 +80,31 @@ def readiness(metric: dict, coverage: dict, runtime: dict | None) -> dict:
     return {"status": "not_ready", "components": components, "blockers": blockers}
 
 
-def build_metrics(model: dict, report: dict, stage_model: StageModel) -> tuple[list | None, list[str]]:
+def profile_gaps(metrics: list[dict], report: dict, profile: dict | None) -> list[dict]:
+    """Profile directions the model left out stay in the catalog with their known definition."""
+    if not profile:
+        return []
+    covered = {metric.get("profile_direction") for metric in metrics}
+    questions = {row.get("profile_question_id"): row["id"] for row in report["process_context"]["measurement_questions"]}
+    number = max((int(metric["id"][2:]) for metric in metrics if metric["id"][2:].isdigit()), default=0)
+    added = []
+    for direction in profile["metric_directions"]:
+        if direction["id"] in covered:
+            continue
+        number += 1
+        added.append({"id": f"m-{number}", "name": direction["name"], "purpose": direction["known"],
+                      "question_ids": [questions[direction["question_id"]]] if direction["question_id"] in questions else [],
+                      "counting_unit": "other", "measure_unit": "", "definition": direction["known"],
+                      "population": "", "window": "", "start_fact_id": None, "finish_fact_id": None,
+                      "rules": dict.fromkeys(RULES, ""), "fact_ids": [], "change_ids": [],
+                      "missing_facts": [], "open_questions": list(direction["open_points"]),
+                      "profile_direction": direction["id"], "source": "profile",
+                      "value": None, "value_reason": "Значения метрик в этой версии не вычисляются.",
+                      "provenance": "domain_profile", "authority_status": "proposed"})
+    return added
+
+
+def build_metrics(model: dict, report: dict, stage_model: StageModel, profile: dict | None = None) -> tuple[list | None, list[str]]:
     context = report["process_context"]
     questions = {question["id"] for question in context["measurement_questions"]}
     facts = {fact["id"]: fact for fact in report["facts"]}
@@ -86,7 +114,9 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel) -> tuple[l
     payload = {"process_context": {key: context[key] for key in ("goal", "outcomes", "case", "measurement_questions")},
                "facts": [{**fact, "coverage": coverage.get(fact["id"], {}).get("axes")} for fact in facts.values()],
                "changes": [{"id": change["id"], "action": change["action"], "fact_ids": change["fact_ids"],
-                            "change": change["change"]} for change in report.get("instrumentation") or []]}
+                            "change": change["change"]} for change in report.get("instrumentation") or []],
+               "domain_metric_directions": profile["metric_directions"] if profile else []}
+    directions = {row["id"] for row in profile["metric_directions"]} if profile else set()
 
     def validate(arguments):
         items = arguments.get("metrics")
@@ -114,6 +144,8 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel) -> tuple[l
             for name in ("start_fact_id", "finish_fact_id"):
                 if item.get(name) and item[name] not in fact_ids:
                     problems.append(f"{label}: {name} должен входить в fact_ids")
+            if item.get("profile_direction") and item["profile_direction"] not in directions:
+                problems.append(f"{label}: profile_direction — идентификатор направления из domain_metric_directions")
             if any(ref not in changes for ref in item.get("change_ids") or []):
                 problems.append(f"{label}: change_ids — существующие доработки")
             for fact in missing:
@@ -136,6 +168,7 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel) -> tuple[l
                 "missing_facts": [{"meaning": text(fact["meaning"], 500), "lifecycle": fact["lifecycle"],
                                    "operation_ids": list(dict.fromkeys(fact.get("operation_ids") or []))} for fact in missing],
                 "open_questions": [text(value, 500) for value in item.get("open_questions") or [] if text(value)][:10],
+                "profile_direction": item.get("profile_direction") or None,
                 "value": None, "value_reason": "Значения метрик в этой версии не вычисляются.",
                 "provenance": "model_proposal", "authority_status": "proposed"})
         return accepted, errors

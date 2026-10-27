@@ -20,7 +20,7 @@ from pko.observability.facts import build_facts
 from pko.observability.instrumentation import build_changes
 from pko.observability.log_discovery import discover_logging, logging_config_paths
 from pko.observability.mapping import link_sites, researched_paths
-from pko.observability.metrics import build_metrics, readiness, register_missing_facts
+from pko.observability.metrics import build_metrics, profile_gaps, readiness, register_missing_facts
 from pko.observability.model_stage import BudgetExhausted, StageModel, methodology
 
 
@@ -32,6 +32,7 @@ class ReportOptions:
     max_seconds: float = 1800.0
     business: dict | None = None
     runtime: dict | None = None
+    profile: dict | None = None
 
 
 def _completed(report: dict, stage_id: str) -> bool:
@@ -133,10 +134,12 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         "Смысл мест логирования установлен не полностью: наблюдаемость фактов может быть занижена."]
     if options.runtime is not None:
         report["runtime_profile"] = options.runtime
+    if options.profile is not None:
+        report["domain_profile"] = {key: options.profile[key] for key in ("id", "version", "title", "origin", "sha256")}
 
     def process_context():
         report["methodology"]["process_context"] = methodology("process_context")["sha256"]
-        context, errors = build_context(model, report, stage_model, options.business)
+        context, errors = build_context(model, report, stage_model, options.business, options.profile)
         report["process_context"] = _accepted(context, errors)
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else [])
         return ("partial" if reasons else "complete"), reasons, {
@@ -144,7 +147,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
 
     def fact_requirements():
         report["methodology"]["fact_requirements"] = methodology("fact_requirements")["sha256"]
-        facts, errors = build_facts(model, report, stage_model)
+        facts, errors = build_facts(model, report, stage_model, options.profile)
         report["facts"] = _accepted(facts, errors)
         reasons = partial_map + bindings_partial + ([f"Отклонено проверками: {len(errors)}."] if errors else [])
         return ("partial" if reasons else "complete"), reasons, {
@@ -159,7 +162,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
 
     def instrumentation():
         report["methodology"]["instrumentation"] = methodology("instrumentation")["sha256"]
-        changes, errors, pending = build_changes(model, report, stage_model, registry)
+        changes, errors, pending = build_changes(model, report, stage_model, registry, options.profile)
         report["instrumentation"] = changes
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
             ([f"Факты без рассмотренных доработок из-за лимитов: {', '.join(pending)}."] if pending else [])
@@ -168,15 +171,18 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
 
     def metric_catalog():
         report["methodology"]["metric_catalog"] = methodology("metric_catalog")["sha256"]
-        metrics, errors = build_metrics(model, report, stage_model)
+        metrics, errors = build_metrics(model, report, stage_model, options.profile)
         coverage_rows = {row["fact_id"]: row for row in report["coverage"]["facts"]}
+        uncovered = profile_gaps(metrics or [], report, options.profile)
+        metrics = (metrics or []) + uncovered
         for metric in _accepted(metrics, errors):
             metric["readiness"] = readiness(metric, coverage_rows, options.runtime)
         report["metrics"] = metrics
         report["requested_facts"] = register_missing_facts(report)
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
             ([] if _completed(report, "instrumentation_plan") else
-             ["Доработки не построены: зависимости метрик от них не указаны."])
+             ["Доработки не построены: зависимости метрик от них не указаны."]) + \
+            ([f"Направления профиля без определения модели: {', '.join(m['name'] for m in uncovered)}."] if uncovered else [])
         return ("partial" if reasons else "complete"), reasons, {
             "metrics": len(metrics), "requested_facts": len(report["requested_facts"])}
 

@@ -246,6 +246,7 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
  if(!metrics.length){root.append(el('p','report-empty','Определения метрик не построены.'));return;}
  const cards=el('div','report-cards');root.append(cards);
  for(const metric of metrics){const card=el('article','report-card');card.id='metric-'+metric.id;card.append(el('h4','',metric.id+' · '+metric.name),el('p','',metric.purpose));
+  if(metric.profile_direction)card.append(el('p','muted',metric.source==='profile'?'Направление профиля: определение взято из профиля, модель его не уточнила.':'Направление профиля: '+metric.profile_direction));
   const factList=ids=>array(ids).map(id=>id+' · '+(factById.get(id)?.meaning||'')).join('; ');
   fields(card,[['Определение',metric.definition],['Единица счёта',L(unitNames,metric.counting_unit)],['Единица измерения',metric.measure_unit],['Какие экземпляры',metric.population],['Период',metric.window],
    ['Начало интервала',metric.start_fact_id?factList([metric.start_fact_id]):''],['Конец интервала',metric.finish_fact_id?factList([metric.finish_fact_id]):''],
@@ -268,7 +269,8 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
  else{fields(root,[['Цель',context.goal],['Начало',context.start],['Завершение',context.finish],['Экземпляр процесса',context.case?.subject],
    ['Идентификаторы',array(context.case?.identifiers).map(row=>row.name+' — '+L(sourceNames,row.source)+(row.where?' ('+row.where+')':'')).join('; ')||'Не установлены'],
    ['Исходы',array(context.outcomes).map(row=>row.name+' ('+array(row.operation_ids).map(id=>byId.get(id)?.name||id).join(', ')+')').join('; ')],
-   ['Бизнес-описание',context.business_source?context.business_source.name+(context.business_source.truncated?' (использовано начало)':''):'Не передавалось']]);
+   ['Бизнес-описание',context.business_source?context.business_source.name+(context.business_source.truncated?' (использовано начало)':''):'Не передавалось'],
+   ['Предметный профиль',report.domain_profile?report.domain_profile.title+', версия '+report.domain_profile.version:'Не использовался']]);
   root.append(el('h4','','Вопросы измерения'));list(root,array(context.measurement_questions).map(row=>row.id+' · '+row.question+' — '+L(familyNames,row.family)+', источник: '+L(sourceNames,row.source)));
   if(array(context.glossary).length){root.append(el('h4','','Словарь'));list(root,context.glossary.map(row=>row.term+' — '+row.meaning+' ('+L(sourceNames,row.source)+')'));}
   if(array(context.hypotheses).length){root.append(el('h4','','Гипотезы'));list(root,context.hypotheses);}

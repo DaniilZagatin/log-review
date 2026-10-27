@@ -18,6 +18,7 @@ from pko.code_tools.tools import _is_blocked
 from pko.errors import PkoError
 from pko.scenario_map.sources import _decode
 
+PROFILES = Path(__file__).with_name("profiles")
 MAX_BUSINESS_BYTES = 200_000
 MAX_BUSINESS_CHARS = 40_000
 MAX_RUNTIME_RECORDS = 100_000
@@ -50,6 +51,18 @@ def load_business_text(path) -> dict:
     truncated = len(text) > MAX_BUSINESS_CHARS
     return {"name": Path(path).name, "sha256": hashlib.sha256(data).hexdigest(),
             "text": text[:MAX_BUSINESS_CHARS], "truncated": truncated}
+
+
+def profile_names() -> list[str]:
+    return sorted(path.stem for path in PROFILES.glob("*.json"))
+
+
+def load_profile(name: str) -> dict:
+    """A trusted product profile; its version and digest are recorded in the report."""
+    if name not in profile_names():
+        raise PkoError(f"Неизвестный профиль: {name}", hint="доступны: " + ", ".join(profile_names()))
+    data = (PROFILES / f"{name}.json").read_bytes()
+    return {**json.loads(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
 def parse_field_map(value: str | None) -> dict:
