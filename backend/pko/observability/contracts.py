@@ -16,7 +16,10 @@ RESULT_STATUSES = ("none", "complete", "partial", "stale")
 LINK_STATUSES = ("linked", "ambiguous", "unlinked", None)
 LINK_BASES = ("operation_evidence", "code_explanation", None)
 STAGES = {"logging_inventory": "Каталог мест логирования",
-          "event_operation_mapping": "Кандидаты связи с операциями"}
+          "event_operation_mapping": "Кандидаты связи с операциями",
+          "event_binding_review": "Смысл мест логирования"}
+BINDING_STATUSES = ("confirmed", "no_operation", "unresolved", "conflict")
+EVIDENCE_DECISIONS = ("bind", "no_operation")
 
 
 class ReportError(ValueError):
@@ -72,3 +75,17 @@ def validate_report(report: dict, model: dict) -> None:
             raise ReportError(f"{binding.get('id')}: refers to an unknown logging site")
         if binding.get("authority_status") != "proposed":
             raise ReportError(f"{binding.get('id')}: only a proposed binding can be produced by code")
+    binding_ids = set()
+    for binding in logging.get("event_bindings") or []:
+        name = binding.get("id")
+        if name in binding_ids or binding.get("site_id") not in site_ids:
+            raise ReportError(f"{name}: duplicate event binding or unknown logging site")
+        binding_ids.add(name)
+        if binding.get("map_revision") != revision or binding.get("status") not in BINDING_STATUSES:
+            raise ReportError(f"{name}: refers to another map revision or has an unknown status")
+        if binding.get("authority_status") != "proposed":
+            raise ReportError(f"{name}: a model interpretation stays a proposal")
+        if binding.get("decision") == "bind" and binding.get("operation_id") not in operations:
+            raise ReportError(f"{name}: refers to an operation outside the map")
+        if binding.get("decision") in EVIDENCE_DECISIONS and not binding.get("evidence"):
+            raise ReportError(f"{name}: an interpretation of a logging site needs cited lines")

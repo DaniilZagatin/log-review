@@ -4,17 +4,19 @@ from __future__ import annotations
 import json
 import math
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from pko.audit import audit_run, record
+from pko.audit import AuditedClient, audit_run, record
 from pko.errors import PkoError
-from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_span
-from pko.observability.pipeline import run_observability
+from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
+from pko.observability.model_stage import ReportBudget, StageModel
+from pko.observability.pipeline import ReportOptions, run_observability
 from pko.output.publisher import write_outputs
 from pko.render.scenario_map import render_scenario_map
-from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAULT_MODEL_TIMEOUT, run_agent
+from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAULT_MODEL_TIMEOUT, DeadlineClient, run_agent
 from pko.scenario_map.config import researcher_spec
 from pko.scenario_map.sources import build_workspace
 
@@ -24,7 +26,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  max_seconds: float = DEFAULT_MAX_SECONDS, thinking=None,
                  model_timeout: float = DEFAULT_MODEL_TIMEOUT,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
-                 observability: bool = False, on_event=None) -> dict:
+                 observability: bool = False, report_options: ReportOptions | None = None,
+                 on_event=None) -> dict:
     scenario = scenario.strip()
     if not scenario or len(scenario) > 20000:
         raise PkoError("Нужно краткое описание варианта сценария (до 20 000 символов).",
@@ -39,6 +42,12 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
         raise PkoError("Бюджет суммаризации должен быть целым числом от 512 до 32768 токенов.")
     if summary_mode not in ("standard", "inherit"):
         raise PkoError("Режим суммаризации: standard или inherit.")
+    if observability and report_options is not None and (
+            isinstance(report_options.max_requests, bool) or not isinstance(report_options.max_requests, int)
+            or not 1 <= report_options.max_requests <= 200
+            or not (math.isfinite(report_options.max_seconds) and report_options.max_seconds > 0)):
+        raise PkoError("Лимиты этапов отчёта: от 1 до 200 запросов и конечное положительное время.",
+                       hint="проверьте --observability-max-requests и --observability-max-seconds")
     spec = spec or researcher_spec(thinking=thinking)
     out_dir = Path(out_dir).resolve()
     # An output subtree can be excluded, but excluding an ancestor would silently
@@ -97,7 +106,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         # The map is already published; a report failure leaves it as is.
                         try:
                             with trace_span("process_observability") as report_span:
-                                report = run_observability(model, workspace.tree)
+                                report = run_observability(model, workspace.tree, stage_model=_report_model(
+                                    report_options or ReportOptions(), client, spec, model_timeout))
                                 report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
                             with trace_span("render_report"):
                                 html = render_scenario_map(model, report)
@@ -125,6 +135,18 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
             flush_tracing()
 
 
+def _report_model(options: ReportOptions, research_client, spec, model_timeout: float) -> StageModel:
+    """Report stages use the research provider with their own request and time budget."""
+    deadline = time.monotonic() + options.max_seconds
+    client = options.client or research_client
+    if client is None:
+        client = DeadlineClient(spec=spec, timeout=model_timeout)
+        client.deadline = deadline
+    client = trace_client(client, spec)
+    audited = client if isinstance(client, AuditedClient) else AuditedClient(client)
+    return StageModel(audited, ReportBudget(max_requests=options.max_requests, deadline=deadline))
+
+
 def add_cli_command(subparsers):
     command = subparsers.add_parser("map-scenario", help="Построить карту атомарных операций выбранного сценария по исходникам")
     scenario = command.add_mutually_exclusive_group(required=True)
@@ -143,6 +165,10 @@ def add_cli_command(subparsers):
                          help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
     command.add_argument("--observability", action="store_true",
                          help="Дополнительно построить каталог логирования и вкладки отчёта (пилотный режим)")
+    command.add_argument("--observability-max-requests", type=int, default=24,
+                         help="Лимит запросов к модели для этапов отчёта, 1–200 (по умолчанию 24)")
+    command.add_argument("--observability-max-seconds", type=float, default=1800,
+                         help="Лимит времени этапов отчёта в секундах, отдельный от исследования (по умолчанию 1800)")
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -176,7 +202,10 @@ def command_main(args) -> int:
     model = run_scenario(scenario, args.source, Path(args.out), max_steps=args.max_steps,
                          max_seconds=args.max_seconds, model_timeout=args.model_timeout,
                          thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
-                         summary_mode=args.summary_mode, observability=args.observability, on_event=event)
+                         summary_mode=args.summary_mode, observability=args.observability,
+                         report_options=ReportOptions(max_requests=args.observability_max_requests,
+                                                      max_seconds=args.observability_max_seconds),
+                         on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
               "failed": "Исследование не выполнено"}

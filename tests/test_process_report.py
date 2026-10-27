@@ -159,7 +159,8 @@ class ReportContractTests(unittest.TestCase):
         report = run_observability(data, tree())
         self.assertEqual(data, before)
         self.assertEqual([(s["id"], s["execution_status"], s["result_status"]) for s in report["stages"]],
-                         [("logging_inventory", "completed", "complete"), ("event_operation_mapping", "completed", "complete")])
+                         [("logging_inventory", "completed", "complete"), ("event_operation_mapping", "completed", "complete"),
+                          ("event_binding_review", "not_run", "none")])
         self.assertEqual(report["logging"]["scope"]["files_scanned"], 2)
 
     def test_partial_map_gives_partial_mapping_result(self):
@@ -173,7 +174,7 @@ class ReportContractTests(unittest.TestCase):
         with patch("pko.observability.pipeline.discover_logging", side_effect=RuntimeError("boom")):
             report = run_observability(model(), tree())
         self.assertEqual([(s["execution_status"], s["result_status"]) for s in report["stages"]],
-                         [("failed", "none"), ("blocked", "none")])
+                         [("failed", "none"), ("blocked", "none"), ("blocked", "none")])
         self.assertEqual(report["logging"], {})
 
     def test_report_cannot_refer_to_another_revision_or_claim_acceptance(self):
