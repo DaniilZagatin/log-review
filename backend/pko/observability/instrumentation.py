@@ -12,7 +12,7 @@ import re
 from pko.observability.context import confirmed_bindings, text
 from pko.observability.evidence import EvidenceRegistry
 from pko.observability.facts import LIFECYCLES
-from pko.observability.model_stage import BudgetExhausted, StageModel
+from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel
 
 STAGE = "instrumentation"
 ACTIONS = ("map_existing", "join", "enrich", "add_field", "add_event", "move_emit", "fix_delivery")
@@ -95,8 +95,12 @@ def _fragments(model: dict, report: dict, facts: list[dict], registry: EvidenceR
 
 
 def build_changes(model: dict, report: dict, stage_model: StageModel, registry: EvidenceRegistry,
-                  profile: dict | None = None) -> tuple[list, list[str], list[str]]:
-    """Return accepted changes, errors and IDs of gap facts left without a packet."""
+                  profile: dict | None = None, reserve: int = 0) -> tuple[list, list[str], list[str]]:
+    """Return accepted changes, errors and IDs of gap facts left without a packet.
+
+    A packet too large for the provider window is split; a single fact that
+    still does not fit is left pending with the others the budget did not reach.
+    """
     coverage = {row["fact_id"]: row for row in report["coverage"]["facts"]}
     facts = {fact["id"]: fact for fact in report["facts"]}
     gap_facts = [facts[fact_id] for fact_id, row in coverage.items() if row["gaps"] or row["unknowns"]]
@@ -105,8 +109,10 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
     context = report["process_context"]
     accepted: list[dict] = []
     errors: list[str] = []
-    for index in range(0, len(gap_facts), FACTS_PER_PACKET):
-        packet = gap_facts[index:index + FACTS_PER_PACKET]
+    pending: list[str] = []
+    queue = [gap_facts[index:index + FACTS_PER_PACKET] for index in range(0, len(gap_facts), FACTS_PER_PACKET)]
+    while queue:
+        packet = queue.pop(0)
         packet_ids = {fact["id"] for fact in packet}
         payload = {"process_context": {key: context[key] for key in ("goal", "case", "measurement_questions")},
                    "facts_with_gaps": [{**fact, "coverage": coverage[fact["id"]]} for fact in packet],
@@ -143,13 +149,21 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
             return result, problems
 
         try:
-            result, problems = stage_model.ask(STAGE, payload, TOOL, validate)
+            result, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve)
+        except PacketTooLarge as exc:
+            if len(packet) > 1:
+                middle = len(packet) // 2
+                queue[:0] = [packet[:middle], packet[middle:]]
+            else:
+                pending.append(packet[0]["id"])
+                errors.append(str(exc))
+            continue
         except BudgetExhausted as exc:
             errors.append(str(exc))
-            return accepted, errors, [fact["id"] for fact in gap_facts[index:]]
+            return accepted, errors, pending + [fact["id"] for rest in [packet, *queue] for fact in rest]
         accepted += result or []
         errors += problems
-    return accepted, errors, []
+    return accepted, errors, pending
 
 
 def _validate_change(item, packet_ids, operations, bindings, registry: EvidenceRegistry, seen) -> tuple[dict | None, list[str]]:

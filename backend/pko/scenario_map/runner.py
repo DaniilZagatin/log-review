@@ -271,7 +271,7 @@ def add_cli_command(subparsers):
     command.add_argument("--summary-mode", choices=("standard", "inherit"), default="standard",
                          help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
     command.add_argument("--observability", action="store_true",
-                         help="Дополнительно построить каталог логирования и вкладки отчёта (пилотный режим)")
+                         help="Дополнительно построить отчёт наблюдаемости процесса и комплект передачи (пилотный режим)")
     command.add_argument("--observability-max-requests", type=int, default=24,
                          help="Лимит запросов к модели для этапов отчёта, 1–200 (по умолчанию 24)")
     command.add_argument("--observability-max-seconds", type=float, default=1800,
@@ -280,7 +280,7 @@ def add_cli_command(subparsers):
                          help="Бизнес-описание процесса (UTF-8, до 200 КБ) для этапов отчёта; источник требований, не кода")
     command.add_argument("--runtime-log", default="",
                          help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
-    command.add_argument("--domain-profile", default="", choices=["", *profile_names()],
+    command.add_argument("--domain-profile", default=None, choices=profile_names(),
                          help="Необязательный предметный профиль вопросов и метрик для этапов отчёта, например bank-process-kpi")
     command.add_argument("--runtime-fields", default="",
                          help="Имена полей JSONL: event_key=...,case_id=...,occurred_at=...,event_id=...")

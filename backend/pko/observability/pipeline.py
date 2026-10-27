@@ -108,7 +108,10 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
     def binding_review():
         report["methodology"]["event_binding"] = methodology("event_binding")["sha256"]
         logging = report["logging"]
-        reviewed = review_bindings(model, logging["sites"], logging["wrappers"], registry, stage_model, revision)
+        # Later model stages need at least one request and one repair each.
+        reserve = min(8, stage_model.budget.max_requests // 2)
+        reviewed = review_bindings(model, logging["sites"], logging["wrappers"], registry, stage_model, revision,
+                                   reserve=reserve)
         for site in logging["sites"]:
             site["review_status"] = reviewed["review"].get(site["id"], "not_reviewed")
             if reviewed["reasons"].get(site["id"]):
@@ -162,7 +165,8 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
 
     def instrumentation():
         report["methodology"]["instrumentation"] = methodology("instrumentation")["sha256"]
-        changes, errors, pending = build_changes(model, report, stage_model, registry, options.profile)
+        changes, errors, pending = build_changes(model, report, stage_model, registry, options.profile,
+                                                 reserve=min(2, stage_model.budget.max_requests // 4))
         report["instrumentation"] = changes
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
             ([f"Факты без рассмотренных доработок из-за лимитов: {', '.join(pending)}."] if pending else [])

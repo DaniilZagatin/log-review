@@ -10,7 +10,7 @@ not accepted until a specialist reviews it.
 from __future__ import annotations
 
 from pko.observability.evidence import EvidenceRegistry, overlaps
-from pko.observability.model_stage import BudgetExhausted, StageModel
+from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel
 
 STAGE = "event_binding"
 ROLES = ("request", "queued", "start", "result", "refusal", "error", "retry", "duplicate",
@@ -37,7 +37,7 @@ TOOL = {
             "properties": {
                 "site_id": {"type": "string"},
                 "decision": {"type": "string", "enum": list(DECISIONS)},
-                "operation_id": {"type": ["string", "null"]},
+                "operation_id": {"type": "string"},
                 "event_role": {"type": "string", "enum": list(ROLES)},
                 "lifecycle_moment": {"type": "string", "enum": list(MOMENTS)},
                 "repeat_semantics": {"type": "string", "enum": list(REPEATS)},
@@ -157,8 +157,12 @@ def _reconcile(items: list[dict]) -> str:
 
 
 def review_bindings(model: dict, sites: list[dict], wrappers: list[dict], registry: EvidenceRegistry,
-                    stage_model: StageModel, map_revision: str) -> dict:
-    """Review eligible sites in bounded packets; unreviewed sites stay explicit."""
+                    stage_model: StageModel, map_revision: str, reserve: int = 0) -> dict:
+    """Review eligible sites in bounded packets; unreviewed sites stay explicit.
+
+    ``reserve`` requests are left for later stages. A packet too large for the
+    provider window is split; a single site that still does not fit is deferred.
+    """
     operations = {node["id"]: node for node in model.get("nodes") or [] if node.get("kind") == "operation"}
     eligible = [site for site in sites if site.get("link_status") in ("linked", "ambiguous")]
     review = {site["id"]: "not_reviewed" for site in sites}
@@ -166,10 +170,10 @@ def review_bindings(model: dict, sites: list[dict], wrappers: list[dict], regist
     bindings, errors, deferred = [], [], []
     scenario = model.get("scenario") or {}
     batches = [eligible[index:index + BATCH_SIZE] for index in range(0, len(eligible), BATCH_SIZE)]
-    for number, batch in enumerate(batches):
-        if number >= MAX_BATCHES:
-            deferred += [site["id"] for site in batch]
-            continue
+    deferred += [site["id"] for batch in batches[MAX_BATCHES:] for site in batch]
+    queue = batches[:MAX_BATCHES]
+    while queue:
+        batch = queue.pop(0)
         packet = _Packet(batch, operations, wrappers, registry)
         payload = {
             "scenario": {"title": scenario.get("title"), "description": scenario.get("description")},
@@ -197,9 +201,17 @@ def review_bindings(model: dict, sites: list[dict], wrappers: list[dict], regist
             return accepted, problems
 
         try:
-            accepted, problems = stage_model.ask(STAGE, payload, TOOL, validate)
+            accepted, problems = stage_model.ask(STAGE, payload, TOOL, validate, reserve=reserve)
+        except PacketTooLarge as exc:
+            if len(batch) > 1:
+                middle = len(batch) // 2
+                queue[:0] = [batch[:middle], batch[middle:]]
+            else:
+                deferred.append(batch[0]["id"])
+                reasons[batch[0]["id"]] = [str(exc)]
+            continue
         except BudgetExhausted as exc:
-            deferred += [site["id"] for batch_rest in batches[number:] for site in batch_rest]
+            deferred += [site["id"] for rest in [batch, *queue] for site in rest]
             errors.append(str(exc))
             break
         errors += problems
