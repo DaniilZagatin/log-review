@@ -174,7 +174,7 @@ class ScenarioMemoryTests(unittest.TestCase):
         self.assertEqual(len(history["items"]), 1)
         item = history["items"][0]
         self.assertEqual(item["name"], "read_file")
-        self.assertEqual(item["payload"]["content"], original["content"])
+        self.assertEqual(item["payload"]["source_data"], original["source_data"])
         self.assertNotIn("memory", item["payload"])
         self.assertEqual(self.state._reads[self.path].keys(), {1, 2})
 
@@ -234,12 +234,12 @@ class ScenarioMemoryTests(unittest.TestCase):
         snapshot["research_notes"][0]["finding"] = "changed"
         snapshot["research_history"][0]["arguments"]["path"] = "changed"
         history = self.inspect("research_history")
-        history["items"][0]["payload"]["content"] = "changed"
+        history["items"][0]["payload"]["source_data"] = "changed"
         fragments = self.inspect("read_fragments", path=self.path)
         fragments["items"][0]["text"] = "changed"
         self.assertEqual(self.state.model["research_notes"][0]["finding"], "Модуль изучен")
         self.assertEqual(self.state.research_memory.snapshot()[0]["arguments"]["path"], self.path)
-        self.assertNotEqual(self.inspect("research_history")["items"][0]["payload"]["content"], "changed")
+        self.assertNotEqual(self.inspect("research_history")["items"][0]["payload"]["source_data"], "changed")
         self.assertEqual(self.inspect("read_fragments", path=self.path)["items"][0]["text"], self.cite()[0]["quote"])
 
     def test_inspection_recovers_full_long_note_but_quotes_stay_in_read_fragments(self):

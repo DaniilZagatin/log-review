@@ -395,7 +395,7 @@ class ScenarioMapTests(unittest.TestCase):
         before = self.state.snapshot()
         response = self.state.dispatch("review_execution", payload)
         self.assertFalse(response["ok"])
-        self.assertIn("несколько операций", response["error"])
+        self.assertIn("несколько действий", response["error"])
         self.assertEqual(self.state.snapshot(), before)
 
     def test_decision_requires_its_own_operation_record(self):
@@ -408,7 +408,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.good("review_execution", **self.review_payload(system, [action]))
         rejected = self.state.dispatch("finish", {"summary": "Проверка не раскрыта"})
         self.assertFalse(rejected["ok"])
-        self.assertIn(f"{decision}: шаг не сопоставлен", rejected["error"])
+        self.assertIn(f"{decision}: операция не сопоставлена", rejected["error"])
         self.review_current_operations()
         self.assertTrue(self.state.dispatch("finish", {"summary": "Проверка показана отдельно"})["ok"])
         detail = self.state.snapshot()["detail_review"]
@@ -462,7 +462,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.good("upsert_step", **updated)
         response = self.state.dispatch("finish", {"summary": "Уточнена карта"})
         self.assertFalse(response["ok"])
-        self.assertIn("изменён после обзора", response["error"])
+        self.assertIn("изменена после обзора", response["error"])
         updated_review = self.good("review_execution", **self.review_payload(system))
         self.assertEqual(updated_review["operations"][0]["id"], identifier)
         self.assertTrue(self.state.dispatch("finish", {"summary": "Обзор обновлён"})["ok"])

@@ -136,7 +136,8 @@ class GraphFrontierLoopTests(unittest.TestCase):
         self.assertTrue(payload["ok"], payload)
         self.assertEqual(payload["evidence_reference"], {"path": "source-1/app.py", "line_start": 8, "line_end": 11})
         self.assertNotIn("quote", payload["evidence_reference"])
-        self.assertIn("quote не нужно", payload["evidence_hint"])
+        self.assertNotIn("evidence_hint", payload)
+        self.assertIn("source_data", payload)
 
 
 if __name__ == "__main__":

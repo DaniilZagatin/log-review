@@ -15,6 +15,10 @@ from pko.scenario_map.context import (_blocks, _brief_recovery, _size, compact_c
                                       without_thinking, UNFINISHED_TASK_STATUSES)
 
 SUMMARY_FIELDS = ("project_and_scenario", "completed_work", "key_findings", "open_questions", "next_actions", "references")
+# Handoff fields: the area in progress, rejected attempts and work not to repeat.
+# Optional in a response, so a summary without them is still accepted.
+SUMMARY_OPTIONAL_FIELDS = ("current_focus", "failed_attempts", "do_not_redo")
+SUMMARY_LIST_FIELDS = ("completed_work", "key_findings", "open_questions", "next_actions", "failed_attempts", "do_not_redo")
 SUMMARY_MAX_CHARS = 6000
 
 
@@ -107,19 +111,22 @@ def validate_summary(text: str, state) -> dict:
     if not isinstance(text, str) or len(text) > SUMMARY_MAX_CHARS * 2:
         raise ValueError("Слишком большой ответ суммаризации")
     value = json.loads(text)
-    if not isinstance(value, dict) or set(value) != set(SUMMARY_FIELDS):
+    if (not isinstance(value, dict) or not set(SUMMARY_FIELDS) <= set(value)
+            or set(value) - set(SUMMARY_FIELDS) - set(SUMMARY_OPTIONAL_FIELDS)):
         raise ValueError("Сводка должна содержать только предусмотренные поля JSON")
-    result = {}
-    for field in SUMMARY_FIELDS[:-1]:
-        parts = [value[field]] if field == "project_and_scenario" else value[field]
+
+    def line(field, part, allow_empty=False):
+        if not isinstance(part, str) or len(part) > 1200 or not (part.strip() or allow_empty):
+            raise ValueError(f"{field}: нужны непустые строки до 1200 символов")
+        return sanitize(part.strip())
+
+    result = {"project_and_scenario": line("project_and_scenario", value["project_and_scenario"]),
+              "current_focus": line("current_focus", value.get("current_focus", ""), allow_empty=True)}
+    for field in SUMMARY_LIST_FIELDS:
+        parts = value.get(field, [])
         if not isinstance(parts, list) or len(parts) > 12:
             raise ValueError(f"{field}: ожидается список до 12 пунктов")
-        cleaned = []
-        for part in parts:
-            if not isinstance(part, str) or not part.strip() or len(part) > 1200:
-                raise ValueError(f"{field}: нужны непустые строки до 1200 символов")
-            cleaned.append(sanitize(part.strip()))
-        result[field] = cleaned[0] if field == "project_and_scenario" else cleaned
+        result[field] = [line(field, part) for part in parts]
     # The summary cannot create new citation authority. Validate optional
     # references against precisely the lines actually delivered to the agent.
     if not isinstance(value["references"], list):

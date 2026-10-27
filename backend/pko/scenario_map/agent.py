@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -191,28 +192,26 @@ class ResearchTools:
                                                 max(lines) - min(lines) + 1)
                         evidence_reference = {"path": str(args.get("path", "")),
                                               "line_start": min(lines), "line_end": max(lines)}
-                payload = {"ok": result.ok, "content": content, "meta": result.meta}
+                payload = {"ok": result.ok, "source_data": content, "meta": result.meta}
                 if evidence_reference:
                     payload["evidence_reference"] = evidence_reference
                     payload["research_tasks"] = [{k: t.get(k, []) if k == "child_task_ids" else t.get(k, "")
                                                   for k in ("id", "kind", "target", "status", "child_task_ids")}
                         for t in self.state.model["research_tasks"]
                         if t['status'] in UNFINISHED_TASK_STATUSES and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
-                    payload["research_tasks_hint"] = "Вложенные исполнители и промпты — часть реализации. Раскройте через save_research_task; полный реестр: inspect_map(section='research_tasks')."
-                    payload["evidence_hint"] = (
-                        "Для основания укажи path и нужный прочитанный диапазон line_start/line_end. "
-                        "Поле quote не нужно: точный маскированный текст подставляет код.")
+                    if payload["research_tasks"]:
+                        payload["research_tasks_hint"] = "Незавершённые задачи по этому файлу; полный реестр — inspect_map(section='research_tasks')."
                 payload["memory"] = self.state.research_memory.observe(name, args, payload)
             elif name in {"upsert_step", "upsert_transition", "finish"} and not self.state.model.get("research_brief"):
-                payload = {"ok": False, "error": (
+                payload = {"ok": False, "code": "brief_required", "error": (
                     "Перед построением карты сохрани первичное понимание через save_research_brief: "
                     "назначение проекта, связь с вариантом сценария, факты с прочитанными основаниями, "
                     "гипотезу процесса и следующие проверки. Неизвестное обозначь вопросами; "
-                    "гипотеза не заменяет доказательства узлов и переходов.")}
+                    "гипотеза не заменяет доказательства операций и переходов.")}
             else:
                 payload = self.state.dispatch(name, args)
         except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
-            payload = {"ok": False, "error": f"Некорректный вызов инструмента: {exc}"}
+            payload = {"ok": False, "code": "invalid_arguments", "error": f"Некорректный вызов инструмента: {exc}"}
         record("scenario_tool", name=name, arguments=function.get("arguments"), result=payload)
         return {"role": "tool", "tool_call_id": call.get("id", ""), "content": _json(payload)}
 
@@ -236,16 +235,14 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     template = extra_body.get('chat_template_kwargs') if isinstance(extra_body, dict) else None
     mode = template.get('enable_thinking') if isinstance(template, dict) else None
     state.model['run']['model_mode'] = 'reasoning' if mode is True else 'standard' if mode is False else 'provider_default'
-    record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
-           context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds)
     toolkit = ResearchTools(state, workspace)
     schemas = copy.deepcopy(TOOL_SCHEMAS) + copy.deepcopy(TOOLS)
-    for tool in schemas:
-        if tool["function"]["name"] == "who_calls":
-            tool["function"]["description"] = (
-                "Найти возможные места вызова функции. Приблизительный статический поиск; "
-                "отсутствие совпадения не доказывает отсутствие вызова.")
     system = Path(__file__).with_name("system.md").read_text(encoding="utf-8")
+    bundle = {"system_prompt_sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
+              "tools_sha256": hashlib.sha256(_json(schemas).encode("utf-8")).hexdigest()}
+    state.model["run"].update(bundle)
+    record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
+           context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds, **bundle)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": _json({
         "scenario_description": scenario, "sources": workspace.sources,
         "source_notes": workspace.notes, "source_omissions": getattr(workspace, "omissions", []),
@@ -410,9 +407,14 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             "Несколько изменений подряд отклонены проверкой; карта от них не изменилась." +
                             _failure_guidance(recent_errors)})
                         record("validation_recovery_guidance", step=step, failed_calls=failed_calls)
-                    if idle == 12 or step >= max_steps - 3:
+                    if step >= max_steps - 3:
                         messages.append({"role": "user", "content":
-                            "Сохрани найденные шаги и переходы, перечисли оставшиеся пробелы и заверши через finish."})
+                            "Лимит шагов почти исчерпан. Сохрани установленные операции и переходы, "
+                            "опиши оставшиеся пробелы и заверши через finish."})
+                    elif idle == 12:
+                        messages.append({"role": "user", "content":
+                            "Карта давно не менялась. Сохрани операции и переходы, уже установленные "
+                            "прочитанным кодом, и продолжи текущий участок."})
             else:
                 state.model["run"].update(status="partial", reason="Достигнут лимит шагов исследования.")
     except ModelDeadlineExceeded as exc:

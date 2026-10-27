@@ -235,8 +235,10 @@ class ResearchQuality:
 
     def quality_signature(self):
         # Ignore transient run metadata; public interpretation and evidence matter.
+        # research_brief is excluded: its freshness against new reads is checked
+        # separately (read_signature), and it does not change routes or outcomes.
         state = {k: self.model[k] for k in ('scenario', 'groups', 'nodes', 'edges', 'gaps',
-                 'research_tasks', 'research_brief', 'execution_reviews', 'source_reviews')}
+                 'research_tasks', 'execution_reviews', 'source_reviews')}
         state['nodes'] = [self._fingerprint(row) for row in self.model['nodes']]
         state['edges'] = [self._fingerprint(row) for row in self.model['edges']]
         state.pop('groups', None)
@@ -373,7 +375,7 @@ class ResearchQuality:
             errors.append('research_brief устарел после чтения новых материалов; актуализируйте факты, гипотезу и следующие действия')
         review = self.model.get('semantic_review')
         if not review or review.get('signature') != self.quality_signature():
-            errors.append('Выполните актуальный review_semantics после обновления карты, задач исследования и research_brief')
+            errors.append('Выполните актуальный review_semantics: после прошлой проверки изменились операции, переходы, задачи, обзоры исполнения или источники')
         return errors
 
     def read_signature(self):

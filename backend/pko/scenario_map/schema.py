@@ -40,7 +40,15 @@ LIMITATIONS = [
 
 
 class MapValidationError(ValueError):
-    """An actionable rejection of a proposed map mutation."""
+    """An actionable rejection of a proposed map mutation.
+
+    code is a stable category for audit and failure statistics; the message
+    remains the model-readable remediation.
+    """
+
+    def __init__(self, message: str, code: str = "invalid_arguments"):
+        super().__init__(message)
+        self.code = code
 
 
 def _text(value: Any, field: str, *, required: bool = False, limit: int = MAX_TEXT) -> str:
@@ -201,14 +209,14 @@ class MapState(ResearchQuality):
                 raise MapValidationError(f"{field}: неизвестные поля цитаты")
             path = _text(item.get("path"), f"{field}.path", required=True)
             if path not in self._files or _is_blocked(path) or is_vendor(path):
-                raise MapValidationError(f"{field}: недоступный путь {path}")
+                raise MapValidationError(f"{field}: недоступный путь {path}", "invalid_evidence")
             self._source_for(path)
             start, end = item.get("line_start"), item.get("line_end")
             if type(start) is not int or type(end) is not int or not 1 <= start <= end or end - start >= MAX_READ_LINES:
-                raise MapValidationError(f"{field}: некорректный диапазон строк")
+                raise MapValidationError(f"{field}: некорректный диапазон строк", "invalid_evidence")
             visible = self._reads.get(path, {})
             if any(line not in visible for line in range(start, end + 1)):
-                raise MapValidationError(f"{field}: сначала прочитайте {path}:{start}-{end} через read_file")
+                raise MapValidationError(f"{field}: сначала прочитайте {path}:{start}-{end} через read_file", "invalid_evidence")
             literal = "\n".join(visible[line] for line in range(start, end + 1)).strip()
             if not literal or len(literal) > 24000:
                 raise MapValidationError(f"{field}: выберите непустой прочитанный диапазон не длиннее 24000 символов")
@@ -226,7 +234,7 @@ class MapState(ResearchQuality):
                         f"первое несовпадение около строки {start + difference}. "
                         f"В диапазоне {end - start + 1} строк, в переданном тексте {len(actual_lines)}. "
                         "Передайте path, line_start и line_end без quote: точный текст подставит код из прочитанных строк. "
-                        "Для уточнения диапазона используйте inspect_map(section='read_fragments', path=..., offset=...).")
+                        "Для уточнения диапазона используйте inspect_map(section='read_fragments', path=..., offset=...).", "invalid_evidence")
             normalized = {"path": path, "line_start": start, "line_end": end, "quote": literal}
             if normalized not in accepted:
                 accepted.append(normalized)
@@ -243,7 +251,7 @@ class MapState(ResearchQuality):
         if value is not None and value != "":
             value = _text(value, "id", required=True)
             if not any(item["id"] == value for item in self.model[collection]):
-                raise MapValidationError(f"id {value} не существует; для нового объекта не передавайте id")
+                raise MapValidationError(f"id {value} не существует; для нового объекта не передавайте id", "unknown_id")
             return value
         if len(self.model[collection]) >= maximum:
             raise MapValidationError(f"Достигнут лимит {collection}: {maximum}; сохраните частичный результат и укажите ограничение, не скрывая самостоятельные операции")
@@ -259,6 +267,28 @@ class MapState(ResearchQuality):
         else:
             rows.append(item)
         return {"id": item["id"]}
+
+    # An edit by id names only the changed fields. The stored object supplies the
+    # rest, and the merged object is validated as a whole like a new one.
+    EDITABLE = {"upsert_group": "groups", "upsert_step": "nodes", "upsert_transition": "edges",
+                "save_research_task": "research_tasks", "save_research_note": "research_notes"}
+
+    def _with_existing(self, name: str, args: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
+        identifier = args.get("id")
+        collection = self.EDITABLE.get(name)
+        if collection and identifier not in (None, ""):
+            old = next((row for row in self.model[collection] if row.get("id") == identifier), None)
+            if old is None:
+                raise MapValidationError(f"id {identifier} не существует; для нового объекта не передавайте id", "unknown_id")
+
+            def public(value):
+                if isinstance(value, dict):
+                    return {key: public(item) for key, item in value.items() if key != "quote"}
+                if isinstance(value, list):
+                    return [public(item) for item in value]
+                return value
+            return {**{key: public(value) for key, value in old.items() if key in allowed and value is not None}, **args}
+        return args
 
     def dispatch(self, name: str, args: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(args, (dict, type(None))):
@@ -279,15 +309,19 @@ class MapState(ResearchQuality):
             "remove_element": {"kind", "id"}, "inspect_map": {"section", "offset", "limit", "path"}, "finish": {"summary"},
         }
         if name not in allowed:
-            return {"ok": False, "error": f"Неизвестный инструмент карты: {name}"}
+            return {"ok": False, "code": "unknown_tool", "error": f"Неизвестный инструмент карты: {name}"}
         unexpected = set(args) - allowed[name]
         if unexpected:
-            return {"ok": False, "error": f"Неизвестные аргументы: {', '.join(sorted(unexpected))}"}
+            return {"ok": False, "code": "invalid_arguments", "error": f"Неизвестные аргументы: {', '.join(sorted(unexpected))}"}
+        try:
+            args = self._with_existing(name, args, allowed[name])
+        except MapValidationError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
         if name == "inspect_map":
             try:
                 return {"ok": True, **self._inspect_map(args)}
             except (MapValidationError, TypeError, ValueError) as exc:
-                return {"ok": False, "error": str(exc)}
+                return {"ok": False, "code": getattr(exc, "code", "invalid_arguments"), "error": str(exc)}
         original, counters = deepcopy(self.model), self._counters.copy()
         try:
             result = getattr(self, f"_{name}")(args)
@@ -300,7 +334,8 @@ class MapState(ResearchQuality):
         except (MapValidationError, TypeError, KeyError, ValueError) as exc:
             self.model = original
             self._counters = counters
-            return {"ok": False, "error": str(exc), **({"details": exc.details} if isinstance(exc, QualityError) else {})}
+            code = getattr(exc, "code", None) or ("quality_check" if isinstance(exc, QualityError) else "invalid_arguments")
+            return {"ok": False, "code": code, "error": str(exc), **({"details": exc.details} if isinstance(exc, QualityError) else {})}
 
     def _inspect_map(self, args: dict[str, Any]) -> dict[str, Any]:
         section = _choice(args.get("section", "summary"), "section", INSPECT_SECTIONS)
@@ -514,7 +549,7 @@ class MapState(ResearchQuality):
         if not evidence:
             raise MapValidationError("Группировка требует оснований из прочитанных материалов")
         item = {"id": self._id("groups", "group", args.get("id"), MAX_NODES),
-                "kind": _choice(args.get("kind"), "kind", GROUP_KINDS),
+                "kind": _choice(args.get("kind", "stage"), "kind", GROUP_KINDS),
                 "name": _text(args.get("name"), "name", required=True, limit=300),
                 "description": _text(args.get("description", ""), "description"),
                 "result": _text(args.get("result"), "result", required=True),
@@ -609,7 +644,9 @@ class MapState(ResearchQuality):
     def _fingerprint(value: Any) -> str:
         # Renaming, explaining, or regrouping an action does not alter its
         # execution. Conditions, results, provenance, and transitions still do.
-        substantive = {k: v for k, v in value.items() if k not in ("name", "group_id", "basis", "code_explanations")} if isinstance(value, dict) else value
+        # description/input/output state what the operation does, so they stay.
+        wording = ("name", "group_id", "basis", "code_explanations")
+        substantive = {k: v for k, v in value.items() if k not in wording} if isinstance(value, dict) else value
         return hashlib.sha256(json.dumps(substantive, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
     @staticmethod
@@ -645,7 +682,7 @@ class MapState(ResearchQuality):
             if node_id not in nodes:
                 raise MapValidationError(f"{node_id}: операция должна ссылаться на существующий узел")
             if node_id in used_nodes:
-                raise MapValidationError(f"{node_id}: несколько операций нельзя свернуть в один крупный шаг; создайте отдельные узлы")
+                raise MapValidationError(f"{node_id}: несколько действий нельзя свернуть в одну операцию; создайте отдельные узлы")
             used_nodes.add(node_id)
             citations = self._evidence(raw.get("evidence", []), "operations.evidence")
             if not citations:
@@ -710,13 +747,13 @@ class MapState(ResearchQuality):
         tasks = {item["id"]: item for item in self.model["research_tasks"]}
         for group in groups.values():
             if group["kind"] != "stage" or group.get("parent_id"):
-                errors.append(f"{group['id']}: этап не является вложенной группой или исполняемым узлом")
+                errors.append(f"{group['id']}: этап должен иметь kind=stage и не иметь родительского этапа")
         for node in nodes.values():
             if node.get("group_id") and node["group_id"] not in groups:
                 errors.append(f"{node['id']}: group_id должен указывать на существующий этап")
         for edge in edges.values():
             if edge["source"] not in nodes or edge["target"] not in nodes:
-                errors.append(f"{edge['id']}: переход ссылается на отсутствующий шаг")
+                errors.append(f"{edge['id']}: переход ссылается на отсутствующую операцию")
         for gap in gaps.values():
             for key, existing in (("node_ids", nodes), ("edge_ids", edges), ("task_ids", tasks)):
                 if set(gap.get(key, [])) - set(existing):
@@ -726,7 +763,7 @@ class MapState(ResearchQuality):
             reviewed = {op["node_id"] for op in review["operations"]}
             for op in review["operations"]:
                 if op["node_id"] not in nodes:
-                    errors.append(f"{op['id']}: операция ссылается на отсутствующий шаг")
+                    errors.append(f"{op['id']}: запись обзора ссылается на отсутствующую операцию карты")
                 if op["node_id"] in assigned:
                     errors.append(f"{op['node_id']}: несколько операций не могут быть скрыты в одном узле")
                 assigned[op["node_id"]] = op["id"]
@@ -773,7 +810,7 @@ class MapState(ResearchQuality):
         if (required and (not reviews or not any(op["node_id"] in required for op in operations))) or (not required and not unknown_operations):
             errors.append("Детализация не проверена: вызовите review_execution с атомарными операциями; каждое самостоятельное действие требует своей операции")
         for identifier in sorted(required - mapped):
-            errors.append(f"{identifier}: шаг не сопоставлен с атомарной операцией в review_execution")
+            errors.append(f"{identifier}: операция не сопоставлена с записью review_execution")
         for review in reviews:
             review_nodes = {op["node_id"] for op in review["operations"]}
             kinds = {op["kind"] for op in review["operations"]}
@@ -786,7 +823,7 @@ class MapState(ResearchQuality):
                 errors.append(f"{review['id']}: переход {identifier} удалён или перенесён после обзора; обновите review_execution")
             for identifier, fingerprint in review["node_fingerprints"].items():
                 if identifier in nodes and self._fingerprint(nodes[identifier]) != fingerprint:
-                    errors.append(f"{review['id']}: шаг {identifier} изменён после обзора; обновите review_execution")
+                    errors.append(f"{review['id']}: операция {identifier} изменена после обзора; обновите review_execution")
             for identifier, fingerprint in review["edge_fingerprints"].items():
                 if identifier in edges and self._fingerprint(edges[identifier]) != fingerprint:
                     errors.append(f"{review['id']}: переход {identifier} изменён после обзора; обновите review_execution")
@@ -841,7 +878,7 @@ class MapState(ResearchQuality):
             errors.append("Не рассмотрены источники: " + ", ".join(sorted(missing)))
         nodes = {n["id"]: n for n in self.model["nodes"]}
         if not nodes:
-            errors.append("Карта не содержит шагов")
+            errors.append("Карта не содержит операций")
             return errors
         starts = set(self.model["scenario"]["entry_operation_ids"])
         ends = set(self.model["scenario"]["terminal_operation_ids"])
@@ -888,12 +925,12 @@ class MapState(ResearchQuality):
             for component in components:
                 if component is not main_component and not component.issubset(gap_nodes):
                     errors.append("Несвязанный фрагмент карты (" + ", ".join(sorted(component))
-                                  + "): найдите переходы либо добавьте адресный gap ко всем его шагам")
+                                  + "): найдите переходы либо добавьте адресный gap ко всем его операциям")
         for node in nodes.values():
             identifier = node["id"]
             if identifier not in reachable or identifier not in terminates:
                 if identifier not in gap_nodes:
-                    errors.append(f"{identifier}: нет сквозного пути от начала до завершения; свяжите шаг или добавьте адресный gap")
+                    errors.append(f"{identifier}: нет сквозного пути от начала до завершения; свяжите операцию или добавьте адресный gap")
             if identifier in ends and outgoing[identifier] and not node.get("completion_condition"):
                 errors.append(f"{identifier}: конечная операция имеет исходящее продолжение; укажите смысловое completion_condition")
             if node.get("completion_condition") and identifier not in ends:
@@ -904,7 +941,7 @@ class MapState(ResearchQuality):
             if edge["evidence_status"] == "unknown" and not any(
                 edge["id"] in g.get("edge_ids", []) or {edge["source"], edge["target"]}.issubset(g["node_ids"])
                 for g in self.model["gaps"]):
-                errors.append(f"{edge['id']}: неизвестный переход требует gap с обоими шагами или edge_ids")
+                errors.append(f"{edge['id']}: неизвестный переход требует gap с обеими операциями или edge_ids")
         for group in self.model["groups"]:
             used = any(n.get("group_id") == group["id"] for n in nodes.values())
             if not used:
@@ -917,7 +954,7 @@ class MapState(ResearchQuality):
         summary = _text(args.get("summary"), "summary", required=True, limit=20000)
         errors = self._finish_errors()
         if errors:
-            raise MapValidationError("Исправьте карту перед завершением: " + "; ".join(errors[:30]))
+            raise MapValidationError("Исправьте карту перед завершением: " + "; ".join(errors[:30]), "finish_blocked")
         partial = bool(self.model["gaps"] or self.model["source_omissions"] or self.model["scenario"]["assumptions"]
                        or any(r["disposition"] == "unavailable" for r in self.model["source_reviews"])
                        or any(r["disposition"] == "out_of_scope" and not r.get("inspected", False)

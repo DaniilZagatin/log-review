@@ -193,11 +193,18 @@ class ChatClient:
         usage = getattr(response, "usage", None)
         if usage is None:
             return {}
-        return {
+        result = {
             "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
             "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
             "total_tokens": getattr(usage, "total_tokens", 0) or 0,
         }
+        # Prefix-cache reuse decides the real cost of a long agent prefix.
+        # Report it only when the provider does; absence is not zero reuse.
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = details.get("cached_tokens") if isinstance(details, dict) else getattr(details, "cached_tokens", None)
+        if isinstance(cached, int) and not isinstance(cached, bool):
+            result["cached_tokens"] = cached
+        return result
 
     def _require_chat_result(self, text: str, tool_calls: list[dict[str, Any]] | None,
                               context: dict[str, str]) -> None:

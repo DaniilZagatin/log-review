@@ -155,13 +155,15 @@ class EvidenceRangeTests(unittest.TestCase):
             for item in self.state.model[collection]:
                 self.assertTrue(item["evidence"][0]["quote"])
 
-    def test_schema_makes_quote_optional_for_all_embedded_evidence(self):
+    def test_schema_evidence_is_reference_only_everywhere(self):
+        # The model passes ranges; the harness resolves quotes. Old payloads
+        # with quote stay accepted by schema.py, but the contract does not ask.
         evidence_shapes = []
 
         def visit(value):
             if isinstance(value, dict):
                 properties = value.get("properties", {})
-                if {"path", "line_start", "line_end", "quote"} <= set(properties):
+                if {"path", "line_start", "line_end"} <= set(properties):
                     evidence_shapes.append(value)
                 for child in value.values():
                     visit(child)
@@ -172,7 +174,7 @@ class EvidenceRangeTests(unittest.TestCase):
         visit(TOOLS)
         self.assertGreater(len(evidence_shapes), 8)
         for shape in evidence_shapes:
-            self.assertNotIn("quote", shape.get("required", []))
+            self.assertNotIn("quote", shape["properties"])
             self.assertTrue({"path", "line_start", "line_end"} <= set(shape["required"]))
 
 
@@ -216,7 +218,7 @@ class ReviewedMapPresentationTests(unittest.TestCase):
                 self.helper.good("upsert_step", **{**self.node, field: value})
                 result = self.finish()
                 self.assertFalse(result["ok"])
-                self.assertIn("изменён после обзора", result["error"])
+                self.assertIn("после обзора", result["error"])
                 self.helper.good("upsert_step", **self.node)
         self.assertTrue(self.finish()["ok"])
 
@@ -226,14 +228,14 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         self.helper.good("upsert_step", **{**self.node, "evidence": replacement, 'code_explanations':explanations})
         result = self.finish()
         self.assertFalse(result["ok"])
-        self.assertIn("изменён после обзора", result["error"])
+        self.assertIn("после обзора", result["error"])
 
     def test_transition_business_explanation_is_distinct_from_semantic_description(self):
         edge = deepcopy(self.state.model["edges"][0])
         self.helper.good("upsert_transition", **{**edge, "description": "Продолжение выполняется новым способом"})
         result = self.finish()
         self.assertFalse(result["ok"])
-        self.assertIn("изменён после обзора", result["error"])
+        self.assertIn("после обзора", result["error"])
 
 
 class GraphFrontierTests(unittest.TestCase):

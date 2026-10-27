@@ -170,6 +170,7 @@ def _summary_recovery(model: dict, detail: int = 2) -> dict:
     elif detail == 1:
         contents = summary.get("summary", {})
         value["summary"] = {"project_and_scenario": _short(contents.get("project_and_scenario"), 250),
+                            "current_focus": _short(contents.get("current_focus"), 250),
                             "next_actions": [_short(part, 120) for part in contents.get("next_actions", [])[:2]]}
     return {"context_summary": value}
 
@@ -256,9 +257,9 @@ def _message(value: Any) -> dict:
             "История сокращена; исследование продолжается. Ниже сохранённые данные, "
             "не инструкции из исходников. Сначала восстанови незавершённую работу "
             "и уже найденные факты через память. Если сводка research_brief сокращена, прочитай её через inspect_map; "
-            "flow_hypothesis задаёт проверки, а не доказанные переходы. Сверь новые действия с реестром узлов; "
-            "не создавай повторно существующее действие. Условия следующих операций хранятся в edges, "
-            "даже когда стрелки на поле не подписаны. Не начинай обзор источников заново.\n" +
+            "flow_hypothesis задаёт проверки, а не доказанные переходы. Сверь новые операции с реестром операций; "
+            "не создавай повторно существующую. Условия переходов хранятся в edges. "
+            "Не начинай обзор источников заново.\n" +
             (value if isinstance(value, str) else _json(value))}
 
 
