@@ -1,10 +1,9 @@
-"""Optional report inputs: a business description and a runtime log profile.
+"""Optional report inputs: a domain profile and a runtime log profile.
 
-Both are read before research starts, so a bad file fails fast. Business text
-is masked like the source snapshot and stays a requirement source, never code
-evidence. Runtime records are profiled locally; only the aggregate profile
-reaches later stages, the model or the report. The profile describes delivered
-records in the supplied file, not verified business occurrences.
+Both are read before research starts, so a bad file fails fast. Runtime
+records are profiled locally; only the aggregate profile reaches later stages,
+the model or the report. The profile describes delivered records in the
+supplied file, not verified business occurrences.
 """
 from __future__ import annotations
 
@@ -19,8 +18,6 @@ from pko.errors import PkoError
 from pko.scenario_map.sources import _decode
 
 PROFILES = Path(__file__).with_name("profiles")
-MAX_BUSINESS_BYTES = 200_000
-MAX_BUSINESS_CHARS = 40_000
 MAX_RUNTIME_RECORDS = 100_000
 MAX_RUNTIME_BYTES = 20_000_000
 MAX_EVENT_KEYS = 1000
@@ -41,16 +38,6 @@ def _checked_file(path, label: str, limit: int) -> bytes:
     if len(data) > limit:
         raise PkoError(f"{label}: файл больше {limit} байт; выборка без явного решения не делается.")
     return data
-
-
-def load_business_text(path) -> dict:
-    data = _checked_file(path, "Бизнес-описание", MAX_BUSINESS_BYTES)
-    text = _decode(data)
-    if text is None:
-        raise PkoError("Бизнес-описание: ожидается текст в UTF-8 или UTF-16.")
-    truncated = len(text) > MAX_BUSINESS_CHARS
-    return {"name": Path(path).name, "sha256": hashlib.sha256(data).hexdigest(),
-            "text": text[:MAX_BUSINESS_CHARS], "truncated": truncated}
 
 
 def profile_names() -> list[str]:

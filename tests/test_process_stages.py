@@ -10,7 +10,7 @@ from pathlib import Path
 from pko.errors import PkoError
 from pko.observability.contracts import ReportError, validate_report
 from pko.observability.coverage import assess_fact
-from pko.observability.inputs import load_business_text, load_profile, parse_field_map, profile_runtime_log
+from pko.observability.inputs import load_profile, parse_field_map, profile_runtime_log
 from pko.observability.instrumentation import find_cycle
 from pko.observability.model_stage import ReportBudget, StageModel
 from pko.observability.pipeline import ReportOptions, run_observability
@@ -245,15 +245,6 @@ class InputTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary.cleanup()
-
-    def test_business_text_is_masked_and_bounded(self):
-        path = self.root / "business.md"
-        path.write_text('Процесс выдачи карты.\npassword = "hunter2"\n', encoding="utf-8")
-        business = load_business_text(path)
-        self.assertNotIn("hunter2", business["text"])
-        path.write_bytes(b"x" * 200_001)
-        with self.assertRaises(PkoError):
-            load_business_text(path)
 
     def test_runtime_profile_aggregates_and_rejects_invalid_records(self):
         path = self.root / "logs.jsonl"

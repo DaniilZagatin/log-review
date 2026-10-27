@@ -1,7 +1,7 @@
 """Process context and measurement questions proposed over the saved map.
 
-The context separates sources: scenario text, business description, code of
-the map and the model's own proposals. A case identifier attributed to code
+The context separates sources: the process description, code of the map and
+the model's own proposals. A case identifier attributed to code
 must be a name that actually appears in the map's cited code or in fields of
 confirmed logging records.
 """
@@ -14,10 +14,10 @@ from pko.observability.model_stage import StageModel
 STAGE = "process_context"
 FAMILIES = ("volume", "duration", "outcome", "quality", "cost", "other")
 OUTCOME_KINDS = ("success", "negative", "cancellation", "open")
-QUESTION_SOURCES = ("scenario", "business", "proposal")
+QUESTION_SOURCES = ("scenario", "proposal")
 ALL_QUESTION_SOURCES = QUESTION_SOURCES + ("profile",)
-IDENTIFIER_SOURCES = ("code", "business", "hypothesis")
-TERM_SOURCES = ("scenario", "business", "code")
+IDENTIFIER_SOURCES = ("code", "scenario", "hypothesis")
+TERM_SOURCES = ("scenario", "code")
 MAX_QUESTIONS = 12
 _QUESTION_ID = re.compile(r"q-[1-9]\d{0,2}")
 _STRINGS = {"type": "array", "items": {"type": "string"}}
@@ -97,7 +97,7 @@ def add_profile_questions(context: dict, profile: dict | None) -> None:
                           "rationale": f"Профиль «{profile['title']}», версия {profile['version']}"})
 
 
-def build_context(model: dict, report: dict, stage_model: StageModel, business: dict | None,
+def build_context(model: dict, report: dict, stage_model: StageModel,
                   profile: dict | None = None) -> tuple[dict | None, list[str]]:
     operations = {node["id"] for node in model.get("nodes") or [] if node.get("kind") == "operation"}
     scenario, brief = model.get("scenario") or {}, model.get("research_brief") or {}
@@ -109,7 +109,6 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
         "operations": operations_view(model),
         "gaps": [gap.get("description") for gap in model.get("gaps") or []][:30],
         "event_bindings": confirmed_bindings(report),
-        "business_description": business["text"] if business else None,
         "domain_profile_questions": [row["question"] for row in profile["measurement_questions"]] if profile else []}
     names = _code_names(model, report)
 
@@ -118,10 +117,6 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
         goal = text(arguments.get("goal"))
         if not goal:
             errors.append("goal: опиши бизнес-результат процесса")
-        if not business and any(item.get("source") == "business"
-                                for key in ("measurement_questions", "glossary")
-                                for item in arguments.get(key) or [] if isinstance(item, dict)):
-            errors.append("Бизнес-описание не передано: источник business недопустим")
         outcomes = []
         for item in arguments.get("outcomes") or []:
             refs = (item.get("operation_ids") or []) if isinstance(item, dict) else []
@@ -139,8 +134,6 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
                 errors.append("case.identifiers: нужны name и source из перечня")
             elif item["source"] == "code" and not re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])", names):
                 errors.append(f"case.identifiers: имя {name!r} не встречается в коде карты и полях записей; укажи source=hypothesis")
-            elif item["source"] == "business" and not business:
-                errors.append("case.identifiers: бизнес-описание не передано")
             else:
                 identifiers.append({"name": name, "source": item["source"], "where": text(item.get("where"), 300)})
         questions, seen = [], set()
@@ -165,7 +158,6 @@ def build_context(model: dict, report: dict, stage_model: StageModel, business: 
                 "glossary": glossary, "measurement_questions": questions,
                 "hypotheses": _strings(arguments.get("hypotheses"), 500, 20),
                 "open_questions": _strings(arguments.get("open_questions"), 500, 20),
-                "business_source": {k: business[k] for k in ("name", "sha256", "truncated")} if business else None,
                 "provenance": "model_proposal", "authority_status": "proposed"}, errors
 
     context, errors = stage_model.ask(STAGE, payload, TOOL, validate)

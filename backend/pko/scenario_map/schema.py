@@ -53,13 +53,13 @@ class MapValidationError(ValueError):
         self.code = code
 
 
-def _text(value: Any, field: str, *, required: bool = False, limit: int = MAX_TEXT) -> str:
+def _text(value: Any, field: str, *, required: bool = False, limit: int | None = MAX_TEXT) -> str:
     if not isinstance(value, str):
         raise MapValidationError(f"{field}: ожидается строка")
     value = value.strip()
     if required and not value:
         raise MapValidationError(f"{field}: укажите содержательное значение")
-    if len(value) > limit:
+    if limit is not None and len(value) > limit:
         raise MapValidationError(f"{field}: максимум {limit} символов")
     return value
 
@@ -97,7 +97,8 @@ class MapState(ResearchQuality):
         self._source_ids = set(source_ids)
         self.model: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
-            "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=20000),
+            # The process description is bounded by the model window, checked before research.
+            "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=None),
                          "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
             "sources": sources, "groups": [], "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,

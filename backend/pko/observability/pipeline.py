@@ -30,7 +30,6 @@ class ReportOptions:
     client: Any = None
     max_requests: int = 24
     max_seconds: float = 1800.0
-    business: dict | None = None
     runtime: dict | None = None
     profile: dict | None = None
 
@@ -184,7 +183,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
 
     def process_context():
         report["methodology"]["process_context"] = methodology("process_context")["sha256"]
-        context, errors = build_context(model, report, stage_model, options.business, options.profile)
+        context, errors = build_context(model, report, stage_model, options.profile)
         report["process_context"] = _accepted(context, errors)
         reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else [])
         return ("partial" if reasons else "complete"), reasons, {

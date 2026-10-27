@@ -13,6 +13,7 @@ from typing import Any, Callable
 from pko.audit import AuditedClient, record, sanitize
 from pko.errors import LlmError
 from pko.llm.client import ChatClient
+from pko.llm.registry import DEFAULT_CONTEXT_WINDOW
 from pko.llm.tracing import trace_client, trace_span, trace_tool_call
 from pko.code_tools.tools import TOOL_SCHEMAS, ToolBox
 from pko.scenario_map.schema import MapState
@@ -226,8 +227,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
               summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
               summary_mode: str = DEFAULT_SUMMARY_MODE,
               checkpoint: Callable[[dict], None] | None = None,
-              on_event: Callable[[str, dict], None] | None = None,
-              business: dict | None = None) -> dict:
+              on_event: Callable[[str, dict], None] | None = None) -> dict:
     if max_steps < 1 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
         raise ValueError("Лимиты исследования и ожидания модели должны быть конечными положительными числами")
     if (isinstance(summary_max_tokens, bool) or not isinstance(summary_max_tokens, int) or
@@ -247,7 +247,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
               "tools_sha256": hashlib.sha256(_json(schemas).encode("utf-8")).hexdigest()}
     state.model["run"].update(bundle)
     record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
-           context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds, **bundle)
+           context_window=spec.context_window or DEFAULT_CONTEXT_WINDOW, max_steps=max_steps, max_seconds=max_seconds, **bundle)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": _json({
         "scenario_description": scenario, "sources": workspace.sources,
         "source_notes": workspace.notes, "source_omissions": getattr(workspace, "omissions", []),
@@ -262,18 +262,9 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     failed_calls = 0
     failure_guidance_used = False
     next_compaction_step = 1
-    window = spec.context_window or 64000
+    window = spec.context_window or DEFAULT_CONTEXT_WINDOW
     summary_tokens = min(summary_max_tokens, max(512, window // 4))
     message_budget, response_tokens = context_budget(window, schemas)
-    if business:
-        # Requirements and vocabulary only; bounded so the research context keeps room for code.
-        limit = max(0, message_budget // 4)
-        opening = json.loads(messages[1]["content"])
-        opening["business_description"] = {"name": business["name"], "text": business["text"][:limit],
-                                           "truncated": business.get("truncated") or len(business["text"]) > limit}
-        messages[1]["content"] = _json(opening)
-        state.model["run"]["business_description"] = {"name": business["name"], "sha256": business["sha256"],
-                                                      "truncated": opening["business_description"]["truncated"]}
     state.model["run"]["context_budget_chars"] = message_budget
     state.model["run"].update(summary_max_tokens=summary_tokens, summary_mode=summary_mode)
     state.model["run"]["summary_effective_mode"] = (
@@ -287,8 +278,11 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
 
     try:
         save()
-        if sum(len(_json(m)) for m in messages) + 1600 > message_budget:
-            raise ValueError("Окно модели слишком мало для инструментов и описания сценария; используйте модель с большим контекстом или сократите описание.")
+        # The opening stays in context after every compaction, so it must fit the window itself.
+        opening_size = sum(len(_json(m)) for m in messages)
+        if opening_size + 1600 > message_budget:
+            raise ValueError(f"Описание процесса и инструкции занимают {opening_size} символов и не помещаются в окно "
+                             f"модели ({message_budget}). Сократите описание или используйте модель с большим контекстом.")
         if client is None:
             client = DeadlineClient(spec=spec, timeout=model_timeout)
             client.deadline = started + max_seconds

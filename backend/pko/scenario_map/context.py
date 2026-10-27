@@ -10,6 +10,7 @@ import json
 from typing import Any, Callable
 
 from pko.audit import record
+from pko.llm.registry import DEFAULT_CONTEXT_WINDOW
 
 
 COMPACTION_MARKER = "[scenario-context-recovery]"
@@ -45,7 +46,7 @@ def context_budget(window: int, schemas: list[dict]) -> tuple[int, int]:
     Provider context is shared by messages, tool schemas, and the response.
     The message queue contains public output and tool exchanges, never thinking.
     """
-    window = window or 64000
+    window = window or DEFAULT_CONTEXT_WINDOW
     response_tokens = min(8192, max(1024, window // 8))
     budget = int((window - response_tokens - 2048) * 1.6) - len(_json(schemas))
     return budget, response_tokens

@@ -143,7 +143,7 @@ const readinessNames={proposed:'Предложена, не согласован�
  not_provided:'Данные не переданы',sample_only:'Только выборка',not_implemented:'Не реализовано'};
 const componentTitles={methodology:'Методика',facts:'Факты',semantics:'Смысл записей',correlation:'Связь с экземпляром',timing:'Момент и время',fields:'Поля',data:'Данные',calculator:'Вычисление'};
 const familyNames={volume:'объём',duration:'длительность',outcome:'исходы',quality:'качество',cost:'стоимость',other:'другое'};
-const sourceNames={scenario:'описание сценария',business:'бизнес-описание',code:'код',proposal:'предложение',hypothesis:'гипотеза',map:'карта'};
+const sourceNames={scenario:'описание процесса',code:'код',proposal:'предложение',hypothesis:'гипотеза',map:'карта'};
 const executionNames={not_run:'Не запускался',running:'Выполняется',completed:'Выполнен',failed:'Ошибка',blocked:'Заблокирован зависимостью',interrupted:'Прерван лимитом'};
 const resultNames={none:'Нет результата',complete:'Полный',partial:'Частичный',stale:'Устарел'};
 const facts=array(report.facts),factById=new Map(facts.map(fact=>[fact.id,fact]));
@@ -271,7 +271,6 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
  else{fields(root,[['Цель',context.goal],['Начало',context.start],['Завершение',context.finish],['Экземпляр процесса',context.case?.subject],
    ['Идентификаторы',array(context.case?.identifiers).map(row=>row.name+' — '+L(sourceNames,row.source)+(row.where?' ('+row.where+')':'')).join('; ')||'Не установлены'],
    ['Исходы',array(context.outcomes).map(row=>row.name+' ('+array(row.operation_ids).map(id=>byId.get(id)?.name||id).join(', ')+')').join('; ')],
-   ['Бизнес-описание',context.business_source?context.business_source.name+(context.business_source.truncated?' (использовано начало)':''):'Не передавалось'],
    ['Предметный профиль',report.domain_profile?report.domain_profile.title+', версия '+report.domain_profile.version:'Не использовался']]);
   root.append(el('h4','','Вопросы измерения'));list(root,array(context.measurement_questions).map(row=>row.id+' · '+row.question+' — '+L(familyNames,row.family)+', источник: '+L(sourceNames,row.source)));
   if(array(context.glossary).length){root.append(el('h4','','Словарь'));list(root,context.glossary.map(row=>row.term+' — '+row.meaning+' ('+L(sourceNames,row.source)+')'));}

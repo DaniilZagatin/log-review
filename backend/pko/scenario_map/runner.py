@@ -13,14 +13,14 @@ from pko.audit import AuditedClient, audit_run, record
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
 from pko.observability.export import build_handoff
-from pko.observability.inputs import load_business_text, load_profile, parse_field_map, profile_names, profile_runtime_log
+from pko.observability.inputs import load_profile, parse_field_map, profile_names, profile_runtime_log
 from pko.observability.model_stage import ReportBudget, StageModel
 from pko.observability.pipeline import ReportOptions, run_observability
 from pko.output.publisher import write_outputs
 from pko.render.scenario_map import render_scenario_map
 from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAULT_MODEL_TIMEOUT, DeadlineClient, run_agent
 from pko.scenario_map.config import researcher_spec
-from pko.scenario_map.sources import build_workspace
+from pko.scenario_map.sources import build_workspace, read_process_description
 
 
 def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
@@ -31,9 +31,9 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  observability: bool = False, report_options: ReportOptions | None = None,
                  on_event=None) -> dict:
     scenario = scenario.strip()
-    if not scenario or len(scenario) > 20000:
-        raise PkoError("Нужно краткое описание варианта сценария (до 20 000 символов).",
-                       hint="укажите вариант, который требуется восстановить по коду")
+    if not scenario:
+        raise PkoError("Нужно описание процесса: вариант сценария, который требуется восстановить по коду.",
+                       hint="передайте файл через --process-file или текст через --scenario-text")
     if not sources or len(sources) > 32:
         raise PkoError("Нужно от 1 до 32 источников кода.",
                        hint="передайте директории или ZIP-архивы через --source")
@@ -85,8 +85,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     model = run_agent(workspace, scenario, spec, client=client,
                                       max_steps=max_steps, max_seconds=max_seconds,
                                       model_timeout=model_timeout, summary_max_tokens=summary_max_tokens,
-                                      summary_mode=summary_mode, checkpoint=checkpoint, on_event=on_event,
-                                      business=(report_options or ReportOptions()).business)
+                                      summary_mode=summary_mode, checkpoint=checkpoint, on_event=on_event)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
                     journal.outcome = model['run']['status']
@@ -269,11 +268,13 @@ def _report_model(options: ReportOptions, research_client, spec, model_timeout: 
 def add_cli_command(subparsers):
     command = subparsers.add_parser("map-scenario", help="Построить карту атомарных операций выбранного сценария по исходникам")
     scenario = command.add_mutually_exclusive_group(required=True)
-    scenario.add_argument("--scenario-text", default="", help="Краткое описание выбранного варианта сценария")
-    scenario.add_argument("--scenario-file", default="", help="UTF-8 файл с кратким описанием варианта")
+    scenario.add_argument("--process-file", "--scenario-file", dest="process_file", default="",
+                          help="Текстовый файл с описанием варианта процесса и полезными сведениями о нём (UTF-8)")
+    scenario.add_argument("--scenario-text", default="", help="Описание варианта сценария строкой")
     scenario.add_argument("--from-map", default="",
                           help="Перестроить отчёт по сохранённой scenario_map.json без нового исследования; нужны те же --source и --observability")
-    command.add_argument("--source", action="append", required=True, help="Директория или ZIP с кодом; можно повторять")
+    command.add_argument("--source", action="extend", nargs="+", required=True,
+                         help="ZIP-архивы или директории с кодом: несколько через пробел, флаг можно повторять")
     command.add_argument("--out", default="", help="Каталог HTML-карты и JSON (по умолчанию scenario-map-out; с --from-map — папка карты)")
     command.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
     command.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS,
@@ -290,8 +291,6 @@ def add_cli_command(subparsers):
                          help="Лимит запросов к модели для этапов отчёта, 1–200 (по умолчанию 24)")
     command.add_argument("--observability-max-seconds", type=float, default=1800,
                          help="Лимит времени этапов отчёта в секундах, отдельный от исследования (по умолчанию 1800)")
-    command.add_argument("--business-file", default="",
-                         help="Бизнес-описание процесса (UTF-8, до 200 КБ): термины и требования для исследования и отчёта, не доказательство реализации")
     command.add_argument("--runtime-log", default="",
                          help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
     command.add_argument("--domain-profile", default=None, choices=profile_names(),
@@ -305,16 +304,7 @@ def add_cli_command(subparsers):
 
 
 def command_main(args) -> int:
-    scenario = args.scenario_text
-    if args.scenario_file:
-        try:
-            path = Path(args.scenario_file)
-            if path.stat().st_size > 80000:
-                raise ValueError("описание слишком велико")
-            scenario = path.read_text(encoding="utf-8-sig")
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise PkoError(f"Не удалось прочитать описание сценария: {exc}",
-                           hint="проверьте путь и кодировку UTF-8") from exc
+    scenario = read_process_description(args.process_file) if args.process_file else args.scenario_text
 
     if (args.runtime_log or args.domain_profile) and not args.observability:
         raise PkoError("Файл логов и профиль используются только с --observability.")
@@ -322,7 +312,6 @@ def command_main(args) -> int:
         raise PkoError("--from-map перестраивает отчёт наблюдаемости: добавьте --observability.")
     out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()
     # Inputs are checked before research so a bad file does not waste the research budget.
-    business = load_business_text(args.business_file) if args.business_file else None
     runtime = (profile_runtime_log(args.runtime_log, parse_field_map(args.runtime_fields))
                if args.runtime_log else None)
 
@@ -339,7 +328,7 @@ def command_main(args) -> int:
                   f"из {data['max_attempts']} через {data['delay_seconds']:g} с.", flush=True)
 
     options = ReportOptions(max_requests=args.observability_max_requests, max_seconds=args.observability_max_seconds,
-                            business=business, runtime=runtime,
+                            runtime=runtime,
                             profile=load_profile(args.domain_profile) if args.domain_profile else None)
     if args.from_map:
         model = run_report_from_map(args.from_map, args.source, out, thinking=args.thinking,

@@ -11,7 +11,9 @@ from pko.llm.registry import ModelSpec
 from pko.scenario_map.code_references import symbols
 from pko.scenario_map.quality import SEMANTIC_CHECKS
 
-SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed")
+# A small window on purpose: scripted runs must exercise context compaction.
+SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed",
+                 context_window=64000)
 FIXTURE = Path(__file__).parent / "fixtures" / "scenario_banking"
 SCENARIO = "Выпуск новой дебетовой карты действующему клиенту через мобильный канал, до выпуска либо отказа. Перевыпуск исключён."
 NODE_COUNT, EDGE_COUNT, OPERATION_COUNT = 18, 17, 18

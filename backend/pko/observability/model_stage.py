@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pko.audit import record
+from pko.llm.registry import DEFAULT_CONTEXT_WINDOW
 from pko.llm.tracing import trace_span
 from pko.scenario_map.context import context_budget
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
@@ -103,7 +104,7 @@ class StageModel:
         self.cache_hits = 0
 
     def _limits(self, schema: dict) -> tuple[int, int]:
-        window = getattr(getattr(self.client, "spec", None), "context_window", None) or 64000
+        window = getattr(getattr(self.client, "spec", None), "context_window", None) or DEFAULT_CONTEXT_WINDOW
         return context_budget(window, [schema])
 
     def _cache_key(self, rules: dict, schema: dict, payload: dict) -> str:
