@@ -16,7 +16,8 @@ from pko.observability.mapping import link_sites
 from pko.observability.export import safe_cell
 from pko.observability.pipeline import ReportOptions, run_observability
 from pko.render.scenario_map import render_scenario_map
-from pko.scenario_map.runner import run_scenario
+from pko.errors import PkoError
+from pko.scenario_map.runner import load_saved_map, run_report_from_map, run_scenario
 from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
 
@@ -269,6 +270,34 @@ class RunnerReportTests(unittest.TestCase):
         self.assertIn("report broke", result["run"]["process_report_error"])
         self.assertFalse((output / "process_report.json").exists())
         self.assertNotIn('role="tablist"', (output / "scenario_map.html").read_text(encoding="utf-8"))
+
+    def test_report_reruns_from_a_saved_map_with_the_same_sources_only(self):
+        output = self.root / "first"
+        with patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}):
+            first = run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True,
+                                 report_options=ReportOptions(client=ScriptedReportClient()))
+            earlier = json.loads((output / "process_report.json").read_text(encoding="utf-8"))
+            rerun = run_report_from_map(output / "scenario_map.json", sources(), output, spec=SPEC,
+                                        report_options=ReportOptions(client=ScriptedReportClient()))
+            with self.assertRaisesRegex(PkoError, "не совпадают"):
+                run_report_from_map(output / "scenario_map.json", sources()[:2], self.root / "other", spec=SPEC,
+                                    report_options=ReportOptions(client=ScriptedReportClient()))
+        report = json.loads((output / "process_report.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["map_revision"], earlier["map_revision"])
+        self.assertNotEqual(report["run_id"], earlier["run_id"])
+        self.assertEqual(rerun["run"]["id"], first["run"]["id"], "the map keeps the run that built it")
+        self.assertEqual(rerun["run"]["report_runs"][-1]["id"], report["run_id"])
+        audit = (output / "audit" / f"run_{report['run_id']}.txt").read_text(encoding="utf-8")
+        self.assertIn("scenario_report_run", audit)
+        self.assertIn(first["run"]["id"], audit)
+
+    def test_saved_map_must_be_a_finished_current_map(self):
+        path = self.root / "map.json"
+        for content in ({"schema_version": "1.0", "run": {"status": "completed"}, "nodes": [{}]},
+                        {"schema_version": "2.0", "run": {"status": "running"}, "nodes": [{}]}):
+            path.write_text(json.dumps(content), encoding="utf-8")
+            with self.assertRaises(PkoError):
+                load_saved_map(path)
 
     def test_map_only_run_has_no_report(self):
         output = self.root / "plain"

@@ -44,12 +44,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
         raise PkoError("Бюджет суммаризации должен быть целым числом от 512 до 32768 токенов.")
     if summary_mode not in ("standard", "inherit"):
         raise PkoError("Режим суммаризации: standard или inherit.")
-    if observability and report_options is not None and (
-            isinstance(report_options.max_requests, bool) or not isinstance(report_options.max_requests, int)
-            or not 1 <= report_options.max_requests <= 200
-            or not (math.isfinite(report_options.max_seconds) and report_options.max_seconds > 0)):
-        raise PkoError("Лимиты этапов отчёта: от 1 до 200 запросов и конечное положительное время.",
-                       hint="проверьте --observability-max-requests и --observability-max-seconds")
+    if observability:
+        _check_report_options(report_options)
     spec = spec or researcher_spec(thinking=thinking)
     out_dir = Path(out_dir).resolve()
     # An output subtree can be excluded, but excluding an ancestor would silently
@@ -106,40 +102,9 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         })
                         output_span.set_output({"files": ["scenario_map.json", "scenario_map.html"]})
                     if observability:
-                        # The map is already published; a report failure leaves it as is.
-                        try:
-                            with trace_span("process_observability") as report_span:
-                                options = report_options or ReportOptions()
-                                report = run_observability(model, workspace.tree, options=options,
-                                                           stage_model=_report_model(options, client, spec, model_timeout))
-                                report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
-                            with trace_span("render_report"):
-                                html = render_scenario_map(model, report)
-                            with trace_span("publish_report") as output_span:
-                                report_json = json.dumps(report, ensure_ascii=False, indent=2)
-                                write_outputs(out_dir, {
-                                    "process-report": ("process_report.json", report_json),
-                                    "scenario-map": ("scenario_map.html", html),
-                                })
-                                output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
-                            model["run"]["process_report"] = "process_report.json"
-                        except Exception as exc:
-                            record("process_report_failed", error_type=type(exc).__name__, error=str(exc)[:500])
-                            model["run"]["process_report_error"] = f"{type(exc).__name__}: {exc}"[:500]
-                        else:
-                            # The handoff is derived from the published report; its failure keeps both.
-                            try:
-                                with trace_span("export_handoff") as export_span:
-                                    files = build_handoff(model, report, {"scenario_map.json": map_json,
-                                                                          "process_report.json": report_json},
-                                                          {"run_id": run_id, "trace_id": run_span.trace_id or None,
-                                                           "local_audit": f"audit/run_{run_id}.txt"})
-                                    write_outputs(out_dir / "handoff", files)
-                                    export_span.set_output({"files": [name for name, _ in files.values()]})
-                                model["run"]["handoff"] = "handoff/manifest.json"
-                            except Exception as exc:
-                                record("handoff_failed", error_type=type(exc).__name__, error=str(exc)[:500])
-                                model["run"]["handoff_error"] = f"{type(exc).__name__}: {exc}"[:500]
+                        _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
+                                        map_json=map_json, options=report_options or ReportOptions(),
+                                        client=client, spec=spec, model_timeout=model_timeout)
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
                                          "gaps": len(model.get("gaps", [])),
@@ -149,6 +114,124 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     record("scenario_result", status=model["run"]["status"],
                            nodes=len(model.get("nodes", [])), edges=len(model.get("edges", [])),
                            gaps=len(model.get("gaps", [])))
+                    return model
+        finally:
+            flush_tracing()
+
+
+def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace_id, map_json: str,
+                    options: ReportOptions, client, spec, model_timeout: float) -> dict | None:
+    """Report stages, tabbed HTML and handoff after the map is published.
+
+    A report failure leaves the published map; a handoff failure leaves both.
+    Outcomes are recorded in ``model["run"]``.
+    """
+    try:
+        with trace_span("process_observability") as report_span:
+            report = run_observability(model, workspace.tree, options=options, run_id=run_id,
+                                       stage_model=_report_model(options, client, spec, model_timeout))
+            report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
+        with trace_span("render_report"):
+            html = render_scenario_map(model, report)
+        with trace_span("publish_report") as output_span:
+            report_json = json.dumps(report, ensure_ascii=False, indent=2)
+            write_outputs(out_dir, {
+                "process-report": ("process_report.json", report_json),
+                "scenario-map": ("scenario_map.html", html),
+            })
+            output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
+        model["run"]["process_report"] = "process_report.json"
+    except Exception as exc:
+        record("process_report_failed", error_type=type(exc).__name__, error=str(exc)[:500])
+        model["run"]["process_report_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        return None
+    try:
+        with trace_span("export_handoff") as export_span:
+            files = build_handoff(model, report, {"scenario_map.json": map_json, "process_report.json": report_json},
+                                  {"run_id": run_id, "trace_id": trace_id or None,
+                                   "local_audit": f"audit/run_{run_id}.txt"})
+            write_outputs(out_dir / "handoff", files)
+            export_span.set_output({"files": [name for name, _ in files.values()]})
+        model["run"]["handoff"] = "handoff/manifest.json"
+    except Exception as exc:
+        record("handoff_failed", error_type=type(exc).__name__, error=str(exc)[:500])
+        model["run"]["handoff_error"] = f"{type(exc).__name__}: {exc}"[:500]
+    return report
+
+
+def _check_report_options(options: ReportOptions | None) -> None:
+    if options is not None and (
+            isinstance(options.max_requests, bool) or not isinstance(options.max_requests, int)
+            or not 1 <= options.max_requests <= 200
+            or not (math.isfinite(options.max_seconds) and options.max_seconds > 0)):
+        raise PkoError("Лимиты этапов отчёта: от 1 до 200 запросов и конечное положительное время.",
+                       hint="проверьте --observability-max-requests и --observability-max-seconds")
+
+
+def load_saved_map(map_path) -> dict:
+    """A published map of the current methodology; checkpoints and old maps are refused."""
+    map_path = Path(map_path)
+    try:
+        model = json.loads(map_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise PkoError(f"Не удалось прочитать карту: {exc}", hint="укажите scenario_map.json прошлого запуска") from exc
+    run = model.get("run") if isinstance(model, dict) else None
+    if not isinstance(run, dict) or str(model.get("schema_version")) != "2.0":
+        raise PkoError("Отчёт строится только по карте атомарных операций схемы 2.0.")
+    if run.get("status") not in ("completed", "partial") or not model.get("nodes"):
+        raise PkoError("Карта не содержит результата исследования: отчёт по ней не строится.",
+                       hint="используйте scenario_map.json завершённого или частичного запуска, не checkpoint")
+    return model
+
+
+def run_report_from_map(map_path, sources: list, out_dir: Path, *, spec=None, thinking=None,
+                        model_timeout: float = DEFAULT_MODEL_TIMEOUT,
+                        report_options: ReportOptions | None = None, on_event=None) -> dict:
+    """Rerun report stages over a saved map without new research.
+
+    The sources must reproduce the map's snapshot digests, otherwise its cited
+    lines may no longer exist. The rerun is a new run with its own trace that
+    references the run which built the map.
+    """
+    _check_report_options(report_options)
+    model = load_saved_map(map_path)
+    if not sources or len(sources) > 32:
+        raise PkoError("Нужно от 1 до 32 источников кода — те же, что при построении карты.")
+    spec = spec or researcher_spec(thinking=thinking)
+    out_dir = Path(out_dir).resolve()
+    for source in sources:
+        if Path(source).resolve().is_relative_to(out_dir):
+            raise PkoError("Каталог результата совпадает с источником кода или содержит его.",
+                           hint="выберите для --out отдельную подпапку, не содержащую источники")
+    previous = model["run"].get("id")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
+    with audit_run(out_dir / "audit" / f"run_{run_id}.txt", run_id) as journal:
+        init_phoenix_tracing()
+        try:
+            with trace_span("scenario_report_run", run_id=run_id, resumed_from_run_id=previous) as run_span:
+                with tempfile.TemporaryDirectory(prefix="belka-report-") as temporary:
+                    with trace_span("prepare_sources") as source_span:
+                        workspace = build_workspace(sources, Path(temporary) / "sources", exclude_paths=[out_dir])
+                        source_span.set_output({"sources": workspace.sources, "omissions": workspace.omissions})
+                    expected = {(row.get("id"), row.get("digest")) for row in model.get("sources") or []}
+                    actual = {(row.get("id"), row.get("digest")) for row in workspace.sources}
+                    if expected != actual:
+                        raise PkoError("Источники не совпадают со снимком, по которому построена карта.",
+                                       hint="передайте те же директории или архивы в том же порядке")
+                    record("report_rerun", resumed_from_run_id=previous, sources=workspace.sources)
+                    if on_event:
+                        on_event("sources_ready", {"sources": len(workspace.sources), "files": len(workspace.tree.files)})
+                    model["run"]["report_runs"] = [*model["run"].get("report_runs", []),
+                                                   {"id": run_id, "trace_id": run_span.trace_id or None,
+                                                    "generated_at": datetime.now(timezone.utc).isoformat()}]
+                    map_json = json.dumps(model, ensure_ascii=False, indent=2)
+                    write_outputs(out_dir, {"scenario-model": ("scenario_map.json", map_json)})
+                    _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
+                                    map_json=map_json, options=report_options or ReportOptions(),
+                                    client=None, spec=spec, model_timeout=model_timeout)
+                    journal.outcome = "completed" if model["run"].get("process_report") else "failed"
+                    run_span.set_output({"process_report": model["run"].get("process_report"),
+                                         "error": model["run"].get("process_report_error")})
                     return model
         finally:
             flush_tracing()
@@ -171,8 +254,10 @@ def add_cli_command(subparsers):
     scenario = command.add_mutually_exclusive_group(required=True)
     scenario.add_argument("--scenario-text", default="", help="Краткое описание выбранного варианта сценария")
     scenario.add_argument("--scenario-file", default="", help="UTF-8 файл с кратким описанием варианта")
+    scenario.add_argument("--from-map", default="",
+                          help="Перестроить отчёт по сохранённой scenario_map.json без нового исследования; нужны те же --source и --observability")
     command.add_argument("--source", action="append", required=True, help="Директория или ZIP с кодом; можно повторять")
-    command.add_argument("--out", default="scenario-map-out", help="Каталог HTML-карты и JSON")
+    command.add_argument("--out", default="", help="Каталог HTML-карты и JSON (по умолчанию scenario-map-out; с --from-map — папка карты)")
     command.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
     command.add_argument("--max-seconds", type=float, default=DEFAULT_MAX_SECONDS,
                          help="Общий мягкий лимит исследования в секундах, включая очередь и повторы (по умолчанию 7200)")
@@ -214,6 +299,9 @@ def command_main(args) -> int:
 
     if (args.business_file or args.runtime_log) and not args.observability:
         raise PkoError("Бизнес-описание и файл логов используются только с --observability.")
+    if args.from_map and not args.observability:
+        raise PkoError("--from-map перестраивает отчёт наблюдаемости: добавьте --observability.")
+    out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()
     # Inputs are checked before research so a bad file does not waste the research budget.
     business = load_business_text(args.business_file) if args.business_file else None
     runtime = (profile_runtime_log(args.runtime_log, parse_field_map(args.runtime_fields))
@@ -231,26 +319,30 @@ def command_main(args) -> int:
             print(f"Связь с моделью временно недоступна. Попытка {data['next_attempt']} "
                   f"из {data['max_attempts']} через {data['delay_seconds']:g} с.", flush=True)
 
-    model = run_scenario(scenario, args.source, Path(args.out), max_steps=args.max_steps,
-                         max_seconds=args.max_seconds, model_timeout=args.model_timeout,
-                         thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
-                         summary_mode=args.summary_mode, observability=args.observability,
-                         report_options=ReportOptions(max_requests=args.observability_max_requests,
-                                                      max_seconds=args.observability_max_seconds,
-                                                      business=business, runtime=runtime),
-                         on_event=event)
+    options = ReportOptions(max_requests=args.observability_max_requests, max_seconds=args.observability_max_seconds,
+                            business=business, runtime=runtime)
+    if args.from_map:
+        model = run_report_from_map(args.from_map, args.source, out, thinking=args.thinking,
+                                    model_timeout=args.model_timeout, report_options=options, on_event=event)
+        print(f"Отчёт перестроен по карте запуска {model['run'].get('id')}")
+    else:
+        model = run_scenario(scenario, args.source, out, max_steps=args.max_steps,
+                             max_seconds=args.max_seconds, model_timeout=args.model_timeout,
+                             thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
+                             summary_mode=args.summary_mode, observability=args.observability,
+                             report_options=options, on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
               "failed": "Исследование не выполнено"}
     print(labels.get(status, status))
     if model["run"].get("reason"):
         print(model["run"]["reason"])
-    print(f"Карта: {(Path(args.out).resolve() / 'scenario_map.html')}")
-    print(f"Данные: {(Path(args.out).resolve() / 'scenario_map.json')}")
+    print(f"Карта: {(out / 'scenario_map.html')}")
+    print(f"Данные: {(out / 'scenario_map.json')}")
     if model["run"].get("process_report"):
-        print(f"Отчёт наблюдаемости: {(Path(args.out).resolve() / 'process_report.json')}")
+        print(f"Отчёт наблюдаемости: {(out / 'process_report.json')}")
         if model["run"].get("handoff"):
-            print(f"Комплект передачи: {(Path(args.out).resolve() / 'handoff')}")
+            print(f"Комплект передачи: {(out / 'handoff')}")
         elif model["run"].get("handoff_error"):
             print(f"Комплект передачи не построен: {model['run']['handoff_error']}")
     elif model["run"].get("process_report_error"):

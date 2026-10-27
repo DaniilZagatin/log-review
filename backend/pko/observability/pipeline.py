@@ -72,7 +72,7 @@ def _accepted(result, errors: list[str]):
 
 
 def run_observability(model: dict, tree, *, stage_model: StageModel | None = None,
-                      options: ReportOptions | None = None) -> dict:
+                      options: ReportOptions | None = None, run_id: str | None = None) -> dict:
     """Build the process report for ``model`` while its source snapshot is alive."""
     options = options or ReportOptions()
     revision = map_revision(model)
@@ -80,7 +80,9 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
     map_complete = run.get("status") == "completed"
     partial_map = [] if map_complete else ["Карта частичная: выводы о полноте наблюдаемости процесса не делаются."]
     registry = EvidenceRegistry(tree)
-    report = {"report_version": REPORT_VERSION, "run_id": run.get("id"), "map_revision": revision,
+    # A report rerun over a saved map is its own run; map_run_id names the research run.
+    report = {"report_version": REPORT_VERSION, "run_id": run_id or run.get("id"), "map_run_id": run.get("id"),
+              "map_revision": revision,
               "map_status": run.get("status"), "stages": [], "logging": {}, "methodology": {}}
     state: dict = {}
 
