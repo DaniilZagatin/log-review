@@ -474,7 +474,6 @@ class TracedClient:
         if "cached_tokens" in usage:
             handle._raw("llm.token_count.prompt_details.cache_read", int(usage["cached_tokens"]))
         handle._raw("pko.llm.from_cache", bool(result.from_cache))
-        handle._raw("pko.llm.reasoning_chars", len(result.reasoning_content or ""))
         output = _reply_output(reply)
         handle.set_output(output)
         handle.finish()

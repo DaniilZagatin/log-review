@@ -90,6 +90,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
                     journal.outcome = model['run']['status']
+                    # A failed local journal must be visible in the result, not only on stderr.
+                    model["run"]["audit_status"] = "partial" if journal.failed else "complete"
                     run_span.set_attribute("pko.run.status", model["run"]["status"])
                     run_span.set_attribute("pko.model.mode", model['run'].get('model_mode', 'provider_default'))
                     with trace_span("render_map"):
@@ -230,6 +232,7 @@ def run_report_from_map(map_path, sources: list, out_dir: Path, *, spec=None, th
                                     map_json=map_json, options=report_options or ReportOptions(),
                                     client=None, spec=spec, model_timeout=model_timeout)
                     journal.outcome = "completed" if model["run"].get("process_report") else "failed"
+                    model["run"]["report_runs"][-1]["audit_status"] = "partial" if journal.failed else "complete"
                     run_span.set_output({"process_report": model["run"].get("process_report"),
                                          "error": model["run"].get("process_report_error")})
                     return model

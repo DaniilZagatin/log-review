@@ -15,6 +15,8 @@ from typing import Any
 from pko.util.paths import harden_file
 
 _CURRENT: ContextVar[Any] = ContextVar("pko_audit", default=None)
+_SPAN: ContextVar[str | None] = ContextVar("pko_audit_span", default=None)
+SCHEMA = "belka-audit/2"
 _PRIVATE = re.compile(r"reasoning|chain.of.thought|thinking|api.?key|password|secret|authorization|credential|access.?token", re.I)
 
 
@@ -49,6 +51,7 @@ class RunAudit:
     def __init__(self, path: Path, run_id: str):
         self.path, self.run_id = path, run_id
         self.sequence = 0
+        self.spans = 0
         self.failed = False
         self.clients: list[AuditedClient] = []
 
@@ -88,7 +91,8 @@ def current_audit() -> RunAudit | None:
 def audit_run(path: Path, run_id: str):
     audit = RunAudit(path, run_id)
     token = _CURRENT.set(audit)
-    audit.emit("run_started", scope="Наблюдаемые действия, материалы, ответы инструментов и объяснения выводов. Внутренние рассуждения не записываются.")
+    audit.emit("run_started", schema=SCHEMA,
+               scope="Наблюдаемые действия, материалы, ответы инструментов и объяснения выводов. Внутренние рассуждения не записываются.")
     try:
         yield audit
     except BaseException as exc:
@@ -111,16 +115,34 @@ def flush() -> None:
 
 @contextmanager
 def audit_span(name: str, attributes: dict):
-    record("span_started", name=name, attributes=attributes)
+    """A local span with its own ID and parent, so the tree survives without Phoenix.
+
+    Every started span ends with a terminal status, including cancellation and
+    exceptions; durations come from the monotonic clock.
+    """
+    audit = _CURRENT.get()
+    parent = _SPAN.get()
+    span_id = None
+    if audit is not None:
+        audit.spans += 1
+        span_id = f"span-{audit.spans}"
+    token = _SPAN.set(span_id)
+    started = time.monotonic()
+    record("span_started", name=name, span_id=span_id, parent_span_id=parent, attributes=attributes)
+    status, error = "ok", {}
     try:
         yield
     except BaseException as exc:
-        record("span_failed", name=name, error_type=type(exc).__name__, error_message=str(exc))
+        status = "interrupted" if isinstance(exc, (KeyboardInterrupt, GeneratorExit)) else "error"
+        error = {"error_type": type(exc).__name__, "error_message": str(exc)}
+        record("span_failed", name=name, span_id=span_id, parent_span_id=parent, **error)
         raise
     finally:
+        _SPAN.reset(token)
         if name == "scenario_research":
             flush()
-        record("span_finished", name=name)
+        record("span_finished", name=name, span_id=span_id, parent_span_id=parent, status=status,
+               duration_seconds=round(time.monotonic() - started, 3), **error)
 
 
 class AuditedClient:

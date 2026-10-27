@@ -255,6 +255,25 @@ class RunnerReportTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(content).hexdigest(), row["sha256"], row["name"])
         self.assertTrue((output / "handoff" / "metrics.csv").read_text(encoding="utf-8-sig").startswith("metric_id,"))
 
+    def test_local_journal_keeps_one_span_tree_with_terminal_statuses(self):
+        output = self.root / "traced"
+        with patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}):
+            result = run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True,
+                                  report_options=ReportOptions(client=ScriptedReportClient()))
+        self.assertEqual(result["run"]["audit_status"], "complete")
+        text = next((output / "audit").glob("run_*.txt")).read_text(encoding="utf-8")
+        entries = [json.loads(part.split("\n", 1)[1]) for part in text.split("\n=== ")[1:]]
+        started = {row["span_id"]: row for row in entries if row["event"] == "span_started"}
+        finished = {row["span_id"]: row for row in entries if row["event"] == "span_finished"}
+        self.assertEqual(set(started), set(finished), "every started span ends")
+        self.assertTrue(all(row["status"] in ("ok", "error", "interrupted") for row in finished.values()))
+        roots = [row for row in started.values() if row["parent_span_id"] is None]
+        self.assertEqual([row["name"] for row in roots], ["scenario_map_run"])
+        by_name = {row["name"]: row for row in started.values()}
+        self.assertEqual(started[by_name["event_binding_review"]["parent_span_id"]]["name"], "process_observability")
+        self.assertEqual(started[by_name["process_observability"]["parent_span_id"]]["name"], "scenario_map_run")
+        self.assertNotIn("reasoning_chars", text)
+
     def test_csv_cells_cannot_start_a_formula(self):
         self.assertEqual(safe_cell("=HYPERLINK(1)"), "'=HYPERLINK(1)")
         self.assertEqual(safe_cell("-1"), "'-1")
