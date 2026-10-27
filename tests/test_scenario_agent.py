@@ -20,11 +20,11 @@ class ScenarioAgentTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.workspace = build_workspace(sources(), self.root / "sources")
 
-    def test_one_session_builds_three_system_map(self):
+    def test_one_session_builds_operation_map_across_sources(self):
         client = ScriptedClient()
         model = run_agent(self.workspace, SCENARIO, SPEC, client=client)
         self.assertEqual(model["run"]["status"], "completed", model["run"])
-        self.assertEqual(len(model["systems"]), 3)
+        self.assertNotIn("systems", model)
         self.assertEqual(len(model["nodes"]), NODE_COUNT)
         self.assertEqual(len(model["edges"]), EDGE_COUNT)
         self.assertEqual(len(model["execution_reviews"]), 3)
@@ -34,7 +34,10 @@ class ScenarioAgentTests(unittest.TestCase):
         self.assertFalse(model["detail_review"]["semantic_completeness_verified"])
         operations = [operation for review in model["execution_reviews"] for operation in review["operations"]]
         self.assertEqual(len({operation["node_id"] for operation in operations}), OPERATION_COUNT)
-        self.assertEqual(sum(node["kind"] == "decision" for node in model["nodes"]), 2)
+        self.assertEqual({node["kind"] for node in model["nodes"]}, {"operation"})
+        self.assertEqual(sum(node["continuation_mode"] == "choice" for node in model["nodes"]), 2)
+        self.assertEqual(model["scenario"]["entry_operation_ids"], ["step-1"])
+        self.assertEqual(model["scenario"]["terminal_operation_ids"], ["step-5", "step-10", "step-18"])
         self.assertEqual(sum(edge["kind"] == "branch" for edge in model["edges"]), 4)
         self.assertEqual(sum(edge["kind"] in ("call", "event") for edge in model["edges"]), 2)
         self.assertIn("Учебный детерминированный", model["summary"])
@@ -61,7 +64,7 @@ class ScenarioAgentTests(unittest.TestCase):
         model = run_agent(self.workspace, SCENARIO, SPEC, client=ScriptedClient(), max_steps=8,
                           checkpoint=lambda state: saved.append(state))
         self.assertEqual(model["run"]["status"], "partial")
-        self.assertEqual(len(model["systems"]), 3)
+        self.assertNotIn("systems", model)
         self.assertTrue(saved)
         self.assertEqual(saved[-1]["run"]["status"], "partial")
 
@@ -109,6 +112,24 @@ class ScenarioAgentTests(unittest.TestCase):
                                           "--source", "first", "--source", "second"])
         self.assertEqual(args.source, ["first", "second"])
         self.assertFalse(hasattr(args, "journey_text"))
+
+    def test_cli_summary_settings_are_independent_of_research_mode(self):
+        from pko.cli import _build_parser
+        args = _build_parser().parse_args(["map-scenario", "--scenario-text", SCENARIO,
+            "--source", "sample", "--thinking", "--summary-max-tokens", "12288", "--summary-mode", "standard"])
+        self.assertTrue(args.thinking)
+        self.assertEqual(args.summary_max_tokens, 12288)
+        self.assertEqual(args.summary_mode, "standard")
+
+    def test_invalid_summary_settings_fail_before_provider_request(self):
+        from pko.errors import PkoError
+        from unittest.mock import Mock
+        for value in (True, 0, 511, 32769):
+            client = Mock(spec=ScriptedClient)
+            with self.subTest(value=value), self.assertRaises(PkoError):
+                run_scenario(SCENARIO, sources(), self.root / "invalid", spec=SPEC,
+                             client=client, summary_max_tokens=value)
+            client.chat.assert_not_called()
 
     def test_compaction_preserves_state_and_does_not_leave_orphan_tools(self):
         state = MapState(self.workspace, SCENARIO)
@@ -166,7 +187,9 @@ class ScenarioAgentTests(unittest.TestCase):
         self.assertEqual(json.loads((output / "scenario_map.json").read_text(encoding="utf-8"))["run"]["id"], result["run"]["id"])
         audit = next((output / "audit").glob("run_*.txt")).read_text(encoding="utf-8")
         self.assertIn("scenario_tool", audit)
-        self.assertNotIn("reasoning_content", audit)
+        import re
+        self.assertIsNone(re.search(r'"(?:thinking|reasoning_content|reasoning)"\s*:', audit),
+                          "Audit must not contain private reasoning fields")
         final_event = json.loads(audit[audit.rfind('\n{')+1:])
         self.assertEqual((final_event['event'], final_event['result']), ('run_finished', 'completed'))
 

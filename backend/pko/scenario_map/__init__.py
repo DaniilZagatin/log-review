@@ -1,1 +1,1 @@
-"""One researcher builds an evidence-backed scenario map across source systems."""
+"""One researcher builds an evidence-backed graph of atomic scenario operations."""

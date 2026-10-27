@@ -154,9 +154,11 @@ class AuditedClient:
         try:
             result = self.delegate.chat(messages, **kwargs)
         except BaseException as exc:
-            record("model_error", error_type=type(exc).__name__, error_message=str(exc), hint=getattr(exc, "hint", ""))
+            record("model_error", error_type=type(exc).__name__, error_message=str(exc), hint=getattr(exc, "hint", ""),
+                   finish_reason=getattr(exc, "finish_reason", ""), usage=getattr(exc, "usage", {}))
             raise
         record("model_response", text=result.text, tool_calls=result.tool_calls,
                usage=result.usage, from_cache=result.from_cache,
+               finish_reason=getattr(result, "finish_reason", ""),
                duration_seconds=round(time.monotonic() - started, 3))
         return result

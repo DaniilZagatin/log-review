@@ -31,8 +31,8 @@ class EvidenceRangeTests(unittest.TestCase):
         return {"path": self.path, "line_start": start, "line_end": end, **extra}
 
     def system(self, evidence, **extra):
-        return self.state.dispatch("upsert_system", {
-            "name": "АС обработки обращений", "source_ids": ["source-1"],
+        return self.state.dispatch("upsert_step", {
+            "name": "Обработка обращения",
             "evidence_status": "observed", "evidence": evidence, **extra,
         })
 
@@ -42,7 +42,7 @@ class EvidenceRangeTests(unittest.TestCase):
         with patch.object(self.workspace.tree, "read", side_effect=AssertionError("Source reread")):
             result = self.system([self.ref()])
         self.assertTrue(result["ok"], result)
-        citation = self.state.model["systems"][0]["evidence"][0]
+        citation = self.state.model["nodes"][0]["evidence"][0]
         expected = "\n".join(read_before[self.path][number] for number in range(43, 68)).strip()
         self.assertEqual(citation, {**self.ref(), "quote": expected})
         self.assertNotIn("}", citation["quote"])
@@ -81,7 +81,7 @@ class EvidenceRangeTests(unittest.TestCase):
         quote = "\n".join(self.state._reads[self.path][number] for number in (43, 44)).strip()
         result = self.system([self.ref(end=44, quote=quote)])
         self.assertTrue(result["ok"], result)
-        self.assertEqual(self.state.model["systems"][0]["evidence"][0]["quote"], quote)
+        self.assertEqual(self.state.model["nodes"][0]["evidence"][0]["quote"], quote)
 
     def test_range_requires_each_line_even_if_surrounding_lines_were_read(self):
         self.state.observe_read(self.path, 43, 1)
@@ -107,7 +107,7 @@ class EvidenceRangeTests(unittest.TestCase):
             with self.subTest(start=start, end=end):
                 result = self.system([self.ref(start, end)])
                 self.assertFalse(result["ok"])
-                self.assertEqual(self.state.model["systems"], [])
+                self.assertEqual(self.state.model["nodes"], [])
 
     def test_range_only_citations_keep_masked_secrets_and_are_deep_copied(self):
         path = "source-1/channel.py"
@@ -118,10 +118,10 @@ class EvidenceRangeTests(unittest.TestCase):
         refs[0]["line_start"] = 1
         model = self.state.snapshot()
         self.assertNotIn("not-for-output", json.dumps(model))
-        self.assertEqual(model["systems"][0]["evidence"][0]["line_start"], 3)
-        self.assertEqual(model["systems"][0]["evidence"][0]["quote"], self.state._reads[path][3].strip())
-        model["systems"][0]["evidence"][0]["quote"] = "changed in copy"
-        self.assertNotEqual(self.state.model["systems"][0]["evidence"][0]["quote"], "changed in copy")
+        self.assertEqual(model["nodes"][0]["evidence"][0]["line_start"], 3)
+        self.assertEqual(model["nodes"][0]["evidence"][0]["quote"], self.state._reads[path][3].strip())
+        model["nodes"][0]["evidence"][0]["quote"] = "changed in copy"
+        self.assertNotEqual(self.state.model["nodes"][0]["evidence"][0]["quote"], "changed in copy")
 
     def test_mixed_invalid_evidence_does_not_partially_apply_or_consume_ids(self):
         self.state.observe_read(self.path, 43, 25)
@@ -131,7 +131,7 @@ class EvidenceRangeTests(unittest.TestCase):
         self.assertEqual(before, self.state.snapshot())
         accepted = self.system([self.ref(43, 44)])
         self.assertTrue(accepted["ok"], accepted)
-        self.assertEqual(accepted["id"], "sys-1")
+        self.assertEqual(accepted["id"], "step-1")
 
     def test_range_only_works_for_notes_groups_nodes_and_transition_endpoints(self):
         self.state.observe_read(self.path, 43, 25)
@@ -144,7 +144,7 @@ class EvidenceRangeTests(unittest.TestCase):
         self.assertTrue(group["ok"], group)
         nodes = []
         for name in ("Проверить обращение", "Сохранить обращение"):
-            result = self.state.dispatch("upsert_step", {"name": name, "system_id": system["id"], "group_id": group["id"],
+            result = self.state.dispatch("upsert_step", {"name": name, "group_id": group["id"],
                 "evidence_status": "observed", "evidence": evidence})
             self.assertTrue(result["ok"], result)
             nodes.append(result["id"])
@@ -176,154 +176,6 @@ class EvidenceRangeTests(unittest.TestCase):
             self.assertTrue({"path", "line_start", "line_end"} <= set(shape["required"]))
 
 
-class SystemBoundaryTests(unittest.TestCase):
-    def setUp(self):
-        self.helper = fixtures.ScenarioMapTests()
-        self.helper.setUp()
-        self.state = self.helper.state
-
-    def test_external_system_can_be_discovered_in_calling_system_code(self):
-        evidence = self.helper.cite(start=2, end=2)
-        result = self.state.dispatch("upsert_system", {
-            "name": "АС выпуска карт", "source_ids": ["source-1"], "implementation": "external",
-            "description": "Выпускает карту по полученной заявке", "basis": "В клиентском канале обнаружен вызов сервиса выпуска карт; его реализация не передана.",
-            "evidence_status": "observed", "evidence": evidence,
-        })
-        self.assertTrue(result["ok"], result)
-        system = self.state.model["systems"][0]
-        self.assertEqual(system["implementation"], "external")
-        self.assertEqual(system["source_ids"], ["source-1"])
-        self.assertEqual(system["evidence"][0]["path"], "source-1/channel.py")
-        self.assertIn("реализация не передана", system["basis"])
-        # Knowing the boundary is not evidence of the external execution body.
-        rejected = self.state.dispatch("upsert_step", {
-            "name": "Выпустить карту", "system_id": system["id"], "evidence_status": "observed", "evidence": evidence,
-        })
-        self.assertFalse(rejected["ok"])
-
-    def test_implementation_defaults_to_unknown_and_is_not_inferred_from_folder(self):
-        system_id = self.helper.system()
-        system = next(row for row in self.state.model["systems"] if row["id"] == system_id)
-        self.assertEqual(system["implementation"], "unknown")
-
-    def test_implementation_and_business_basis_are_validated_transactionally(self):
-        args = {"name": "АС канала", "source_ids": ["source-1"], "evidence_status": "observed", "evidence": self.helper.cite()}
-        for extra in ({"implementation": "directory"}, {"basis": {"untrusted": "object"}}):
-            before = self.state.snapshot()
-            result = self.state.dispatch("upsert_system", {**args, **extra})
-            self.assertFalse(result["ok"])
-            self.assertEqual(before, self.state.snapshot())
-        accepted = self.state.dispatch("upsert_system", {**args, "implementation": "provided", "basis": "Передана реализация приёма обращения"})
-        self.assertTrue(accepted["ok"], accepted)
-        self.assertEqual(accepted["id"], "sys-1")
-
-    def test_declaring_as_implementation_does_not_authorize_unread_evidence(self):
-        result = self.state.dispatch("upsert_system", {
-            "name": "АС банка", "implementation": "provided", "source_ids": ["source-1"], "evidence_status": "observed",
-            "evidence": [{"path": "source-1/channel.py", "line_start": 1, "line_end": 1}],
-        })
-        self.assertFalse(result["ok"])
-        self.assertIn("read_file", result["error"])
-        self.assertEqual(self.state.model["systems"], [])
-
-    def test_cross_system_handoff_accepts_both_previously_read_ranges_without_quotes(self):
-        left = self.helper.node(self.helper.system())
-        right = self.helper.node(self.helper.system(2), evidence=self.helper.cite("source-2/cards.py", 1, 2))
-        self.state.observe_read("source-1/channel.py", 2, 1)
-        sender = [{"path": "source-1/channel.py", "line_start": 2, "line_end": 2}]
-        receiver = [{"path": "source-2/cards.py", "line_start": 1, "line_end": 2}]
-        with patch.object(self.state.workspace.tree, "read", side_effect=AssertionError("Source reread")):
-            result = self.state.dispatch("upsert_transition", {
-                "source": left, "target": right, "kind": "call", "evidence_status": "observed",
-                "evidence": sender, "sender_evidence": sender, "receiver_evidence": receiver,
-                "channel": "HTTP POST /cards", "contract": "request -> accept(request)",
-                "basis": "Канал отправляет заявку в обработчик выпуска карт по подтверждённому маршруту.",
-            })
-        self.assertTrue(result["ok"], result)
-        edge = self.state.model["edges"][0]
-        self.assertIn("bank.post", edge["sender_evidence"][0]["quote"])
-        self.assertIn("def accept", edge["receiver_evidence"][0]["quote"])
-        self.assertNotIn("quote", sender[0])
-        self.assertNotIn("quote", receiver[0])
-
-
-class ExternalImplementationReviewTests(unittest.TestCase):
-    def setUp(self):
-        self.helper = fixtures.ScenarioMapTests()
-        self.helper.setUp()
-        self.state = self.helper.state
-        self.local, self.start, self.end = self.helper.complete_small_map()
-        self.helper.review_current_operations()
-        self.stage = self.state.model["groups"][0]["id"]
-
-    def inferred_operation(self, implementation):
-        system = self.helper.good("upsert_system", name="АС дополнительной обработки",
-            source_ids=["source-1"], implementation=implementation,
-            evidence_status="observed", evidence=self.helper.cite())["id"]
-        node = self.helper.good("upsert_step", name="Обработать обращение в смежной АС", kind="external",
-            system_id=system, group_id=self.stage, evidence_status="inferred", evidence=self.helper.cite())["id"]
-        self.helper.good("upsert_transition", source=self.start, target=node, kind="call",
-                         evidence_status="inferred", evidence=self.helper.cite())
-        self.helper.good("upsert_transition", source=node, target=self.end, kind="return",
-                         evidence_status="inferred", evidence=self.helper.cite())
-        return system, node
-
-    def test_inferred_external_operation_with_gap_does_not_require_invented_review(self):
-        system, node = self.inferred_operation("external")
-        self.helper.good("add_gap", description="Реализация смежной АС не передана; её внутренняя обработка не установлена",
-                         node_ids=[node], system_ids=[system])
-        self.helper.good('review_semantics', **fixtures.semantic_payload(self.state))
-        result = self.state.dispatch("finish", {"summary": "Исследована доступная реализация, внешний участок отмечен явно"})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["status"], "partial")
-        detail = self.state.snapshot()["detail_review"]
-        self.assertEqual(detail["required_nodes"], 1)
-        self.assertEqual(detail["mapped_nodes"], 1)
-        self.assertEqual(detail["unmapped_node_ids"], [])
-        self.assertEqual(detail["status"], "partial")
-        self.assertEqual({review["system_id"] for review in self.state.model["execution_reviews"]}, {self.local})
-
-    def test_inferred_external_operation_requires_node_addressed_gap(self):
-        system, node = self.inferred_operation("external")
-        # A general system note must not hide which action remains unverified.
-        self.helper.good("add_gap", description="Сведения о смежной АС ограничены", system_ids=[system])
-        result = self.state.dispatch("finish", {"summary": "Внешняя АС упомянута без пробела конкретного действия"})
-        self.assertFalse(result["ok"])
-        self.assertIn(node, result["error"])
-        self.assertIn("gap", result["error"])
-        self.assertNotIn("не сопоставлен с атомарной операцией", result["error"])
-
-    def test_inferred_provided_operation_still_requires_execution_review_even_with_gap(self):
-        system, node = self.inferred_operation("provided")
-        self.helper.good("add_gap", description="Трактовка бизнес-эффекта требует уточнения", node_ids=[node], system_ids=[system])
-        rejected = self.state.dispatch("finish", {"summary": "Реализация передана, но действие ещё не обследовано"})
-        self.assertFalse(rejected["ok"])
-        self.assertIn(f"{node}: шаг не сопоставлен", rejected["error"])
-        self.assertIn(node, self.state.snapshot()["detail_review"]["unmapped_node_ids"])
-        self.helper.good("review_execution", **self.helper.review_payload(system))
-        accepted = self.state.dispatch("finish", {"summary": "Переданная реализация обследована; трактовка остаётся предположением"})
-        self.assertTrue(accepted["ok"], accepted)
-        self.assertEqual(accepted["status"], "partial")
-
-    def test_external_implementation_cannot_receive_a_fabricated_execution_review(self):
-        system, _ = self.inferred_operation("external")
-        payload = self.helper.review_payload(system)
-        before = self.state.snapshot()
-        result = self.state.dispatch("review_execution", payload)
-        self.assertFalse(result["ok"])
-        self.assertEqual(self.state.snapshot(), before)
-        self.assertFalse(any(review["system_id"] == system for review in self.state.model["execution_reviews"]))
-
-    def test_changing_reviewed_system_to_external_is_rejected_transactionally(self):
-        system, _ = self.inferred_operation("provided")
-        self.helper.good("review_execution", **self.helper.review_payload(system))
-        current = deepcopy(next(row for row in self.state.model["systems"] if row["id"] == system))
-        before = self.state.snapshot()
-        result = self.state.dispatch("upsert_system", {**current, "implementation": "external"})
-        self.assertFalse(result["ok"])
-        self.assertEqual(self.state.snapshot(), before)
-
-
 class ReviewedMapPresentationTests(unittest.TestCase):
     def setUp(self):
         self.helper = fixtures.ScenarioMapTests()
@@ -331,7 +183,7 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         self.state = self.helper.state
         self.system_id, self.start_id, self.end_id = self.helper.complete_small_map()
         self.helper.review_current_operations()
-        self.node = deepcopy(next(node for node in self.state.model["nodes"] if node["kind"] == "action"))
+        self.node = deepcopy(next(node for node in self.state.model["nodes"] if node["id"] not in self.state.model["scenario"]["entry_operation_ids"] + self.state.model["scenario"]["terminal_operation_ids"]))
 
     def finish(self):
         # Refresh only the separate semantic assessment; execution review
@@ -354,7 +206,6 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         old_stage = self.node["group_id"]
         new_stage = self.helper.good("upsert_group", name="Проверка обращения", kind="stage", result="Сведения проверены", evidence=self.node["evidence"])["id"]
         self.helper.good("upsert_step", **{**self.node, "group_id": new_stage})
-        self.helper.good("remove_element", kind="group", id=old_stage)
         result = self.finish()
         self.assertTrue(result["ok"], result)
 
@@ -395,13 +246,13 @@ class GraphFrontierTests(unittest.TestCase):
     def test_full_roster_keeps_every_existing_node_without_quotes_or_prose(self):
         node_ids = []
         for number in range(45):
-            node_ids.append(self.helper.good("upsert_step", name=f"Действие {number}", kind="action",
-                system_id=self.system_id, description="Описание " * 100, evidence_status="observed",
+            node_ids.append(self.helper.good("upsert_step", name=f"Действие {number}", kind="operation",
+                 description="Описание " * 100, evidence_status="observed",
                 evidence=self.helper.cite())["id"])
         frontier = self.state.graph_frontier()
         self.assertEqual({node["id"] for node in frontier["nodes"]}, set(node_ids))
         for node in frontier["nodes"]:
-            self.assertEqual(set(node), {"id", "name", "kind", "system_id", "group_id"})
+            self.assertEqual(set(node), {"id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition"})
         self.assertEqual(set(frontier["unlinked"]), set(node_ids))
         self.assertNotIn("quote", json.dumps(frontier))
         frontier["nodes"][0]["name"] = "Changed by caller"
@@ -413,7 +264,7 @@ class GraphFrontierTests(unittest.TestCase):
         end = self.helper.node(self.system_id, "end")
         detached = self.helper.node(self.system_id)
         self.helper.edge(start, action)
-        self.helper.edge(action, end, kind="data")
+        self.state.model["edges"].append({"id":"legacy-data", "source":action, "target":end, "kind":"data", "condition":""})
         gap = self.helper.good("add_gap", description="Не найден переход к завершению", node_ids=[action, end])["id"]
         frontier = self.state.graph_frontier()
         self.assertEqual(frontier["starts"], [start])

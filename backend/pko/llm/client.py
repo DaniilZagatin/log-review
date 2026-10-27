@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ssl
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,7 @@ class ChatResult:
     from_cache: bool = False
     tool_calls: list[dict[str, Any]] | None = None
     reasoning_content: str = ""
+    finish_reason: str = ""
 
 
 # Бюджет ответа по умолчанию. Прежние 2000 не оставляли места тексту, когда
@@ -83,7 +85,8 @@ class ChatClient:
 
     def chat(self, messages: list[dict[str, Any]], temperature: float = 0.0,
              max_tokens: int = DEFAULT_MAX_TOKENS,
-             tools: list[dict[str, Any]] | None = None) -> ChatResult:
+             tools: list[dict[str, Any]] | None = None,
+             enable_thinking: bool | None = None) -> ChatResult:
         payload: dict[str, Any] = {
             "model": self.spec.upstream_model,
             "messages": messages,
@@ -93,13 +96,26 @@ class ChatClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        extra_body = self.spec.extra_body
+        extra_body = deepcopy(self.spec.extra_body)
+        template = extra_body.get('chat_template_kwargs') if isinstance(extra_body, dict) else None
+        # Override only a capability already configured for this endpoint. Do
+        # not invent provider-specific options for an arbitrary compatible API.
+        if enable_thinking is not None and isinstance(template, dict) and 'enable_thinking' in template:
+            template['enable_thinking'] = enable_thinking
 
         response = self._create(payload, extra_body=extra_body)
-        text, tool_calls, reasoning = self._message_of(response)
         usage = self._usage_of(response)
+        finish_reason = str(getattr(response.choices[0], 'finish_reason', '') or '') if getattr(response, 'choices', None) else ''
+        try:
+            text, tool_calls, reasoning = self._message_of(response)
+        except LlmError as exc:
+            # Public diagnostics survive an empty response; never attach the
+            # provider message, which may contain private reasoning.
+            exc.finish_reason = finish_reason
+            exc.usage = usage
+            raise
         return ChatResult(text=text, usage=usage, tool_calls=tool_calls,
-                          reasoning_content=reasoning)
+                          reasoning_content=reasoning, finish_reason=finish_reason)
 
     # --- вызов модели -----------------------------------------------------
 

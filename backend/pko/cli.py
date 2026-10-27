@@ -12,7 +12,7 @@ from pko.util.env import load_env
 def _build_parser() -> argparse.ArgumentParser:
     from pko.scenario_map.runner import add_cli_command
     parser = argparse.ArgumentParser(
-        prog="pko", description="Белка: подробная карта выбранного сценария по коду нескольких АС.")
+        prog="pko", description="Белка: подробная карта атомарных операций выбранного сценария по исходникам.")
     parser.add_argument("--version", action="version", version=f"pko {__version__}")
     add_cli_command(parser.add_subparsers(dest="command", required=True))
     return parser

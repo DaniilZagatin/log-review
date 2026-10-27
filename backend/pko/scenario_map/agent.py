@@ -17,7 +17,7 @@ from pko.code_tools.tools import TOOL_SCHEMAS, ToolBox
 from pko.scenario_map.schema import MapState
 from pko.scenario_map.tools import TOOLS
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
-from pko.scenario_map.context import compact_context, context_budget
+from pko.scenario_map.context import compact_context, context_budget, UNFINISHED_TASK_STATUSES
 from pko.scenario_map.compaction import compact_research_context
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
@@ -25,6 +25,8 @@ MAX_TOOL_CHARS = 24000
 DEFAULT_MAX_STEPS = 180
 DEFAULT_MAX_SECONDS = 7200
 DEFAULT_MODEL_TIMEOUT = 900
+DEFAULT_SUMMARY_MAX_TOKENS = 8192
+DEFAULT_SUMMARY_MODE = "standard"
 
 
 class DeadlineClient(ChatClient):
@@ -102,7 +104,7 @@ class GraphFrontierGuide:
         model = state.model
         nodes = model.get("nodes", [])
         ids = {node["id"] for node in nodes}
-        executable = {node["id"] for node in nodes if node.get("kind") not in ("start", "end")}
+        executable = ids
         edges = [edge for edge in model.get("edges", []) if edge.get("kind") != "data"]
         signature = _json(sorted((edge.get("source", ""), edge.get("target", ""),
                                   edge.get("kind", ""), edge.get("condition", "")) for edge in edges))
@@ -121,10 +123,10 @@ class GraphFrontierGuide:
             incoming = {edge.get("target") for edge in edges}
             outgoing = {edge.get("source") for edge in edges}
             frontier = {
-                "starts": [node["id"] for node in nodes if node.get("kind") == "start"],
+                "entry_operation_ids": model.get("scenario", {}).get("entry_operation_ids", []),
                 "unlinked": sorted(ids - incoming - outgoing),
                 "open_exits": [node["id"] for node in nodes
-                               if node.get("kind") != "end" and node["id"] not in outgoing],
+                               if node["id"] not in model.get("scenario", {}).get("terminal_operation_ids", []) and node["id"] not in outgoing],
                 "pending_gaps": model.get("gaps", []),
             }
         gapped = {identifier for gap in frontier.get("pending_gaps", [])
@@ -135,17 +137,17 @@ class GraphFrontierGuide:
         self.at_last_nudge = ids
         # Include only navigation metadata. Full descriptions and evidence stay
         # in inspect_map; the prompt does not assert how the nodes should connect.
-        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name", "kind", "system_id", "group_id")}
+        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name", "group_id")}
                   for node in nodes if node["id"] in pending][:12]
         return (
             "[scenario-graph-frontier]\n"
             "Добавлено несколько действий без продвижения по связям. Перед расширением карты "
             "заверши известный фрагмент: сопоставь новые действия с уже созданными ID, проверь "
-            "порядок, условия, возвраты и связи с прежними узлами. Не повторяй существующее начало. "
+            "порядок, условия, возвраты и связи с прежними операциями. Не повторяй уже существующие операции. "
             "Связывай только по прочитанному коду; при неизвестном стыке сохрани адресный gap "
-            "и продолжай доступную ветку. Не соединяй узлы ради связности. Граница АС сама по себе "
-            "не доказывает передачу управления. Цитаты уже доступны в read_fragments.\n" +
-            _json({"starts": frontier.get("starts", []), "pending_count": len(pending),
+            "и продолжай доступную ветку. Не соединяй узлы ради связности. При нескольких выходах "
+            "каждый переход имеет смысловое условие для карточки исходной операции. Цитаты уже доступны в read_fragments.\n" +
+            _json({"entry_operation_ids": frontier.get("entry_operation_ids", model.get("scenario", {}).get("entry_operation_ids", [])), "pending_count": len(pending),
                    "pending_nodes": roster, "listed_all": len(pending) <= len(roster),
                    "recover": "inspect_map(section='frontier'); при необходимости nodes/edges/gaps"}))
 
@@ -192,9 +194,10 @@ class ResearchTools:
                 payload = {"ok": result.ok, "content": content, "meta": result.meta}
                 if evidence_reference:
                     payload["evidence_reference"] = evidence_reference
-                    payload["research_tasks"] = [{k: t[k] for k in ("id", "kind", "target", "status")}
+                    payload["research_tasks"] = [{k: t.get(k, []) if k == "child_task_ids" else t.get(k, "")
+                                                  for k in ("id", "kind", "target", "status", "child_task_ids")}
                         for t in self.state.model["research_tasks"]
-                        if t['status'] == 'open' and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
+                        if t['status'] in UNFINISHED_TASK_STATUSES and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
                     payload["research_tasks_hint"] = "Вложенные исполнители и промпты — часть реализации. Раскройте через save_research_task; полный реестр: inspect_map(section='research_tasks')."
                     payload["evidence_hint"] = (
                         "Для основания укажи path и нужный прочитанный диапазон line_start/line_end. "
@@ -217,14 +220,21 @@ class ResearchTools:
 def run_agent(workspace, scenario: str, spec, *, client=None,
               max_steps: int = DEFAULT_MAX_STEPS, max_seconds: float = DEFAULT_MAX_SECONDS,
               model_timeout: float = DEFAULT_MODEL_TIMEOUT,
+              summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
+              summary_mode: str = DEFAULT_SUMMARY_MODE,
               checkpoint: Callable[[dict], None] | None = None,
               on_event: Callable[[str, dict], None] | None = None) -> dict:
     if max_steps < 1 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
         raise ValueError("Лимиты исследования и ожидания модели должны быть конечными положительными числами")
+    if (isinstance(summary_max_tokens, bool) or not isinstance(summary_max_tokens, int) or
+            not 512 <= summary_max_tokens <= 32768 or summary_mode not in {"standard", "inherit"}):
+        raise ValueError("Суммаризация: summary_max_tokens от 512 до 32768; summary_mode standard или inherit")
     state = MapState(workspace, scenario)
     state.model["run"].update({"status": "running", "steps": 0, "model": spec.model,
                                "model_timeout_seconds": model_timeout, "max_seconds": max_seconds})
-    mode = (getattr(spec, 'extra_body', None) or {}).get('chat_template_kwargs', {}).get('enable_thinking')
+    extra_body = getattr(spec, 'extra_body', None)
+    template = extra_body.get('chat_template_kwargs') if isinstance(extra_body, dict) else None
+    mode = template.get('enable_thinking') if isinstance(template, dict) else None
     state.model['run']['model_mode'] = 'reasoning' if mode is True else 'standard' if mode is False else 'provider_default'
     record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
            context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds)
@@ -251,8 +261,13 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     failure_guidance_used = False
     next_compaction_step = 1
     window = spec.context_window or 64000
+    summary_tokens = min(summary_max_tokens, max(512, window // 4))
     message_budget, response_tokens = context_budget(window, schemas)
     state.model["run"]["context_budget_chars"] = message_budget
+    state.model["run"].update(summary_max_tokens=summary_tokens, summary_mode=summary_mode)
+    state.model["run"]["summary_effective_mode"] = (
+        "standard" if summary_mode == "standard" and isinstance(template, dict) and "enable_thinking" in template
+        else state.model['run']['model_mode'])
     audited_client = None
 
     def save():
@@ -286,10 +301,14 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                                 # One request, no tools or nested retry loop. The
                                 # same configured provider and deadline are used.
                                 state.model["run"]["context_summary_calls"] = state.model["run"].get("context_summary_calls", 0) + 1
-                                return audited_client.chat(summary_messages, tools=None, temperature=0,
-                                                           max_tokens=min(4096, response_tokens))
+                                options = {"tools": None, "temperature": 0, "max_tokens": summary_tokens}
+                                if summary_mode == "standard":
+                                    options["enable_thinking"] = False
+                                return audited_client.chat(summary_messages, **options)
 
+                        summary_budget = min(message_budget, max(0, int((window - summary_tokens - 2048) * 1.6)))
                         compacted = compact_research_context(messages, state, message_budget,
+                                                             summary_budget=summary_budget,
                                                              summarize=summarize, brief=_brief)
                         if compacted is not messages:
                             messages = compacted

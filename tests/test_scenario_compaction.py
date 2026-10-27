@@ -15,7 +15,7 @@ from test_scenario_schema import workspace
 
 class ScenarioCompactionTests(unittest.TestCase):
     def setUp(self):
-        self.state = MapState(workspace(1), "Сценарий в одной АС")
+        self.state = MapState(workspace(1), "Сценарий обработки заявки")
         self.state.observe_read("source-1/channel.py", 1, 2)
         self.state.model["run"]["steps"] = 9
         self.prefix = [{"role": "system", "content": "immutable rules"},
@@ -67,7 +67,8 @@ class ScenarioCompactionTests(unittest.TestCase):
     def test_bad_summary_and_provider_error_fall_back_once_without_losing_existing_summary(self):
         self.compress(lambda _: scripted_summary())
         previous = deepcopy(self.state.model["context_summary"])
-        for bad in (ChatResult(text="invalid", usage={}),
+        for bad in (ChatResult(text="", usage={}), ChatResult(text="invalid", usage={}),
+                    ChatResult(text=scripted_summary().text, usage={"completion_tokens": 4096}, finish_reason="length"),
                     ChatResult(text="{}", usage={}, tool_calls=[{"function": {"name": "finish"}}]),
                     RuntimeError("provider offline")):
             with self.subTest(bad=type(bad).__name__):
@@ -159,7 +160,7 @@ class ScenarioCompactionTests(unittest.TestCase):
     def test_graph_ids_and_brief_have_priority_and_full_recovery_when_shortened(self):
         state = Mock()
         state.snapshot.return_value = {"nodes": [
-            {"id": f"step-{n}", "name": f"Действие {n}", "kind": "action"} for n in range(28)],
+            {"id": f"step-{n}", "name": f"Действие {n}", "kind": "operation"} for n in range(28)],
             "research_brief": {"revision": 3, "status": "working_hypothesis",
                                "project_overview": "Назначение " * 150,
                                "scenario_alignment": "Признаки варианта " * 100,
@@ -176,6 +177,18 @@ class ScenarioCompactionTests(unittest.TestCase):
                 ids = identity.get("all_node_ids") or [row["id"] for row in identity["nodes"]]
                 self.assertEqual(len(ids), 28)
             self.assertLessEqual(_size(result), budget)
+
+    def test_partially_investigated_tasks_remain_open_and_keep_child_dependencies(self):
+        self.state.model['research_tasks'] = [
+            {'id': 'task-1', 'kind': 'executor', 'target': 'Dispatcher.createAgent',
+             'status': 'analyzed', 'child_task_ids': ['task-2'], 'evidence': [], 'node_ids': []},
+            {'id': 'task-2', 'kind': 'prompt', 'target': 'Prompt.instructions',
+             'status': 'read', 'child_task_ids': [], 'evidence': [], 'node_ids': []},
+        ]
+        payload = json.loads(summary_request(self.history(), self.state, 16000)[1]['content'])
+        self.assertEqual(payload['current_state']['open_task_count'], 2)
+        self.assertEqual(payload['current_state']['open_tasks'][0]['child_task_ids'], ['task-2'])
+        self.assertNotIn('systems', payload['current_state']['counts'])
 
 
 if __name__ == "__main__":

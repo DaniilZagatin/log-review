@@ -41,11 +41,11 @@ class Document(HTMLParser):
 class ScenarioRenderTests(unittest.TestCase):
     def model(self):
         return {
-            "schema_version": "1.0",
-            "scenario": {"title": "Оформление карты", "description": "Действующий клиент"},
+            "schema_version": "2.0",
+            "scenario": {"title": "Оформление карты", "description": "Действующий клиент",
+                         "entry_operation_ids": ["node-1"], "terminal_operation_ids": ["node-1"]},
             "sources": [{"id": "src-1", "name": "Заявки", "kind": "directory", "file_count": 2}],
-            "systems": [{"id": "as-1", "name": "Заявки", "source_ids": ["src-1"]}],
-            "nodes": [{"id": "node-1", "name": "Принять заявку", "kind": "start", "system_id": "as-1", "evidence_status": "unknown", "evidence": []}],
+            "nodes": [{"id": "node-1", "name": "Принять заявку", "kind": "operation", "evidence_status": "unknown", "evidence": []}],
             "edges": [], "gaps": [], "run": {"status": "partial", "steps": 3},
         }
 
@@ -163,7 +163,7 @@ class ScenarioRenderTests(unittest.TestCase):
     def test_single_canvas_preserves_only_supplied_semantic_edges(self):
         model = self.model()
         model["nodes"].append({"id": "node-2", "name": "Неизвестный участок",
-                               "kind": "external", "system_id": "as-2",
+                               "kind": "operation",
                                "evidence_status": "unknown", "evidence": []})
         model["gaps"] = [{"id": "gap-1", "description": "Переход не установлен",
                           "node_ids": ["node-1", "node-2"]}]
@@ -188,11 +188,101 @@ class ScenarioRenderTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), [])
 
+    def test_new_methodology_has_no_legacy_warning_or_arrow_labels(self):
+        model = self.model()
+        result = render_scenario_map(model)
+        document = Document(result)
+        elements = {attrs.get("id"): attrs for _, attrs in document.elements}
+        self.assertIn("hidden", elements["legacy-note"])
+        self.assertNotIn("edge-label", result)
+        self.assertIn("Условия выбора следующих операций указаны в карточке исходной операции", result)
+        self.assertEqual(json.loads(document.scripts[0]["text"]), model)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js нужен для проверки синтаксиса HTML")
+    def test_generated_browser_script_has_valid_javascript_syntax(self):
+        script = Document(render_scenario_map(self.model())).scripts[-1]["text"]
+        result = subprocess.run([shutil.which("node"), "--check"], input=script,
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js нужен для проверки подсветки путей")
+    def test_selected_operation_highlights_complete_paths_without_bypass(self):
+        script = Document(render_scenario_map(self.model())).scripts[-1]["text"]
+        helper = script[script.index("function scenarioNodeScope("):script.index("function updateHighlight(")]
+        cases = [
+            # Branches converge before and after the selection. The a->f
+            # shortcut has highlighted endpoints but never visits s.
+            ("branching", "s", ["a>b", "a>c", "b>s", "c>s", "s>d", "s>e", "d>f", "e>f",
+                                 "a>f", "b>off", "off>other", "x>y"],
+             {"a", "b", "c", "s", "d", "e", "f"},
+             {"a>b", "a>c", "b>s", "c>s", "s>d", "s>e", "d>f", "e>f"}),
+            # Cycles and a selected self-loop remain reachable; disconnected
+            # cycles and self-loops must neither hang nor enter the scope.
+            ("cycles", "s", ["a>s", "s>b", "b>s", "b>c", "c>d", "d>c", "s>s", "x>y", "y>x", "x>x"],
+             {"a", "s", "b", "c", "d"}, {"a>s", "s>b", "b>s", "b>c", "c>d", "d>c", "s>s"}),
+            ("isolated", "z", ["x>y", "x>x"], {"z"}, set()),
+        ]
+        # A long path also guards against a recursive traversal overflowing
+        # the browser stack when either side of the selected operation grows.
+        chain = [f"n{i}>n{i + 1}" for i in range(12000)]
+        cases.append(("deep_path", "n6000", chain, {f"n{i}" for i in range(12001)}, set(chain)))
+        payload = [{"selected": selected, "edges": [
+            {"id": edge, "source": edge.split(">")[0], "target": edge.split(">")[1]} for edge in edges
+        ]} for _, selected, edges, _, _ in cases]
+        runner = helper + """
+const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
+console.log(JSON.stringify(input.map(item=>{const scope=scenarioNodeScope(item.selected,item.edges);
+ return {nodes:[...scope.nodes],edges:[...scope.edges]};})));
+"""
+        result = subprocess.run([shutil.which("node"), "-e", runner], input=json.dumps(payload),
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scopes = json.loads(result.stdout)
+        self.assertEqual(len(scopes), len(cases))
+        for (name, _, _, expected_nodes, expected_edges), scope in zip(cases, scopes):
+            with self.subTest(name=name):
+                self.assertEqual(set(scope["nodes"]), expected_nodes)
+                self.assertEqual(set(scope["edges"]), expected_edges)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js нужен для проверки карточки операции")
+    def test_completion_condition_is_shown_only_when_supplied(self):
+        # Execute the actual card renderer and text-field helper with a small
+        # DOM double; no browser package is needed for this data contract.
+        script = Document(render_scenario_map(self.model())).scripts[-1]["text"]
+        helpers = "\n".join(line for line in script.splitlines() if line.startswith(
+            ("const array =", "const text =", "const el =", "function field(")))
+        card = script[script.index("function showNode(node){"):script.index("function showEdge(edge){")]
+        runner = """
+const element=tag=>({tag,children:[],textContent:'',append(...items){this.children.push(...items)},
+ replaceChildren(){this.children=[]},classList:{add(){}},dataset:{}});
+const document={createElement:element},panel=element('div'),$=()=>panel;
+const legacy=false,scenario={terminal_operation_ids:['node-1']},operationsByNode=new Map(),
+ byId=new Map(),validEdges=[],gaps=[],outcomeNames={};
+const nodeKindLabel=()=> 'Атомарная операция',badge=()=>element('span'),nodeGroups=()=>[],
+ continuations=()=>{},externalInteractions=()=>{},systemBlock=()=>{},codeExplanations=()=>{},evidenceBlock=()=>{};
+""" + helpers + "\n" + card + """
+const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
+console.log(JSON.stringify(input.map(node=>{showNode(node);return Object.fromEntries(
+ panel.children.filter(e=>e.tag==='dl').map(e=>[e.children[0].textContent,e.children[1].textContent]));})));
+"""
+        operation = self.model()["nodes"][0]
+        condition = "Если обращение отозвано клиентом, обработка завершается."
+        result = subprocess.run([shutil.which("node"), "-e", runner],
+                                input=json.dumps([{**operation, "completion_condition": condition}, operation]),
+                                capture_output=True, text=True, encoding="utf-8", timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with_condition, without_condition = json.loads(result.stdout)
+        self.assertEqual(with_condition.pop("Завершение сценария"), condition)
+        self.assertNotIn("Завершение сценария", without_condition)
+        self.assertEqual(with_condition, without_condition)
+
     def test_legacy_detail_warning_and_atomic_fields_preserve_source_data(self):
         model = self.model()
         elements = {attrs.get("id"): attrs for _, attrs in Document(render_scenario_map(model)).elements}
         self.assertNotIn("detail-badge", elements)
         model["schema_version"] = "1.1"
+        model["nodes"][0].update(kind="start", system_id="as-1")
+        model["systems"] = [{"id": "as-1", "name": "Архивная система"}]
         model["execution_reviews"] = [{"id": "review-1", "operations": [{
             "id": "op-1", "node_id": "node-1", "kind": "write",
             "name": "Сохранить заявку", "action": "Записывает заявку",
@@ -203,19 +293,21 @@ class ScenarioRenderTests(unittest.TestCase):
         elements = {attrs.get("id"): attrs for _, attrs in document.elements}
         self.assertNotIn("detail-badge", elements)
         self.assertEqual(json.loads(document.scripts[0]["text"]), model)
+        self.assertNotIn("hidden", elements["legacy-note"])
+        self.assertIn("Архивная карта прежней методологии", render_scenario_map(model))
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js нужен для проверки раскладки графа")
 class ScenarioGraphLayoutTests(unittest.TestCase):
     """Exercise the actual browser layout algorithm without a browser or DOM."""
 
-    def layout(self, nodes, edges, vertical=False):
-        payload = {"nodes": nodes, "edges": edges, "vertical": vertical,
+    def layout(self, nodes, edges, vertical=False, entry_ids=None):
+        payload = {"nodes": nodes, "edges": edges, "vertical": vertical, "entry_ids": entry_ids or [],
                    "sizes": [[node["id"], {"w": 224, "h": 90 + index % 7 * 21}]
                              for index, node in enumerate(nodes)]}
         runner = _GRAPH_LAYOUT_JS + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
-const result=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical);
+const result=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical,input.entry_ids);
 console.log(JSON.stringify({width:result.width,height:result.height,
   positions:[...result.positions],rank:[...result.rank],outerEdges:[...result.outerEdges]}));
 """
@@ -242,6 +334,16 @@ console.log(JSON.stringify({width:result.width,height:result.height,
                             and left["y"] < right["y"] + right["h"]
                             and right["y"] < left["y"] + left["h"])
                 self.assertFalse(overlaps, (left, right))
+
+    def test_operation_entry_references_seed_cycle_layout_without_start_node(self):
+        nodes = [{"id": key, "kind": "operation"} for key in ("a", "b", "c")]
+        edges = [{"id": f"e-{i}", "source": left, "target": right, "kind": "sequence"}
+                 for i, (left, right) in enumerate((("a", "b"), ("b", "c"), ("c", "a")))]
+        layout = self.layout(nodes, edges, entry_ids=["b"])
+        self.assert_layout_valid(layout, ["a", "b", "c"])
+        ranks = dict(layout["rank"])
+        self.assertLess(ranks["b"], ranks["c"])
+        self.assertLess(ranks["c"], ranks["a"])
 
     def test_all_sixty_nested_operations_remain_individually_positioned(self):
         nodes = [{"id": f"step-{i}", "kind": "start" if i == 0 else "action",
@@ -292,7 +394,7 @@ console.log(JSON.stringify({width:result.width,height:result.height,
                  for i, (left, right) in enumerate(pairs)]
         runner = _GRAPH_LAYOUT_JS + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
-const layout=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical);
+const layout=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical,input.entry_ids);
 let index=0;const routes=input.edges.map(edge=>({
  id:edge.id,source:edge.source,target:edge.target,
  ...(layout.outerEdges.has(edge.id)?routeScenarioOuterEdge(edge,layout,input.vertical,index++):routeScenarioForwardEdge(edge,layout,input.vertical))}));

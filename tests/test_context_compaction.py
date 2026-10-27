@@ -32,7 +32,7 @@ class ContextCompactionTests(unittest.TestCase):
     def state():
         state = Mock()
         state.snapshot.return_value = {
-            "scenario": {"title": "Выпуск карты"}, "run": {"status": "running"},
+            "scenario": {"title": "Выпуск карты", "entry_operation_ids": ["step-1"], "terminal_operation_ids": []}, "run": {"status": "running"},
             "read_coverage": [{"path": "source-1/handler.py", "ranges": [[5, 17]], "line_count": 13}],
             "research_history": [{"observation_id": "obs-3", "name": "search",
                                   "arguments": {"query": "CardIssued"}, "preview": "publisher found",
@@ -40,7 +40,7 @@ class ContextCompactionTests(unittest.TestCase):
             "research_notes": [{"id": "note-1", "kind": "question", "status": "open",
                                 "finding": "Есть отправитель события", "next_action": "Найти получателя CardIssued"}],
             "nodes": [{"id": "step-1", "name": "Сохранить заявку"}], "edges": [],
-            "groups": [], "systems": [], "gaps": [],
+            "groups": [], "gaps": [],
         }
         return state
 
@@ -218,7 +218,7 @@ class ContextCompactionTests(unittest.TestCase):
         state = self.state()
         state.snapshot.return_value["nodes"] = [
             {"id": f"step-{index}", "name": f"Действие {index}",
-             "kind": "start" if index == 1 else "action", "system_id": "sys-1", "group_id": "group-1"}
+             "kind": "operation", "group_id": "group-1"}
             for index in range(1, 29)]
         latest = self.exchange("last", result="recent public data " * 130)
         messages = self.prefix() + [{"role": "assistant", "content": "x" * 40000}] + latest
@@ -229,7 +229,7 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertTrue(identity["names_complete"])
         self.assertEqual(len(identity["nodes"]), 28)
         self.assertEqual(identity["nodes"][0]["id"], "step-1")
-        self.assertEqual(identity["starts"], ["step-1"])
+        self.assertEqual(identity["entry_operation_ids"], ["step-1"])
         self.assertEqual(identity["nodes"][-1]["id"], "step-28")
         self.assertLessEqual(self.size(result), int(14000 * .6))
         self.assert_paired_tools(result)
@@ -238,7 +238,7 @@ class ContextCompactionTests(unittest.TestCase):
         state = self.state()
         state.snapshot.return_value["nodes"] = [
             {"id": f"step-{index}", "name": "Большое название " * 30,
-             "kind": "start" if index == 1 else "action", "system_id": "sys-1", "group_id": "group-1"}
+             "kind": "operation", "group_id": "group-1"}
             for index in range(1, 29)]
         result = compact_context(self.prefix() + [{"role": "assistant", "content": "x" * 40000}],
                                  state, 6000, brief=lambda _: "x" * 30000)
@@ -247,13 +247,13 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertFalse(identity["names_complete"])
         self.assertEqual(identity["all_node_ids"], [f"step-{index}" for index in range(1, 29)])
         self.assertIn("offset=31", identity["recover_names"])
-        self.assertEqual(identity["starts"], ["step-1"])
+        self.assertEqual(identity["entry_operation_ids"], ["step-1"])
         self.assertLessEqual(self.size(result), int(6000 * .6))
 
     def test_long_immutable_prompt_does_not_displace_node_registry(self):
         state = self.state()
         state.snapshot.return_value['nodes'] = [
-            {'id':f'step-{i}', 'name':f'Action {i}', 'kind':'action', 'system_id':'sys-1', 'group_id':'group-1'}
+            {'id':f'step-{i}', 'name':f'Action {i}', 'kind':'operation', 'group_id':'group-1'}
             for i in range(28)]
         prefix = [{'role':'system', 'content':'r'*22000}, {'role':'user', 'content':'scenario'}]
         messages = prefix + [{'role':'assistant', 'content':'old public data '*3000}]
@@ -268,7 +268,7 @@ class ContextCompactionTests(unittest.TestCase):
     def test_tiny_window_does_not_claim_truncated_registry_is_complete(self):
         state = self.state()
         state.snapshot.return_value["nodes"] = [
-            {"id": f"step-{index}", "name": "Действие", "kind": "action"} for index in range(1, 501)]
+            {"id": f"step-{index}", "name": "Действие", "kind": "operation"} for index in range(1, 501)]
         result = compact_context(self.prefix() + [{"role": "assistant", "content": "x" * 40000}],
                                  state, 1800, brief=lambda _: "x" * 30000)
         identity = json.loads(result[2]["content"].split("\n")[-1])["graph_identity"]
@@ -277,14 +277,15 @@ class ContextCompactionTests(unittest.TestCase):
         self.assertIn("последней страницы", identity["recover_nodes"])
         self.assertLessEqual(self.size(result), 1800)
 
-    def test_compaction_keeps_unfinished_decision_and_fork_from_map_frontier(self):
+    def test_compaction_keeps_unfinished_choice_and_parallel_routes_from_map_frontier(self):
         state = self.state()
         model = state.snapshot.return_value
         model["nodes"] = [
-            {"id": "step-1", "name": "Проверить условие", "kind": "decision"},
-            {"id": "step-2", "name": "Запустить параллельные действия", "kind": "fork"},
-            {"id": "step-3", "name": "Закончить", "kind": "end"},
+            {"id": "step-1", "name": "Проверить условие", "kind": "operation", "continuation_mode": "choice"},
+            {"id": "step-2", "name": "Запустить параллельные действия", "kind": "operation", "continuation_mode": "all"},
+            {"id": "step-3", "name": "Закончить", "kind": "operation"},
         ]
+        model["scenario"]["terminal_operation_ids"] = ["step-3"]
         model["edges"] = [
             {"source": "step-1", "target": "step-2", "kind": "branch"},
             {"source": "step-1", "target": "step-2", "kind": "retry"},
@@ -302,3 +303,56 @@ class ContextCompactionTests(unittest.TestCase):
         state.graph_frontier.assert_called_once_with()
         self.assertEqual(graph_identity(model)["frontier"]["open_exits"], actual_frontier["open_exits"],
                          "Snapshot-only fallback must use distinct control targets too")
+
+    def test_operation_routes_keep_exact_conditions_across_repeated_compaction(self):
+        state = self.state()
+        model = state.snapshot.return_value
+        model['nodes'] = [
+            {'id': 'op-1', 'name': 'Проверка срока перевода', 'kind': 'operation', 'continuation_mode': 'choice'},
+            {'id': 'op-2', 'name': 'Формирование решения об отказе', 'kind': 'operation'},
+            {'id': 'op-3', 'name': 'Расчёт даты дальнейшей обработки', 'kind': 'operation'},
+        ]
+        model['scenario'].update(entry_operation_ids=['op-1'], terminal_operation_ids=['op-2', 'op-3'])
+        model['edges'] = [
+            {'id': 'edge-1', 'source': 'op-1', 'target': 'op-2', 'kind': 'branch', 'condition': 'Прошло более 365 дней'},
+            {'id': 'edge-2', 'source': 'op-1', 'target': 'op-3', 'kind': 'branch', 'condition': 'Прошло не более 365 дней'},
+        ]
+        for _ in range(2):
+            messages = self.prefix() + [{'role': 'assistant', 'content': 'large old text ' * 5000}]
+            result = compact_context(messages, state, 14000, brief=lambda _: 'x' * 30000)
+            identity = json.loads(result[2]['content'].split('\n')[-1])['graph_identity']
+            self.assertTrue(identity['routes_complete'])
+            self.assertEqual(identity['routes'], model['edges'])
+            self.assertEqual(identity['entry_operation_ids'], ['op-1'])
+            self.assertEqual(identity['terminal_operation_ids'], ['op-2', 'op-3'])
+            self.assertNotIn('systems', json.dumps(identity))
+            self.assertNotIn('system_id', json.dumps(identity))
+
+    def test_shortened_routes_require_explicit_recovery_without_invented_conditions(self):
+        model = self.state().snapshot.return_value
+        model['edges'] = [{'id': 'edge-1', 'source': 'step-1', 'target': 'step-2',
+                           'condition': 'Полное условие', 'kind': 'branch'}]
+        identity = graph_identity(model, route_detail=1)
+        self.assertFalse(identity['routes_complete'])
+        self.assertNotIn('condition', identity['routes'][0])
+        self.assertIn("section='edges'", identity['recover_routes'])
+
+    def test_conditional_completion_survives_compaction_and_is_explicit_when_shortened(self):
+        state = self.state()
+        model = state.snapshot.return_value
+        model['nodes'] = [
+            {'id': 'op-1', 'name': 'Обработка результата проверки', 'kind': 'operation',
+             'continuation_mode': 'sequence', 'completion_condition': 'Рассмотрение завершено отказом'},
+            {'id': 'op-2', 'name': 'Подготовка документов', 'kind': 'operation'},
+        ]
+        model['scenario'].update(entry_operation_ids=['op-1'], terminal_operation_ids=['op-1', 'op-2'])
+        model['edges'] = [{'id': 'edge-1', 'source': 'op-1', 'target': 'op-2', 'kind': 'branch',
+                           'condition': 'Проверка разрешает продолжить рассмотрение'}]
+        result = compact_context(self.prefix() + [{'role': 'assistant', 'content': 'old public text ' * 5000}],
+                                 state, 14000, brief=lambda _: 'x' * 30000)
+        identity = json.loads(result[2]['content'].split('\n')[-1])['graph_identity']
+        self.assertEqual(identity['nodes'][0]['completion_condition'], 'Рассмотрение завершено отказом')
+        self.assertEqual(identity['routes'][0]['condition'], 'Проверка разрешает продолжить рассмотрение')
+        shortened = graph_identity(model, names=False)
+        self.assertIn('completion_condition', shortened['recover_names'])
+        self.assertIn("section='nodes'", shortened['recover_names'])

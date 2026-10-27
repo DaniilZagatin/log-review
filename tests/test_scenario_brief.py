@@ -12,16 +12,16 @@ from test_scenario_schema import workspace
 class ScenarioBriefTests(unittest.TestCase):
     def setUp(self):
         self.workspace = workspace(1)
-        self.state = MapState(self.workspace, "Создание карты внутри одной АС")
+        self.state = MapState(self.workspace, "Создание карты обработки заявки")
         self.tools = ResearchTools(self.state, self.workspace)
         self.ref = {"path": "source-1/channel.py", "line_start": 1, "line_end": 2}
 
     def arguments(self):
-        return {"project_overview": "Одна АС обрабатывает заявки; границу клиента bank ещё нужно выяснить.",
+        return {"project_overview": "Проект обрабатывает заявки; исполнение клиента bank ещё нужно выяснить.",
                 "scenario_alignment": "Вариант начинается с приёма заявки; выпуск требует проверки вызываемого кода.",
                 "confirmed_facts": [{"finding": "Обработчик вызывает bank.post.", "evidence": [self.ref]}],
                 "flow_hypothesis": ["Приём заявки, затем предполагаемая обработка выпуска."],
-                "open_questions": ["Вызов относится к той же АС или внешней?"],
+                "open_questions": ["Где выполняется запрос и какие данные он изменяет?"],
                 "next_actions": ["Найти реализацию bank и проверить границы исполнения."], "evidence": [self.ref]}
 
     def call(self, name, args):
@@ -32,7 +32,7 @@ class ScenarioBriefTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
 
     def test_first_node_requires_saved_orientation_after_actual_read(self):
-        node = {"name": "Приём заявки", "kind": "start", "system_id": "unknown",
+        node = {"name": "Приём заявки", "kind": "operation",
                 "description": "Вход варианта", "evidence_status": "unknown", "evidence": []}
         rejected = self.call("upsert_step", node)
         self.assertFalse(rejected["ok"])
@@ -56,7 +56,7 @@ class ScenarioBriefTests(unittest.TestCase):
         invalid["confirmed_facts"][0]["evidence"][0]["line_end"] = 3
         self.assertFalse(self.call("save_research_brief", invalid)["ok"])
         self.assertEqual(self.state.snapshot(), before)
-        args["flow_hypothesis"] = ["Новая проверяемая гипотеза после изучения границы АС."]
+        args["flow_hypothesis"] = ["Новая проверяемая гипотеза после изучения вызываемого обработчика."]
         self.assertEqual(self.call("save_research_brief", args)["revision"], 2)
         self.assertEqual(self.state.model["nodes"], [])
 
@@ -87,7 +87,7 @@ class ScenarioBriefTests(unittest.TestCase):
         saved = []
         client = ScriptedClient(calls=[("read_file", {"path": self.ref["path"]}),
                                        ("save_research_brief", self.arguments())])
-        model = run_agent(self.workspace, "Один вариант в одной АС", SPEC, client=client,
+        model = run_agent(self.workspace, "Один вариант обработки заявки", SPEC, client=client,
                           max_steps=2, checkpoint=saved.append)
         self.assertEqual(model["run"]["status"], "partial")
         self.assertFalse(model["nodes"])

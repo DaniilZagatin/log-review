@@ -14,7 +14,7 @@ from pko.scenario_map.quality import SEMANTIC_CHECKS
 SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed")
 FIXTURE = Path(__file__).parent / "fixtures" / "scenario_banking"
 SCENARIO = "Выпуск новой дебетовой карты действующему клиенту через мобильный канал, до выпуска либо отказа. Перевыпуск исключён."
-NODE_COUNT, EDGE_COUNT, OPERATION_COUNT = 22, 21, 18
+NODE_COUNT, EDGE_COUNT, OPERATION_COUNT = 18, 17, 18
 
 
 def sources():
@@ -46,15 +46,11 @@ def research_calls():
         3: quote(3, "@subscriber('card.issue.requested')", "results[parameters['request_id']] ="),
     }
     calls = [("set_scope", {"title": "Новая дебетовая карта действующему клиенту", "process_name": "Оформление дебетовой карты",
-                           "start": "Клиент отправил заявку", "end": "Карта выпущена либо сформирован окончательный отказ",
+                           "start": "Обработчик получил заявку", "end": "Результат выпуска сохранён либо сформирован отказ",
+                           "entry_operation_ids": ["step-1"], "terminal_operation_ids": ["step-5", "step-10", "step-18"],
                            "exclusions": ["Перевыпуск", "Самостоятельное оформление новым клиентом", "Доставка карты"]})]
     for number, filename in ((1, "app.py"), (2, "app.py"), (3, "worker.py")):
         calls.append(("read_file", {"path": f"source-{number}/{filename}"}))
-    for number, name in ((1, "Мобильный канал"), (2, "Обработка заявок"), (3, "Выпуск карт")):
-        calls.append(("upsert_system", {"name": name, "source_ids": [f"source-{number}"],
-                                       "description": name + " — учебная реализация", "implementation": "provided",
-                                       "basis": "Роль системы определена по принятому запросу и обработчику выбранного сценария. Реализация обработчика представлена в исходниках.",
-                                       "evidence_status": "observed", "evidence": scopes[number]}))
     calls.append(("save_research_brief", {
         "project_overview": "Учебные реализации мобильного канала, обработки заявок и выпуска карт связаны HTTP и сообщением на выпуск.",
         "scenario_alignment": "Вход /cards/debit/new относится к новой дебетовой карте действующему клиенту; перевыпуск исключён. Исходы — выпуск либо отказ.",
@@ -66,7 +62,7 @@ def research_calls():
         "next_actions": ["Проследить исполнение от входа, выделяя отдельные действия и подтверждённые переходы."],
         "evidence": [ref for scope in scopes.values() for ref in scope],
     }))
-    # Only stages group executable nodes; a stage may cross system boundaries.
+    # Stages are optional navigation across source files, not executable nodes.
     for name, result, systems in [
         ("Подача заявки", "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
         ("Рассмотрение заявки", "Заявка направлена на выпуск либо отклонена", [2, 3]),
@@ -74,52 +70,44 @@ def research_calls():
     ]:
         calls.append(("upsert_group", {"name": name, "kind": "stage", "result": result,
                                       "evidence": [ref for system in systems for ref in scopes[system]]}))
-    # key, AS, business name, graph kind, operation kind, start/end snippets, effect
+    # key, source, business name, graph kind, operation kind, start/end snippets, effect
     specs = [
-        ("start", 1, "Заявка отправлена клиентом", "start", None,
-         "@app.post('/cards/debit/new')", "def submit(request):", "Начало выбранного варианта: запрос направлен в обработчик новой карты."),
-        ("channel_receive", 1, "Приём заявки в мобильном канале", "action", "action",
+        ("channel_receive", 1, "Приём заявки в мобильном канале", "operation", "action",
          "@app.post('/cards/debit/new')", "def submit(request):", "Параметры запроса доступны обработчику мобильного канала."),
-        ("variant_check", 1, "Проверка варианта оформления", "decision", "validation",
+        ("variant_check", 1, "Проверка варианта оформления", "operation", "validation",
          "if request['client_type'] != 'existing':", None, "Выбран допуск действующего клиента либо отказ по неподдерживаемому варианту."),
-        ("application_build", 1, "Формирование запроса на оформление", "action", "transform",
+        ("application_build", 1, "Формирование запроса на оформление", "operation", "transform",
          "application = {", "    }", "Подготовлены request_id, client_id и продукт debit для запроса в АС заявок."),
-        ("application_send", 1, "Передача запроса в АС заявок", "action", "integration",
+        ("application_send", 1, "Отправка заявки на рассмотрение", "operation", "integration",
          "return http.post('https://applications.example/applications/debit'", None, "Подготовленный запрос передан по HTTP; это ещё не подтверждение выпуска."),
-        ("variant_rejection", 1, "Формирование отказа по варианту", "action", "error_handling",
+        ("variant_rejection", 1, "Формирование отказа по варианту", "operation", "error_handling",
          "rejection = {'request_id':", "return rejection", "Возвращён идентификатор заявки со статусом unsupported_variant."),
-        ("variant_end", 1, "Отказ по варианту сформирован", "end", None,
-         "return rejection", None, "Выбранный обработчик завершился окончательным отказом по варианту."),
-        ("application_receive", 2, "Приём запроса в АС заявок", "action", "action",
+        ("application_receive", 2, "Получение заявки на рассмотрение", "operation", "action",
          "@app.post('/applications/debit')", "def accept(request):", "АС заявок приняла request_id, client_id и product по HTTP-контракту."),
-        ("profile_read", 2, "Получение профиля клиента", "action", "read",
+        ("profile_read", 2, "Получение профиля клиента", "operation", "read",
          "profile = client_profiles[request['client_id']]", None, "Из учебного локального справочника получены признаки активности и допуска клиента."),
-        ("eligibility_check", 2, "Проверка возможности выпуска", "decision", "validation",
+        ("eligibility_check", 2, "Проверка возможности выпуска", "operation", "validation",
          "if not (profile['active'] and profile['debit_allowed']):", None, "По активности клиента и разрешению выпуска выбрана положительная либо отказная ветка."),
-        ("rejection_write", 2, "Сохранение отказа по заявке", "action", "write",
+        ("rejection_write", 2, "Сохранение отказа по заявке", "operation", "write",
          "applications[request['request_id']] = {'status': 'rejected'", None, "В учебном хранилище по заявке сохранены статус rejected и клиент."),
-        ("rejection_response", 2, "Формирование ответа об отказе", "action", "error_handling",
+        ("rejection_response", 2, "Формирование ответа об отказе", "operation", "error_handling",
          "rejection = {'request_id':", "return rejection", "Сформирован и возвращён ответ с request_id и статусом rejected."),
-        ("rejection_end", 2, "Заявка завершена отказом", "end", None,
-         "return rejection", None, "По заявке сформирован окончательный отказ."),
-        ("acceptance_write", 2, "Сохранение принятой заявки", "action", "write",
+        ("acceptance_write", 2, "Сохранение принятой заявки", "operation", "write",
          "applications[request['request_id']] = {'status': 'accepted'", None, "В учебном хранилище сохранены request_id, клиент и статус accepted."),
-        ("message_build", 2, "Формирование сообщения на выпуск", "action", "transform",
+        ("message_build", 2, "Формирование сообщения на выпуск", "operation", "transform",
          "message = {", "    }", "Подготовлено сообщение с request_id, client_id и product."),
-        ("message_publish", 2, "Публикация заявки на выпуск", "action", "publish",
+        ("message_publish", 2, "Публикация заявки на выпуск", "operation", "publish",
          "broker.publish('card.issue.requested', message)", None, "Сообщение отправлено в card.issue.requested; результат выпуска ещё не подтверждён."),
-        ("message_receive", 3, "Приём сообщения в АС выпуска", "action", "action",
+        ("message_receive", 3, "Получение сообщения о выпуске карты", "operation", "action",
          "@subscriber('card.issue.requested')", "def issue(message):", "Обработчик выпуска получил сообщение канала card.issue.requested."),
-        ("issue_parameters", 3, "Извлечение параметров выпуска", "action", "transform",
+        ("issue_parameters", 3, "Извлечение параметров выпуска", "operation", "transform",
          "parameters = {'request_id':", None, "Из сообщения выделены request_id, client_id и product для выпуска."),
-        ("card_build", 3, "Формирование данных новой карты", "action", "transform",
+        ("card_build", 3, "Формирование данных новой карты", "operation", "transform",
          "card = {", "    }", "Подготовлена учебная запись карты: идентификатор, клиент, продукт и статус issued."),
-        ("card_issue", 3, "Сохранение выпущенной карты", "action", "write",
+        ("card_issue", 3, "Сохранение выпущенной карты", "operation", "write",
          "cards[card['card_id']] = card", None, "Учебная карта со статусом issued сохранена по card_id в хранилище карт."),
-        ("result_write", 3, "Сохранение результата выпуска", "action", "write",
+        ("result_write", 3, "Сохранение результата выпуска", "operation", "write",
          "results[parameters['request_id']] =", None, "По request_id сохранены статус issued и card_id, связывающие результат с заявкой."),
-        ("issued_end", 3, "Карта выпущена", "end", None,
-         "results[parameters['request_id']] =", None, "Учебная карта сохранена, результат выпуска связан с исходной заявкой."),
     ]
     failures = {
         "variant_check": "Для клиента другого типа выбирается окончательный отказ по варианту.",
@@ -151,18 +139,31 @@ def research_calls():
                 "operation_kind": operation_kind, "evidence": quote(system, start, end), "effect": effect,
                 "failure": failures.get(key, "В обследованном участке отдельная обработка технического отказа не показана.")}
         nodes[key] = node
-        calls.append(("upsert_step", {"name": name, "kind": kind, "system_id": f"sys-{system}", "description": effect,
+        calls.append(("upsert_step", {"name": name, "kind": kind, "description": effect,
                                       "group_id": memberships[key],
                                       **({"basis": explanations[key]} if key in explanations else {}),
-                                      **({"outcome": "success" if key == "issued_end" else "refusal"} if kind == "end" else {}),
-                                      "input": "request_id, client_id, client_type" if system == 1 else "request_id, client_id, product",
+                                      **({"outcome": "success" if key == "result_write" else "refusal", "effect_kind": "result"}
+                                         if key in ("variant_rejection", "rejection_response", "result_write") else {}),
+                                      "continuation_mode": "choice" if operation_kind == "validation" else "sequence",
+                                      "input": "Идентификатор заявки, сведения о клиенте и вид карты",
                                       "output": effect, "evidence_status": "observed", "evidence": node["evidence"]}))
+    for name, args in calls:
+        if name != 'upsert_step':
+            continue
+        if args['name'] == 'Отправка заявки на рассмотрение':
+            args['external_interactions'] = [{'name': 'Сервис рассмотрения заявок',
+                'purpose': 'Передача заявки на оформление карты', 'direction': 'request',
+                'endpoint': 'https://applications.example/applications/debit',
+                'contract': 'Идентификаторы заявки и клиента, вид карты', 'evidence': args['evidence']}]
+        elif args['name'] == 'Публикация заявки на выпуск':
+            args['external_interactions'] = [{'name': 'Очередь заявок на выпуск карт',
+                'purpose': 'Передача принятой заявки обработчику выпуска', 'direction': 'send',
+                'endpoint': 'card.issue.requested', 'contract': 'Идентификаторы заявки и клиента, вид карты',
+                'evidence': args['evidence']}]
     edge_specs = [
-        ("entry", "start", "channel_receive", "sequence", ""),
         ("variant", "channel_receive", "variant_check", "sequence", ""),
         ("variant_ok", "variant_check", "application_build", "branch", "Клиент банка"),
         ("variant_no", "variant_check", "variant_rejection", "branch", "Другой вариант клиента"),
-        ("variant_finish", "variant_rejection", "variant_end", "sequence", ""),
         ("send", "application_build", "application_send", "sequence", ""),
         ("http", "application_send", "application_receive", "call", ""),
         ("profile", "application_receive", "profile_read", "sequence", ""),
@@ -170,7 +171,6 @@ def research_calls():
         ("eligible", "eligibility_check", "acceptance_write", "branch", "Клиент активен, выпуск разрешён"),
         ("ineligible", "eligibility_check", "rejection_write", "branch", "Клиент неактивен или выпуск запрещён"),
         ("reject_answer", "rejection_write", "rejection_response", "sequence", ""),
-        ("reject_finish", "rejection_response", "rejection_end", "sequence", ""),
         ("build_message", "acceptance_write", "message_build", "sequence", ""),
         ("publish", "message_build", "message_publish", "sequence", ""),
         ("event", "message_publish", "message_receive", "event", ""),
@@ -178,7 +178,6 @@ def research_calls():
         ("card_data", "issue_parameters", "card_build", "sequence", ""),
         ("card_store", "card_build", "card_issue", "sequence", ""),
         ("result", "card_issue", "result_write", "sequence", ""),
-        ("success", "result_write", "issued_end", "sequence", ""),
     ]
     edge_ids = {}
     for index, (key, source_key, target_key, kind, condition) in enumerate(edge_specs, 1):
@@ -221,14 +220,14 @@ def research_calls():
                                                "В обследованном обработчике не найдено; это не утверждение об отсутствии во всей системе.",
                                 "evidence": scopes[number], "node_ids": [nodes[key]["id"] for key in keys],
                                 "edge_ids": [edge_ids[key] for key in check_edges[number].get(category, [])]}
-        calls.append(("review_execution", {"name": f"Атомарные операции учебной АС {number}", "system_id": f"sys-{number}",
+        calls.append(("review_execution", {"name": f"Операции учебного обработчика {number}",
                                            "evidence": scopes[number], "operations": operations, "checks": checks}))
         calls.append(("review_source", {"source_id": f"source-{number}", "disposition": "reviewed",
                                         "reason": "Прочитан выбранный обработчик и его операции. Соседний перевыпуск и неподключённый helper не включены."}))
     initial_brief = next(args for name, args in calls if name == "save_research_brief")
     calls.append(("save_research_brief", {**initial_brief, "open_questions": [], "next_actions": []}))
     explanations = {
-        'outcomes': 'Конечные узлы ссылаются на возвращённый отказ или запись карты, а не на отправку запроса.',
+        'outcomes': 'Последние операции ссылаются на возвращённый отказ или запись карты, а не на отправку запроса.',
         'order': 'Последовательность чтения, проверки, записи и публикации сверена с телами трёх обработчиков.',
         'routing': 'Ветви проверки варианта и допуска имеют отдельные положительные и отрицательные условия.',
         'atomicity': 'Подготовка данных, HTTP-вызов, записи и публикация представлены отдельными действиями.',
@@ -236,8 +235,22 @@ def research_calls():
     calls.append(('review_semantics', {'checks': {key: {'status': 'reviewed', 'explanation': explanations[key],
         'evidence': [r for scope in scopes.values() for r in scope],
         'node_ids': [n['id'] for n in nodes.values()], 'edge_ids': list(edge_ids.values()), 'gap_ids': []}
-        for key in SEMANTIC_CHECKS}}))
-    calls.append(("finish", {"summary": "Учебный детерминированный пример: 18 отдельных операций, 22 узла, 21 переход и три АС. "
+        for key in SEMANTIC_CHECKS}, 'route_cases': [
+            {'name': 'Неподдерживаемый вариант клиента', 'input': 'Обращается новый клиент',
+             'path': [nodes[k]['id'] for k in ['channel_receive', 'variant_check', 'variant_rejection']],
+             'expected_result': 'Сформирован отказ по варианту', 'evidence': scopes[1]},
+            {'name': 'Выпуск запрещён', 'input': 'Действующий клиент неактивен или выпуск ему запрещён',
+             'path': [nodes[k]['id'] for k in ['channel_receive', 'variant_check', 'application_build', 'application_send',
+                       'application_receive', 'profile_read', 'eligibility_check', 'rejection_write', 'rejection_response']],
+             'expected_result': 'Отказ сохранён и возвращён', 'evidence': scopes[1] + scopes[2]},
+            {'name': 'Допуск к выпуску', 'input': 'Действующий активный клиент с разрешением на выпуск',
+             'path': [nodes[k]['id'] for k in ['channel_receive', 'variant_check', 'application_build', 'application_send',
+                       'application_receive', 'profile_read', 'eligibility_check', 'acceptance_write', 'message_build',
+                       'message_publish', 'message_receive', 'issue_parameters', 'card_build', 'card_issue', 'result_write']],
+             'expected_result': 'Учебная карта и результат выпуска сохранены',
+             'evidence': [r for scope in scopes.values() for r in scope]},
+        ]}))
+    calls.append(("finish", {"summary": "Учебный детерминированный пример: 18 атомарных операций и 17 переходов по трём источникам кода. "
                                        "Показаны проверки, формирование данных, HTTP-вызов, записи, публикация, приём сообщения и выпуск, включая отказы. "
                                        "Учебные хранилища находятся в памяти. Это проверка сборки по заранее заданным ответам, не оценка качества реальной модели."}))
     if len(nodes) != NODE_COUNT or len(edge_ids) != EDGE_COUNT:
@@ -249,8 +262,6 @@ def research_calls():
             scope = scopes[number]
             args['code_explanations'] = [{'kind':'function', 'symbol':sorted(symbols(scope[0]['quote']))[0],
                 'explanation': args['basis'], 'evidence': scope}]
-            if args['kind'] == 'end':
-                args['effect_kind'] = 'result'
     return calls
 
 

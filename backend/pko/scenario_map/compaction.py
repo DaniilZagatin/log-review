@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from pko.audit import record, sanitize
-from pko.scenario_map.context import _blocks, _brief_recovery, _size, compact_context, without_thinking
+from pko.scenario_map.context import (_blocks, _brief_recovery, _size, compact_context,
+                                      without_thinking, UNFINISHED_TASK_STATUSES)
 
 SUMMARY_FIELDS = ("project_and_scenario", "completed_work", "key_findings", "open_questions", "next_actions", "references")
 SUMMARY_MAX_CHARS = 6000
@@ -52,13 +53,13 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             for message in block
         ])))
     open_notes = [note for note in snapshot.get("research_notes", []) if note.get("status") == "open"]
-    open_tasks = [task for task in snapshot.get('research_tasks', []) if task.get('status') == 'open']
+    open_tasks = [task for task in snapshot.get('research_tasks', []) if task.get('status') in UNFINISHED_TASK_STATUSES]
     payload = {
         "previous_summary": _public(snapshot.get("context_summary")),
         "current_state": {
             "scenario": bounded(snapshot.get("scenario", {})),
             **_brief_recovery(snapshot, 1),
-            "counts": {key: len(snapshot.get(key, [])) for key in ("systems", "nodes", "edges", "gaps")},
+            "counts": {key: len(snapshot.get(key, [])) for key in ("nodes", "edges", "gaps")},
             "open_notes": bounded([_public(note) for note in open_notes[:12]]),
             "open_note_count": len(open_notes), "open_notes_listed_all": len(open_notes) <= 12,
             "open_tasks": bounded([_public(task) for task in open_tasks[:12]]),
@@ -132,7 +133,7 @@ def validate_summary(text: str, state) -> dict:
 
 def compact_research_context(messages: list[dict], state, budget: int, *,
                              summarize: Callable[[list[dict]], Any],
-                             brief: Callable[[Any], str]) -> list[dict]:
+                             brief: Callable[[Any], str], summary_budget: int | None = None) -> list[dict]:
     """Summarize once, then project state and paired recent exchanges atomically.
 
     Provider errors or malformed summaries fall back to the deterministic memory
@@ -142,9 +143,14 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
     previous = deepcopy(state.model.get("context_summary"))
     accepted = False
     try:
-        request = summary_request(messages, state, budget)
+        request = summary_request(messages, state, budget if summary_budget is None else min(budget, summary_budget))
         input_metadata = json.loads(request[1]["content"])
         response = summarize(request)
+        finish_reason = getattr(response, "finish_reason", "")
+        record("context_summary_response", finish_reason=finish_reason,
+               usage=getattr(response, "usage", {}), public_chars=len(response.text or ""))
+        if finish_reason in {"length", "max_tokens"}:
+            raise ValueError("Ответ суммаризации оборван по лимиту выхода")
         if response.tool_calls:
             raise ValueError("Суммаризация не может вызывать инструменты")
         summary = validate_summary(response.text, state)
@@ -162,7 +168,8 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
         accepted = True
     except Exception as exc:
         state.model["run"]["context_summary_fallbacks"] = state.model["run"].get("context_summary_fallbacks", 0) + 1
-        record("context_summary_fallback", error_type=type(exc).__name__, reason=str(sanitize(str(exc)))[:500])
+        record("context_summary_fallback", error_type=type(exc).__name__, reason=str(sanitize(str(exc)))[:500],
+               finish_reason=getattr(exc, "finish_reason", ""), usage=getattr(exc, "usage", {}))
     candidate = compact_context(messages, state, budget, brief=brief, force=True)
     if _size(candidate) >= _size(messages) or _size(candidate) > budget:
         state.model["context_summary"] = previous

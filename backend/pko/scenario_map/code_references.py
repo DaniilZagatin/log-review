@@ -54,12 +54,40 @@ def dependencies(path: str, lines: dict[int, str]) -> list[dict]:
         windows[-1].append(number)
     cleaned_lines = [(number, code) for window in windows
                      for number, code in zip(window, code_only('\n'.join(lines[n] for n in window)).split('\n'))]
+    # Resolve explicit local aliases only from delivered declarations. A bare
+    # parameter such as runAgent(agent) cannot be bound across call sites by this
+    # lexical helper; the investigator must inspect its callers.
+    bindings = {}
+    window_for = {number: i for i, window in enumerate(windows) for number in window}
+    scopes = {}
+    current_scope = {}
     for number, code in cleaned_lines:
-        for match in re.finditer(r'\.(systemPrompt|addChild)\(\s*([A-Z]\w*)\.(\w+)', code):
-            kind = "prompt" if match[1] == "systemPrompt" else "executor"
-            found.append({"kind": kind, "target": match[2] + "." + match[3],
-                          "evidence": [{"path": path, "line_start": number, "line_end": number}]})
+        window = window_for[number]
+        if symbols(code):
+            current_scope[window] = number
+        scopes[number] = (window, current_scope.get(window, 0))
+    for number, code in cleaned_lines:
+        for match in re.finditer(r'\b(?:Agent|AgentNode|Role|var|final\s+var)\s+(\w+)\s*=\s*([A-Z]\w*)\.(\w+)\s*\(', code):
+            bindings.setdefault((scopes[number], match[1]), []).append((match[2]+'.'+match[3], number))
+    seen = set()
+    def add(kind, target, number, binding_line=None):
+        key = (kind, target, number)
+        if key in seen:
+            return
+        seen.add(key)
+        evidence = [{"path": path, "line_start": number, "line_end": number}]
+        if binding_line is not None and binding_line != number:
+            evidence.append({"path": path, "line_start": binding_line, "line_end": binding_line})
+        found.append({"kind": kind, "target": target, "evidence": evidence})
+    for number, code in cleaned_lines:
+        for match in re.finditer(r'\.(systemPrompt|addChild|runAgent)\(\s*([A-Z]\w*)\.(\w+)', code):
+            add("prompt" if match[1] == "systemPrompt" else "executor", match[2]+'.'+match[3], number)
+        for match in re.finditer(r'\.(addChild|runAgent)\(\s*([a-zA-Z_]\w*)\s*[,)]', code):
+            candidates = [(target, line) for target, line in bindings.get((scopes[number], match[2]), []) if line < number]
+            # Reused variable names or declarations in multiple methods are
+            # ambiguous, not proof of a global binding.
+            if len(candidates) == 1:
+                add('executor', candidates[0][0], number, candidates[0][1])
         for match in re.finditer(r'\breturn\s+([A-Z]\w*)\.(createAgent)\s*\(', code):
-            found.append({"kind": "executor", "target": match[1]+'.'+match[2],
-                          "evidence": [{"path": path, "line_start": number, "line_end": number}]})
+            add('executor', match[1]+'.'+match[2], number)
     return found

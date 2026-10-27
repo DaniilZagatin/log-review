@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "reports" / "scenario-demo")
     args = parser.parse_args()
     model = run_scenario(SCENARIO, sources(), args.out, spec=SPEC, client=ScriptedClient())
+    if model.get("schema_version") != "2.0" or any(n.get("kind") != "operation" for n in model["nodes"]):
+        raise RuntimeError("Демо должно использовать методологию атомарных операций 2.0")
     model["run"]["demo"] = True
     write_outputs(args.out, {
         "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),

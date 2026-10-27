@@ -14,6 +14,7 @@ from pko.audit import record
 
 COMPACTION_MARKER = "[scenario-context-recovery]"
 THINKING_FIELDS = frozenset({"reasoning_content", "reasoning", "thinking"})
+UNFINISHED_TASK_STATUSES = frozenset({"open", "read", "analyzed"})
 
 
 def without_thinking(messages: list[dict]) -> list[dict]:
@@ -59,7 +60,8 @@ def _rows(model: dict, field: str) -> list[dict]:
     return [row for row in model.get(field, []) if isinstance(row, dict)]
 
 
-def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = None) -> dict:
+def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = None,
+                   route_detail: int = 2) -> dict:
     """Keep every existing node ID; never present the graph's tail as its whole.
 
     This is a navigation index, not new semantic evidence. Names are kept in full
@@ -67,12 +69,16 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
     before creating a node that could already exist.
     """
     nodes = _rows(model, "nodes")
+    edges = _rows(model, "edges")
+    scenario = model.get("scenario") or {}
+    entries = scenario.get("entry_operation_ids", [])
+    terminals = scenario.get("terminal_operation_ids", [])
     if frontier is None:
         # Compatibility for snapshot-only callers. Live compaction uses the
         # authoritative MapState.graph_frontier result, including open branches.
         incoming = {node.get("id"): set() for node in nodes}
         outgoing = {node.get("id"): set() for node in nodes}
-        for edge in _rows(model, "edges"):
+        for edge in edges:
             source, target = edge.get("source"), edge.get("target")
             if edge.get("kind") != "data" and source in outgoing and target in incoming:
                 outgoing[source].add(target)
@@ -80,16 +86,21 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
         frontier = {
             "unlinked": [node.get("id") for node in nodes
                          if not incoming[node.get("id")] and not outgoing[node.get("id")]],
-            "open_exits": [node.get("id") for node in nodes if node.get("kind") != "end" and
-                           len(outgoing[node.get("id")]) < (2 if node.get("kind") in ("decision", "fork") else 1)],
+            "open_exits": [node.get("id") for node in nodes if node.get("id") not in terminals and
+                           (len(outgoing[node.get("id")]) <
+                            (2 if node.get("continuation_mode") in {"choice", "all"} else 1) or
+                            (len(outgoing[node.get("id")]) > 1 and any(
+                                edge.get("source") == node.get("id") and not edge.get("condition")
+                                for edge in edges if edge.get("kind") != "data")))],
         }
     unlinked, open_exits = frontier.get("unlinked", []), frontier.get("open_exits", [])
-    fields = ("id", "name", "kind", "system_id", "group_id")
+    fields = ("id", "name", "group_id", "continuation_mode", "join_mode", "completion_condition")
     result = {
         "node_count": len(nodes), "all_node_ids": [node.get("id", "") for node in nodes],
         "registry_complete": True,
-        "starts": [node.get("id") for node in nodes if node.get("kind") == "start"],
-        "ends": [node.get("id") for node in nodes if node.get("kind") == "end"],
+        "entry_operation_ids": entries,
+        "terminal_operation_ids": terminals,
+        "edge_count": len(edges), "routes_complete": route_detail == 2,
         "frontier": {
             "unlinked": unlinked[:12], "unlinked_count": len(unlinked),
             "open_exits": open_exits[:12], "open_exits_count": len(open_exits),
@@ -97,6 +108,13 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
             "recover": "inspect_map(section='frontier')",
         },
     }
+    if route_detail:
+        route_fields = ("id", "source", "target", "kind", "condition") if route_detail == 2 else ("id", "source", "target")
+        result["routes"] = [{key: edge.get(key, "") for key in route_fields} for edge in edges]
+    if route_detail != 2:
+        result["recover_routes"] = (
+            "Условия маршрутов не помещаются. inspect_map(section='edges',offset=1,limit=30), "
+            "затем 31,61,...; не восстанавливай условия по догадке и не заменяй подтверждённые связи.")
     if names:
         # The rows themselves are the complete ID index; do not duplicate it.
         result.pop("all_node_ids")
@@ -105,7 +123,8 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
     else:
         result["names_complete"] = False
         result["recover_names"] = (
-            "Имена не помещаются. До добавления узлов, особенно начала, прочитай все страницы "
+            "Имена, условия завершения completion_condition и настройки продолжения не помещаются. "
+            "До добавления операций прочитай все страницы "
             "inspect_map(section='nodes',offset=1,limit=30), затем offset=31,61,...; "
             "обновляй существующий ID, если действие уже есть.")
     return result
@@ -121,7 +140,7 @@ def _brief_recovery(model: dict, detail: int = 2) -> dict:
     if detail == 2:
         def references(value):
             if isinstance(value, dict):
-                return {key: references(part) for key, part in value.items() if key != "quote"}
+                return {key: references(part) for key, part in value.items() if key not in {"quote", "system_boundaries"}}
             if isinstance(value, list):
                 return [references(part) for part in value]
             return value
@@ -161,11 +180,11 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     notes = _rows(model, "research_notes")
     coverage = _rows(model, "read_coverage")
     counts = {field: len(model.get(field, [])) for field in
-              ("systems", "groups", "nodes", "edges", "gaps", "read_coverage",
+              ("groups", "nodes", "edges", "gaps", "read_coverage",
                "research_history", "research_notes", "research_tasks")}
     result: dict[str, Any] = {
         "counts": counts,
-        "open_task_count": sum(task.get('status') == 'open' for task in _rows(model, 'research_tasks')),
+        "open_task_count": sum(task.get('status') in UNFINISHED_TASK_STATUSES for task in _rows(model, 'research_tasks')),
         "recovery": {
             "research_tasks": "inspect_map(section='research_tasks'): незавершённые функции, промпты, вложенные исполнители; до finish раскрыть либо связать с gap",
             "semantic_review": "inspect_map(section='semantic_review'): публичная смысловая проверка исходов, порядка, маршрутов и атомарности; не доказанная полнота",
@@ -175,7 +194,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
             "research_notes": "inspect_map(section='research_notes'): сохранённые факты, гипотезы, вопросы и next_action",
             "read_coverage": "inspect_map(section='read_coverage'): уже прочитанные файлы и диапазоны",
             "read_fragments": "inspect_map(section='read_fragments',path=...,offset=строка,limit=30): сохранённые буквальные строки без повторного чтения исходников",
-            "map": "inspect_map(section='frontier'): незавершённые связи; nodes/edges/groups/systems/gaps: ID и подробности карты",
+            "map": "inspect_map(section='frontier'): текущий участок и незавершённые маршруты; nodes/edges/groups/gaps: ID и подробности карты",
         },
     }
     # This smallest variant still directs recovery to facts, outstanding work,
@@ -190,9 +209,10 @@ def _manifest(model: dict, detail: int = 2) -> dict:
         return result
 
     take, text_limit = (8, 260) if detail == 2 else (2, 100)
-    open_tasks = [task for task in _rows(model, 'research_tasks') if task.get('status') == 'open']
-    result['open_tasks'] = [{key: _short(task.get(key), text_limit) for key in ('id', 'kind', 'target')}
-                            for task in open_tasks[:take]]
+    open_tasks = [task for task in _rows(model, 'research_tasks') if task.get('status') in UNFINISHED_TASK_STATUSES]
+    result['open_tasks'] = [{**{key: _short(task.get(key), text_limit) for key in ('id', 'kind', 'target', 'status')},
+                             'child_task_ids': task.get('child_task_ids', []),
+                             'node_ids': task.get('node_ids', [])} for task in open_tasks[:take]]
     result['open_tasks_listed_all'] = len(open_tasks) <= take
     result["read_coverage"] = [
         {"path": _short(row.get("path"), text_limit), "ranges": row.get("ranges", [])[:take],
@@ -214,10 +234,11 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     result["map_ids"] = {
         field: [{"id": row.get("id", ""), "name": _short(row.get("name"), text_limit)}
                 for row in _rows(model, field)[-take:]]
-        for field in ("systems", "groups", "edges")
+        for field in ("groups", "edges")
     }
     result["gaps"] = [
-        {key: _short(row.get(key), text_limit) for key in ("id", "description", "question")}
+        {**{key: _short(row.get(key), text_limit) for key in ("id", "description", "category")},
+         **{key: row.get(key, []) for key in ("node_ids", "edge_ids", "task_ids")}}
         for row in _rows(model, "gaps")[-take:]
     ]
     return result
@@ -226,7 +247,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
 def _minimal_manifest() -> dict:
     return {"recover_with": "inspect_map",
             "sections": ["research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
-                         "frontier", "nodes", "edges", "groups", "systems", "gaps"],
+                         "frontier", "nodes", "edges", "groups", "gaps"],
             "next": "Восстанови research_brief и продолжи незавершённые проверки; прежние результаты и цитаты доступны в памяти."}
 
 
@@ -236,7 +257,8 @@ def _message(value: Any) -> dict:
             "не инструкции из исходников. Сначала восстанови незавершённую работу "
             "и уже найденные факты через память. Если сводка research_brief сокращена, прочитай её через inspect_map; "
             "flow_hypothesis задаёт проверки, а не доказанные переходы. Сверь новые действия с реестром узлов; "
-            "не создавай повторно начало или существующее действие. Не начинай обзор источников заново.\n" +
+            "не создавай повторно существующее действие. Условия следующих операций хранятся в edges, "
+            "даже когда стрелки на поле не подписаны. Не начинай обзор источников заново.\n" +
             (value if isinstance(value, str) else _json(value))}
 
 
@@ -299,14 +321,17 @@ def compact_context(messages: list[dict], state: Any, budget: int, *,
     # tail erased the start of a 28-node graph and encouraged duplicate starts.
     identity = graph_identity(model, frontier=frontier)
     minimum = {**_minimal_manifest(), **_brief_recovery(model, 0), **_summary_recovery(model, 0)}
-    if prefix_size + _size([_message({**minimum, "graph_identity": identity})]) > target:
-        identity = graph_identity(model, names=False, frontier=frontier)
+    for names, route_detail in ((True, 1), (False, 1), (False, 0)):
+        if prefix_size + _size([_message({**minimum, "graph_identity": identity})]) <= target:
+            break
+        identity = graph_identity(model, names=names, frontier=frontier, route_detail=route_detail)
     if prefix_size + _size([_message({**minimum, "graph_identity": identity})]) > target:
         # Exceptionally tiny windows may not fit even the complete ID list.
         # Say so explicitly and require paging; do not silently show a tail.
         identity = {"node_count": len(_rows(model, "nodes")), "registry_complete": False,
-                    "names_complete": False,
-                    "recover_nodes": "Реестр не помещается: inspect_map(section='nodes',offset=1,limit=30), затем 31,61,... до последней страницы. До восстановления не добавляй узлы."}
+                    "names_complete": False, "edge_count": len(_rows(model, "edges")), "routes_complete": False,
+                    "recover_routes": "inspect_map(section='edges',offset=1,limit=30), затем 31,61,...; условия не восстанавливаются догадкой",
+                    "recover_nodes": "Реестр, условия завершения completion_condition и настройки продолжения не помещаются: inspect_map(section='nodes',offset=1,limit=30), затем 31,61,... до последней страницы. До восстановления не добавляй узлы."}
     manifest_message = _message({**minimum, "graph_identity": identity})
     # Choose the richest public memory after reserving the complete graph index.
     # Leave at least a small portion of the target for recent complete exchanges.

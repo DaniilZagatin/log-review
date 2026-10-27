@@ -22,6 +22,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  client=None, max_steps: int = DEFAULT_MAX_STEPS,
                  max_seconds: float = DEFAULT_MAX_SECONDS, thinking=None,
                  model_timeout: float = DEFAULT_MODEL_TIMEOUT,
+                 summary_max_tokens: int = 8192, summary_mode: str = "standard",
                  on_event=None) -> dict:
     scenario = scenario.strip()
     if not scenario or len(scenario) > 20000:
@@ -33,6 +34,10 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
     if max_steps <= 0 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
         raise PkoError("Лимиты исследования и ожидания модели должны быть конечными положительными числами.",
                        hint="проверьте --max-steps, --max-seconds и --model-timeout")
+    if isinstance(summary_max_tokens, bool) or not isinstance(summary_max_tokens, int) or not 512 <= summary_max_tokens <= 32768:
+        raise PkoError("Бюджет суммаризации должен быть целым числом от 512 до 32768 токенов.")
+    if summary_mode not in ("standard", "inherit"):
+        raise PkoError("Режим суммаризации: standard или inherit.")
     spec = spec or researcher_spec(thinking=thinking)
     out_dir = Path(out_dir).resolve()
     # An output subtree can be excluded, but excluding an ancestor would silently
@@ -48,7 +53,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
             with trace_span("scenario_map_run", run_id=run_id) as run_span:
                 run_span.set_input({"scenario": scenario, "source_count": len(sources),
                                     "max_steps": max_steps, "max_seconds": max_seconds,
-                                    "model_timeout_seconds": model_timeout})
+                                    "model_timeout_seconds": model_timeout,
+                                    "summary_max_tokens": summary_max_tokens, "summary_mode": summary_mode})
                 with tempfile.TemporaryDirectory(prefix="belka-scenario-") as temporary:
                     with trace_span("prepare_sources") as source_span:
                         workspace = build_workspace(sources, Path(temporary) / "sources",
@@ -70,7 +76,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
                     model = run_agent(workspace, scenario, spec, client=client,
                                       max_steps=max_steps, max_seconds=max_seconds,
-                                      model_timeout=model_timeout,
+                                      model_timeout=model_timeout, summary_max_tokens=summary_max_tokens,
+                                      summary_mode=summary_mode,
                                       checkpoint=checkpoint, on_event=on_event)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
@@ -100,7 +107,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
 
 def add_cli_command(subparsers):
-    command = subparsers.add_parser("map-scenario", help="Построить карту варианта сценария по коду одной или нескольких АС")
+    command = subparsers.add_parser("map-scenario", help="Построить карту атомарных операций выбранного сценария по исходникам")
     scenario = command.add_mutually_exclusive_group(required=True)
     scenario.add_argument("--scenario-text", default="", help="Краткое описание выбранного варианта сценария")
     scenario.add_argument("--scenario-file", default="", help="UTF-8 файл с кратким описанием варианта")
@@ -111,6 +118,10 @@ def add_cli_command(subparsers):
                          help="Общий мягкий лимит исследования в секундах, включая очередь и повторы (по умолчанию 7200)")
     command.add_argument("--model-timeout", type=float, default=DEFAULT_MODEL_TIMEOUT,
                          help="Таймаут ожидания модели в секундах (по умолчанию 900); ограничен оставшимся временем исследования")
+    command.add_argument("--summary-max-tokens", type=int, default=8192,
+                         help="Бюджет ответа суммаризации, 512–32768 токенов (по умолчанию 8192)")
+    command.add_argument("--summary-mode", choices=("standard", "inherit"), default="standard",
+                         help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -135,7 +146,7 @@ def command_main(args) -> int:
         if name == "sources_ready":
             print(f"Источников: {data['sources']}, файлов: {data['files']}")
         elif name == "tool" and (data["name"].startswith("upsert_") or data["name"] == "finish"):
-            print(f"Исследование: шагов на карте {data['nodes']}, переходов {data['edges']}" +
+            print(f"Исследование: операций на карте {data['nodes']}, переходов {data['edges']}" +
                   ("; данные приняты" if data.get("ok") else "; требуется уточнение"))
         elif name == "model_retry":
             print(f"Связь с моделью временно недоступна. Попытка {data['next_attempt']} "
@@ -143,7 +154,8 @@ def command_main(args) -> int:
 
     model = run_scenario(scenario, args.source, Path(args.out), max_steps=args.max_steps,
                          max_seconds=args.max_seconds, model_timeout=args.model_timeout,
-                         thinking=args.thinking, on_event=event)
+                         thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
+                         summary_mode=args.summary_mode, on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
               "failed": "Исследование не выполнено"}

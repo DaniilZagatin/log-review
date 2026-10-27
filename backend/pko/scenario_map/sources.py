@@ -1,6 +1,6 @@
-"""Bounded, read-only source snapshots for one scenario spanning several systems.
+"""Bounded, read-only source snapshots for one scenario across provided materials.
 
-Source identities describe uploaded materials, not automated systems. Every
+Source identities describe uploaded materials and their provenance. Every
 accepted path retains its source namespace; similarly named repositories never
 overlay each other. Digests identify the included, masked text snapshot, not a
 Git revision or the original archive.
@@ -292,7 +292,7 @@ def build_workspace(paths: list[str | Path], dest: Path, *,
         tree = LocalTree(destination)
         sources: list[dict] = []
         omissions: list[dict] = []
-        notes = ["Источники — загруженные материалы, а не перечень АС. Digest — SHA-256 "
+        notes = ["Источники — загруженные материалы с независимыми идентификаторами. Digest — SHA-256 "
                  "включённых замаскированных текстов и путей; это не Git commit и не хеш ZIP.",
                  f"Лимиты загрузки: {MAX_FILE_BYTES} байт на файл, "
                  f"{MAX_WORKSPACE_FILES} файлов и {MAX_WORKSPACE_BYTES} байт суммарно."]

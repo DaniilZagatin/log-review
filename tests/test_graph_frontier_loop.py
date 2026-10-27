@@ -14,15 +14,15 @@ from pko.scenario_map.sources import build_workspace
 from scenario_script import SCENARIO, SPEC, ScriptedClient, research_calls, sources, scripted_summary
 
 
-def node(number, kind="action"):
+def node(number, kind="operation"):
     return {"id": f"step-{number}", "name": f"Действие {number}", "kind": kind,
-            "system_id": "sys-1", "group_id": "group-1"}
+            "group_id": "group-1"}
 
 
 class GraphFrontierGuideTests(unittest.TestCase):
     def state(self, count=0):
         return SimpleNamespace(model={"nodes": [node(index) for index in range(1, count + 1)],
-                                     "edges": [], "gaps": []})
+                                     "edges": [], "gaps": [], "scenario": {"entry_operation_ids": ["step-1"], "terminal_operation_ids": []}})
 
     def test_node_only_expansion_gets_rate_limited_guidance(self):
         state = self.state()
@@ -99,7 +99,7 @@ class GraphFrontierLoopTests(unittest.TestCase):
         reminders = list(dict.fromkeys(message["content"] for request in requests for message in request if message["role"] == "user"
                      and str(message.get("content", "")).startswith("[scenario-graph-frontier]")))
         self.assertEqual(len(reminders), 1)
-        self.assertIn('"starts":["step-1"]', reminders[0])
+        self.assertIn('"entry_operation_ids":["step-1"]', reminders[0])
         self.assertIn('"id":"step-1"', reminders[0])
 
     def test_varying_invalid_calls_receive_specific_diagnostic_and_remain_bounded(self):
