@@ -13,6 +13,7 @@ import re
 from typing import Any
 
 from pko.render.dpss_theme import embedded_fonts
+from pko.render.horizon_theme import horizon_tokens
 
 
 def _script_json(value: Any) -> str:
@@ -35,7 +36,7 @@ def render_scenario_map(model: dict[str, Any]) -> str:
     title = str(scenario.get("title") or "Карта сценария")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
-        "STYLE": _STYLE + _NOTATION_STYLE, "SCRIPT": _SCRIPT, "MODEL": _script_json(model),
+        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE, "SCRIPT": _SCRIPT, "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
         "RUN_NOTE": html.escape(str(run.get("reason") or ""), quote=True),
         "RUN_NOTE_HIDDEN": "" if run.get("reason") and run.get("status") in ("partial", "failed") else " hidden",
@@ -51,17 +52,19 @@ _DOCUMENT = r'''<!doctype html>
 __FONTS__<style>__STYLE__</style></head>
 <body><a class="skip" href="#workspace">Перейти к карте</a>
 <header class="page-header">
-<div class="heading-line"><h1 id="page-title">__TITLE__</h1><div class="overview" id="overview"></div></div>
-<p id="scenario-description" class="description"></p>
+<div class="heading-line"><h1 id="page-title">__TITLE__</h1><div class="overview" id="overview"></div>
+<div class="header-alerts" id="header-alerts" hidden><button id="status-toggle" type="button" aria-label="Предупреждения" title="Предупреждения" aria-expanded="false" aria-controls="status-panel"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path class="alert-triangle" d="M10.3 3.6a2 2 0 0 1 3.4 0l8.4 14.6A2 2 0 0 1 20.4 21H3.6a2 2 0 0 1-1.7-2.8z"/><path class="alert-mark" d="M12 9v5M12 17.2v.1"/></svg></button>
+<section id="status-panel" class="map-popover status-panel" aria-label="Предупреждения" hidden><div class="header-status" id="header-status">
 <p id="legacy-note" class="legacy-note"__LEGACY_HIDDEN__>Архивная карта прежней методологии. Её узлы и группировки не подтверждают атомарность по правилам версии 2.0.</p>
-<p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></header>
+<p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></div></section></div></div>
+<p id="scenario-description" class="description"></p></header>
 <main id="workspace" tabindex="-1">
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
-<div class="map-navigation"><label class="stage-picker" for="stage-select"><span>Этап</span><select id="stage-select" aria-label="Выбрать этап сценария"><option value="">Все этапы</option></select></label><button id="clear-selection" type="button" hidden>Снять выделение</button><button id="notation-toggle" type="button" aria-expanded="false" aria-controls="notation-panel">Обозначения</button></div>
+<div class="map-navigation"><div class="stage-picker"><span id="stage-label">Этап</span><button type="button" id="stage-button" aria-haspopup="listbox" aria-expanded="false" aria-controls="stage-menu" aria-labelledby="stage-label stage-current"><span id="stage-current">Все этапы</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button><div id="stage-menu" class="stage-menu" role="listbox" aria-labelledby="stage-label"></div><select id="stage-select" aria-label="Выбрать этап сценария" hidden><option value="">Все этапы</option></select></div><button id="clear-selection" type="button" hidden>Снять выделение</button></div>
 <section id="notation-panel" class="map-popover notation-panel" aria-label="Обозначения карты" hidden><h2>Как читать карту</h2><div id="notation-items"></div><p>Каждая карточка — отдельная операция. Стрелка показывает продолжение исполнения. Условия выбора следующих операций указаны в карточке исходной операции; на стрелках подписей нет.</p><p>Штриховая связь — вывод по коду, пунктирная — не установлена. Направление стрелки сохраняет возвраты и циклы.</p><p>Этап служит навигации. Выбор этапа выделяет его операции; выбор операции — все пути к ней и после неё. Это возможные маршруты карты. Смысл, внешнее взаимодействие и основания доступны в карточке.</p></section>
 <div class="map-toolbar">
-<div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button></div></div>
+<div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button><button id="notation-toggle" type="button" aria-label="Обозначения" title="Обозначения" aria-expanded="false" aria-controls="notation-panel">?</button></div></div>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Карта сценария. Колесо мыши и pinch меняют масштаб относительно курсора; перетаскивание фона перемещает схему. Tab выбирает операции."><div id="canvas-size"><div id="stage"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-label="Переходы между операциями"></svg><div id="nodes"></div></div></div><div id="empty-map" class="empty" hidden>Карта пока не содержит операций. Причина и незавершённые участки указаны в результатах исследования.</div></div>
 </section>
 </div><aside id="inspector" class="inspector" aria-label="Описание выбранного элемента" hidden><div class="inspector-head"><span>Описание элемента</span><button type="button" id="close-inspector" aria-label="Закрыть описание">×</button></div><div id="inspector-content"></div></aside></div>
@@ -133,6 +136,124 @@ _NOTATION_STYLE = r'''
 '''
 
 
+# Horizon layer: comes after tokens.css, so the earlier rules read Horizon values
+# through the legacy variable names; only appearance changes, never content.
+_HORIZON_STYLE = r'''
+/* The DPSS purple replaces Horizon's green accent; green stays only on the
+   success pill ("Подтверждено кодом"), which reads --success. */
+:root{--accent:#8B3FD9;--accent-hover:#7A32C4;--accent-soft:#F3E5FD;--accent-ink:#7044B4;--accent-a08:rgba(139,63,217,.08);--accent-a16:rgba(139,63,217,.16);--accent-a24:rgba(139,63,217,.24);--accent-a40:rgba(139,63,217,.40);--accent-a64:rgba(139,63,217,.64);--focus-ring:#8B3FD9;--on-accent:#fff}
+:root{--muted:var(--ink-secondary);--border:var(--line-default);--mint:var(--bg-subtle);--purple:var(--accent-ink);--pale-purple:var(--accent-soft);--white:var(--bg);--focus:var(--focus-ring);--shadow:none}
+body{background:var(--bg);color:var(--ink);font-family:'SB Sans Display',var(--font-sans)}
+button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,a:focus-visible,[tabindex]:focus-visible,.node:focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+button{transition:background var(--duration-base) var(--ease-standard),color var(--duration-base) var(--ease-standard)}
+button:hover{border-color:transparent}
+.page-header{border-bottom:0;padding:16px 24px 12px}
+.heading-line h1{font-weight:500;letter-spacing:-.025em}
+.overview b{font-weight:300;letter-spacing:-.02em;color:var(--ink)}
+.overview,.description{color:var(--ink-secondary)}
+.overview .findings-toggle:hover{color:var(--accent-ink)}
+.scope summary,.details summary{color:var(--accent-ink)}
+.scope-content{border:0;border-radius:var(--radius-xl);background:var(--bg-raised);box-shadow:var(--shadow-md)}
+.run-note,.legacy-note{border-radius:var(--radius-lg);background:var(--warning-soft);color:var(--warning)}
+.workspace-bar,.map-navigation{border-bottom:0;background:var(--bg)}
+.tabs{background:var(--bg-subtle);border-radius:var(--radius-pill);padding:4px}
+.tabs button{border:0;border-radius:var(--radius-pill);color:var(--ink-secondary);padding:6px 16px}
+.tabs button:hover{background:var(--bg-muted);color:var(--ink)}
+.tabs button[aria-selected=true]{background:var(--bg-inverse);color:var(--ink-inverse);font-weight:500}
+.search-label input{border:0;border-radius:var(--radius-pill);background:var(--bg-subtle);padding:7px 16px}
+.search-label input:hover{background:var(--bg-muted)}
+.stage-picker{border:0;border-radius:var(--radius-pill);background:var(--bg-subtle);padding:3px 12px 3px 16px}
+.map-navigation button,.map-actions button{border:0;border-radius:var(--radius-pill);background:var(--bg-subtle);color:var(--ink)}
+.map-navigation button:hover,.map-actions button:hover{background:var(--bg-muted);color:var(--ink)}
+.map-navigation button[aria-expanded=true]{background:var(--bg-inverse);color:var(--ink-inverse)}
+.checks-notice{border-bottom:0;background:var(--warning-soft);color:var(--warning)}
+.checks-notice:hover{background:var(--bg-muted)}
+.viewport{background:var(--bg-subtle);scrollbar-color:var(--line-control) transparent}
+.lane{border:0;border-radius:var(--radius-xl);background:var(--bg)}
+.lane:nth-child(even){background:color-mix(in srgb,var(--bg) 55%,transparent)}
+.lane-title{color:var(--ink-secondary);font-weight:500}
+.lane-caption{color:var(--ink-tertiary)}
+.node-surface>*{fill:var(--bg-raised);stroke:var(--line-default);stroke-width:1}
+.node:hover .node-surface>*,.node.search-match .node-surface>*{stroke:var(--accent);stroke-width:1.5}
+.node.in-scope .node-surface>*{stroke:var(--accent);fill:var(--accent-a08);stroke-width:1.5}
+.node.selected .node-surface>*{stroke:var(--accent);fill:var(--accent-soft);stroke-width:2}
+.node-type,.node-system,.node-group,.node-status{color:var(--ink-tertiary)}
+.node-status.observed:before{background:var(--success)}
+.node-name{font-weight:500;letter-spacing:-.01em}
+.node-gap,.gap-category,.scope .diagnostic-title{color:var(--warning)}
+.edge-visible,.edge-observed .edge-visible{stroke:var(--line-control);stroke-width:1.2}
+.edge-inferred .edge-visible{stroke:var(--warning)}
+.edge-unknown .edge-visible{stroke:var(--ink-disabled)}
+.edge.selected .edge-visible,.edge.in-scope .edge-visible{stroke:var(--accent);stroke-width:2}
+#arrow path{fill:var(--line-control)}
+.map-actions{border:0;border-radius:var(--radius-pill);background:var(--bg-raised);box-shadow:var(--shadow-md);padding:4px;gap:4px}
+.map-actions button{min-height:40px}
+.map-actions #fit{border-left:0;border-radius:var(--radius-pill)}
+.map-actions output{color:var(--ink);font-weight:500}
+.map-footer{border-top:0}
+.badge{border-radius:var(--radius-pill);padding:4px 10px;font-weight:500}
+.badge.observed,.badge.run-completed{background:var(--success-soft);color:var(--success)}
+.badge.inferred,.badge.run-partial,.badge.run-running{background:var(--warning-soft);color:var(--warning)}
+.badge.unknown{background:var(--bg-muted);color:var(--ink-secondary)}
+.badge.demo{background:var(--accent-soft);color:var(--accent-ink)}
+.badge.run-failed{background:var(--danger-soft);color:var(--danger)}
+.map-popover{border:0;border-radius:var(--radius-xl);background:var(--bg-raised);box-shadow:var(--shadow-lg);padding:20px}
+.map-popover h2,.inspector h2{font-weight:500;letter-spacing:-.02em}
+.inspector{border-left:0;background:var(--bg-raised);box-shadow:var(--shadow-lg)}
+.inspector-head{border-bottom:0;color:var(--ink-tertiary)}
+.inspector-head button{background:transparent;border-radius:var(--radius-pill)}
+.inspector-head button:hover{background:var(--bg-muted);color:var(--ink)}
+.inspector-kicker,.field dt{color:var(--ink-secondary)}
+.field dt{font-weight:500}
+.details,.continuation,.code-explanation+.code-explanation,.external-interaction+.external-interaction{border-color:var(--line-hairline)}
+.text-button{border:0;border-radius:var(--radius-pill);background:var(--bg-subtle);color:var(--accent-ink)}
+.text-button:hover{background:var(--bg-muted)}
+.group-links .text-button{padding:6px 12px}
+td .text-button{background:transparent}
+th{background:var(--bg-subtle);color:var(--ink-secondary);font-weight:500}
+td,th{border-bottom-color:var(--line-hairline);font-variant-numeric:tabular-nums}
+.gap{border:0;border-radius:var(--radius-xl);background:var(--bg-subtle)}
+.evidence,.code-fragment,.source-fragment pre{background:var(--bg-subtle);border-radius:var(--radius-md)}
+.evidence pre,.code-fragment,.source-fragment pre{font-family:var(--font-mono)}
+.continuation-target,.source-function{color:var(--accent-ink)}
+.skip{border-radius:var(--radius-pill);background:var(--bg-inverse);color:var(--ink-inverse)}
+.header-alerts{position:relative;flex:none}
+#status-toggle{display:flex;align-items:center;justify-content:center;width:40px;min-height:40px;padding:0;border:0;border-radius:var(--radius-pill);background:transparent}
+#status-toggle:hover,#status-toggle[aria-expanded=true]{background:var(--warning-soft)}
+#status-toggle svg{width:24px;height:24px}
+.alert-triangle{fill:#f6c343;stroke:#d9a21b;stroke-width:1;stroke-linejoin:round}
+.alert-mark{fill:none;stroke:var(--ink);stroke-width:2;stroke-linecap:round}
+.status-panel{top:calc(100% + 8px);left:auto;right:0;width:380px;max-width:calc(100vw - 32px);max-height:60dvh;padding:12px;z-index:30}
+.header-status{display:flex;flex-direction:column;gap:6px}
+.header-status .run-note,.header-status .legacy-note,.header-status .checks-notice{display:block;width:100%;margin:0;padding:10px 14px;border:0;border-radius:var(--radius-lg);background:var(--warning-soft);color:var(--warning);font-size:13px;line-height:1.45;text-align:left;max-height:none;white-space:pre-wrap}
+.header-status .checks-notice{min-height:40px}
+.header-status .checks-notice:hover{background:var(--bg-muted);color:var(--ink)}
+#panel-map{position:relative}
+.map-navigation{position:absolute;top:12px;left:16px;z-index:4;min-height:0;padding:4px;gap:4px;border-radius:var(--radius-pill);background:var(--bg-raised);box-shadow:var(--shadow-md);max-width:calc(100% - 32px)}
+.map-navigation .stage-picker{flex:0 1 300px;min-width:140px}
+.stage-picker{position:relative;padding:3px 4px 3px 16px;font-size:12px}
+#stage-button{display:flex;align-items:center;gap:8px;flex:1;min-width:0;min-height:32px;padding:4px 10px;border:0;border-radius:var(--radius-pill);background:transparent;color:var(--ink);font-size:13px;font-weight:500;text-align:left;cursor:pointer}
+#stage-button:hover:not(:disabled),#stage-button[aria-expanded=true]{background:var(--bg-muted)}
+#stage-current{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#stage-button svg{flex:none;width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;transition:transform var(--duration-base) var(--ease-emphasized)}
+#stage-button[aria-expanded=true] svg{transform:rotate(180deg)}
+.stage-menu{position:absolute;top:calc(100% + 8px);left:0;z-index:20;min-width:100%;width:max-content;max-width:min(420px,calc(100vw - 32px));max-height:min(360px,60dvh);overflow:auto;padding:6px;border-radius:var(--radius-xl);background:var(--bg-raised);box-shadow:var(--shadow-lg);
+ opacity:0;visibility:hidden;pointer-events:none;transform:translateY(-6px) scale(.98);transform-origin:top left;
+ transition:opacity 160ms var(--ease-standard),transform 240ms var(--ease-emphasized),visibility 0s linear 240ms}
+.stage-menu.open{opacity:1;visibility:visible;pointer-events:auto;transform:none;transition:opacity 180ms var(--ease-standard),transform 280ms var(--ease-emphasized),visibility 0s}
+.stage-menu .stage-option{display:flex;align-items:center;width:100%;min-height:36px;padding:8px 12px;border:0;border-radius:var(--radius-md);background:transparent;color:var(--ink);font-size:13px;font-weight:400;line-height:1.4;letter-spacing:.005em;text-align:left;white-space:normal;cursor:pointer;transition:background var(--duration-fast) var(--ease-standard)}
+.stage-menu .stage-option:hover,.stage-menu .stage-option:focus-visible{background:var(--bg-muted);outline:none}
+.stage-menu .stage-option[aria-selected=true]{background:var(--accent-soft);color:var(--accent-ink);font-weight:500}
+body{text-rendering:optimizeLegibility;-moz-osx-font-smoothing:grayscale;font-optical-sizing:auto}
+.map-actions{left:16px;right:auto;bottom:16px}
+#notation-toggle{margin-left:0;min-width:40px;font-weight:500}
+#notation-toggle[aria-expanded=true]{background:var(--bg-inverse);color:var(--ink-inverse)}
+.notation-panel{top:auto;left:16px;right:auto;bottom:72px;max-height:calc(100% - 100px);transform-origin:bottom left}
+@media(max-width:700px){.status-panel{position:fixed;top:56px;left:16px;right:16px;width:auto;max-width:none}
+.map-navigation{position:static;max-width:none;padding:6px 8px;border-radius:0;box-shadow:none;background:var(--bg)}.map-navigation .stage-picker{flex:1}.map-actions{left:8px;bottom:8px;right:auto}.notation-panel{left:8px;bottom:64px;width:calc(100% - 16px)}}
+'''
+
+
 _GRAPH_LAYOUT_JS = r'''
 function layoutScenarioGraph(nodes, edges, sizes, vertical=false, entryIds=[]) {
  const key=value=>String(value),adj=new Map(nodes.map(n=>[key(n.id),[]]));
@@ -154,9 +275,10 @@ function layoutScenarioGraph(nodes, edges, sizes, vertical=false, entryIds=[]) {
   const group=groups.get(level),desired=new Map();for(const id of group){const neighbors=(forward?incoming:outgoing).get(id).filter(other=>forward?rank.get(other)<level:rank.get(other)>level).map(other=>centers.get(other));desired.set(id,neighbors.length?neighbors.reduce((sum,n)=>sum+n,0)/neighbors.length:centers.get(id));}
   group.sort((a,b)=>desired.get(a)-desired.get(b));let cursor=-Infinity;for(const id of group){const size=secondarySize(id),top=Math.max(desired.get(id)-size/2,cursor);centers.set(id,top+size/2);cursor=top+size+38;}const shift=group.reduce((sum,id)=>sum+desired.get(id)-centers.get(id),0)/group.length;for(const id of group)centers.set(id,centers.get(id)+shift);
  }}
- // Long jumps bypass intervening cards just as cycles bypass the graph body.
+ // Long jumps thread through rank gaps; only cycles need the outer channel.
  const outerEdges=new Set(valid.filter(e=>rank.get(key(e.target))-rank.get(key(e.source))!==1).map(e=>key(e.id)));
- const outerSpace=outerEdges.size?80+outerEdges.size*24:0,positions=new Map();
+ const backward=valid.filter(e=>key(e.source)!==key(e.target)&&rank.get(key(e.target))<=rank.get(key(e.source))).length;
+ const outerSpace=backward?80+backward*24:0,positions=new Map();
  if(!nodes.length)return {rank,positions,outerEdges,width:600,height:400};
  const secondaryMin=Math.min(...nodes.map(n=>centers.get(key(n.id))-secondarySize(key(n.id))/2)),secondaryMax=Math.max(...nodes.map(n=>centers.get(key(n.id))+secondarySize(key(n.id))/2));let primary=32;
  for(const level of levels){const group=groups.get(level),primarySize=Math.max(...group.map(id=>vertical?sizes.get(id).h:sizes.get(id).w));for(const id of group){const size=sizes.get(id),secondary=32+centers.get(id)-secondarySize(id)/2-secondaryMin+(vertical?0:outerSpace);positions.set(id,{x:vertical?secondary:primary,y:vertical?primary:secondary,w:size.w,h:size.h});}primary+=primarySize+(vertical?58:82);}
@@ -186,16 +308,46 @@ function routeScenarioOuterEdge(edge,layout,vertical,index=0) {
  else{const channel=28+index*24,from=trailing(sourceRank)+28,to=b.x-28;points=[{x:a.x+a.w,y:a.y+a.h/2},{x:from,y:a.y+a.h/2},{x:from,y:channel},{x:to,y:channel},{x:to,y:b.y+b.h/2},{x:b.x-3,y:b.y+b.h/2}];label={x:(from+to)/2,y:channel-9};}
  return {...smoothScenarioPath(points),label,outer:true};
 }
-function routeScenarioForwardEdge(edge,layout,vertical,port=0,bend=0) {
- const a=layout.positions.get(String(edge.source)),b=layout.positions.get(String(edge.target)),rank=layout.rank.get(String(edge.source));
- const trailing=Math.max(...[...layout.positions].filter(([id])=>layout.rank.get(id)===rank).map(([,p])=>vertical?p.y+p.h:p.x+p.w));
- // Cards in a rank have unequal heights/widths. Turn only in the shared free
- // gutter, otherwise a diagonal from a short card crosses its taller sibling.
- const lane=Math.max(-8,Math.min(8,bend/3));let points;
- if(vertical){const x=a.x+a.w/2+port,z=b.x+b.w/2+port;points=[{x,y:a.y+a.h},{x,y:trailing+16+lane},{x:z,y:b.y-16+lane},{x:z,y:b.y-3}];}
- else{const y=a.y+a.h/2+port,z=b.y+b.h/2+port;points=[{x:a.x+a.w,y},{x:trailing+22+lane,y},{x:b.x-22+lane,y:z},{x:b.x-3,y:z}];}
- const route=smoothScenarioPath(points),[s,c1,c2,e]=route.segments[1];
- return {...route,label:{x:(s.x+3*c1.x+3*c2.x+e.x)/8,y:(s.y+3*c1.y+3*c2.y+e.y)/8-9},outer:false};
+function scenarioColumns(layout,vertical) {
+ // Rank envelopes along the flow (p) with their cards sorted across it (s).
+ if(layout.columns)return layout.columns;
+ const columns=new Map();
+ for(const [id,p] of layout.positions){const r=layout.rank.get(id),box=vertical?{p0:p.y,p1:p.y+p.h,s0:p.x,s1:p.x+p.w}:{p0:p.x,p1:p.x+p.w,s0:p.y,s1:p.y+p.h};
+  const column=columns.get(r)||{lead:Infinity,trail:-Infinity,cards:[]};column.lead=Math.min(column.lead,box.p0);column.trail=Math.max(column.trail,box.p1);column.cards.push(box);columns.set(r,column);}
+ for(const column of columns.values())column.cards.sort((a,b)=>a.s0-b.s0);
+ return layout.columns=columns;
+}
+function routeScenarioForwardEdge(edge,layout,vertical,port=0,bend=0,used=new Map()) {
+ // Straight runs through each rank's free gap, S-curves across the gutters
+ // between ranks: a long jump threads past intervening cards instead of
+ // detouring around the whole graph. Every tangent points along the flow.
+ const a=layout.positions.get(String(edge.source)),b=layout.positions.get(String(edge.target));
+ const from=layout.rank.get(String(edge.source)),to=layout.rank.get(String(edge.target)),columns=scenarioColumns(layout,vertical);
+ const limit=(vertical?layout.width:layout.height)-6,point=(p,s)=>vertical?{x:s,y:p}:{x:p,y:s};
+ const sa=(vertical?a.x+a.w/2:a.y+a.h/2)+port,sb=(vertical?b.x+b.w/2:b.y+b.h/2)+port;
+ const pa=vertical?a.y+a.h:a.x+a.w,pb=(vertical?b.y:b.x)-3,lanes=[...columns.keys()].filter(r=>r>from&&r<to).sort((x,y)=>x-y);
+ const waypoints=[[pa,sa]];if(columns.get(from).trail>pa+1)waypoints.push([columns.get(from).trail,sa]);
+ let current=sa;
+ for(const r of lanes){const column=columns.get(r),cards=column.cards,gaps=[[6,cards[0].s0-12]];
+  for(let i=1;i<cards.length;i++)gaps.push([cards[i-1].s1+10,cards[i].s0-10]);gaps.push([cards[cards.length-1].s1+12,limit]);
+  const middle=(column.lead+column.trail)/2,desired=sa+(sb-sa)*(middle-pa)/((pb-pa)||1);
+  // Keep the previous height while it fits, so a jump stays a straight line.
+  const open=gaps.map((gap,index)=>({gap,index})).filter(({gap})=>gap[1]>=gap[0]);
+  const fit=open.find(({gap})=>current>=gap[0]&&current<=gap[1]),choice=fit||open.reduce((best,item)=>{const distance=g=>Math.max(g[0]-desired,0,desired-g[1]);return distance(item.gap)<distance(best.gap)?item:best;});
+  const slot=r+':'+choice.index,count=used.get(slot)||0;used.set(slot,count+1);
+  const base=fit?current:Math.min(choice.gap[1],Math.max(choice.gap[0],desired)),shift=fit?0:(count%2?1:-1)*Math.ceil(count/2)*8;
+  current=Math.min(choice.gap[1],Math.max(choice.gap[0],base+shift));waypoints.push([column.lead,current],[column.trail,current]);}
+ waypoints.push([pb,sb]);
+ const lengths=waypoints.slice(1).map(([p],i)=>p-waypoints[i][0]),handles=waypoints.map((_,i)=>Math.min(i?lengths[i-1]:Infinity,i<lengths.length?lengths[i]:Infinity)/2);
+ const segments=lengths.map((_,i)=>{const [p0,s0]=waypoints[i],[p1,s1]=waypoints[i+1];return [point(p0,s0),point(p0+handles[i],s0),point(p1-handles[i+1],s1),point(p1,s1)];});
+ const path=`M ${segments[0][0].x} ${segments[0][0].y} `+segments.map(([,c1,c2,end])=>`C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`).join(' ');
+ const [s,c1,c2,e]=segments[Math.floor(segments.length/2)];
+ return {segments,path,label:{x:(s.x+3*c1.x+3*c2.x+e.x)/8,y:(s.y+3*c1.y+3*c2.y+e.y)/8-9},outer:false};
+}
+function routeScenarioEdge(edge,layout,vertical,state,port=0,bend=0) {
+ if(layout.rank.get(String(edge.target))>layout.rank.get(String(edge.source)))return routeScenarioForwardEdge(edge,layout,vertical,port,bend,state.gaps||(state.gaps=new Map()));
+ const index=state.back||0;state.back=index+1;
+ return routeScenarioOuterEdge(edge,layout,vertical,index);
 }
 '''
 
@@ -261,7 +413,8 @@ for(const [count,label,inspect] of [[nodes.length,plural(nodes.length,legacy?['�
 function field(container,label,value){ if(!text(value).trim())return; const dl=el('dl','field');dl.append(el('dt','',label),el('dd','',value));container.append(dl); }
 function listField(container,label,values){ const items=array(values);if(!items.length)return;const section=el('div','field');section.append(el('div','muted',label));const ul=el('ul');for(const item of items)ul.append(el('li','',item));section.append(ul);container.append(section); }
 if(run.reason&&(runState==='partial'||runState==='failed')){$('run-note').textContent=text(run.reason);$('run-note').hidden=false;}
-if(validationIssues.length||omissions.length){const notice=el('button','checks-notice');notice.type='button';notice.textContent=[omissions.length?'Пропуски материалов: '+omissions.length:'',validationIssues.length?'Незакрытые проверки: '+validationIssues.length:''].filter(Boolean).join(' · ')+' — посмотреть';notice.addEventListener('click',showFindings);$('panel-map').insertBefore(notice,$('viewport'));}
+if(validationIssues.length||omissions.length){const notice=el('button','checks-notice');notice.type='button';notice.textContent=[omissions.length?'Пропуски материалов: '+omissions.length:'',validationIssues.length?'Незакрытые проверки: '+validationIssues.length:''].filter(Boolean).join(' · ')+' — посмотреть';notice.addEventListener('click',()=>{closePopovers();showFindings();});$('header-status').append(notice);}
+$('header-alerts').hidden=![...$('header-status').children].some(item=>!item.hidden);
 
 function evidenceBlock(container,items,label='Основания в исходниках'){
  const evidence=array(items); if(!evidence.length)return;
@@ -313,10 +466,10 @@ function systemBlock(container,node){
  field(details,'Обоснование определения АС',system.basis);
  evidenceBlock(details,system.evidence,'Фрагменты об АС');container.append(details);
 }
-function closePopovers(){for(const name of ['notation']){$(name+'-panel').hidden=true;$(name+'-toggle').setAttribute('aria-expanded','false');}}
-for(const name of ['notation'])$(name+'-toggle').addEventListener('click',()=>{const open=$(name+'-panel').hidden;closePopovers();$(name+'-panel').hidden=!open;$(name+'-toggle').setAttribute('aria-expanded',String(open));});
-document.addEventListener('pointerdown',event=>{if(!event.target.closest('.map-popover,.map-navigation'))closePopovers();});
-document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const name of ['notation'])if(!$(name+'-panel').hidden){closePopovers();$(name+'-toggle').focus();event.preventDefault();break;}});
+function closePopovers(){for(const name of ['notation','status']){$(name+'-panel').hidden=true;$(name+'-toggle').setAttribute('aria-expanded','false');}}
+for(const name of ['notation','status'])$(name+'-toggle').addEventListener('click',()=>{const open=$(name+'-panel').hidden;closePopovers();$(name+'-panel').hidden=!open;$(name+'-toggle').setAttribute('aria-expanded',String(open));});
+document.addEventListener('pointerdown',event=>{if(!event.target.closest('.map-popover,.map-navigation,.map-actions,.header-alerts'))closePopovers();});
+document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const name of ['notation','status'])if(!$(name+'-panel').hidden){closePopovers();$(name+'-toggle').focus();event.preventDefault();break;}});
 for(const [kind,label] of (legacy?[['start','Начало сценария'],['action','Атомарное действие'],['decision','Условие и альтернативные ветви'],['fork','Запуск параллельных ветвей'],['join','Синхронизация параллельных ветвей'],['wait','Ожидание события или результата'],['end','Исход: успех, отказ, сбой или отмена'],['external','Внешний участок с ограниченным описанием']]:[['operation','Атомарная операция']])){const row=el('div','notation-item');row.append(notationIcon(kind),el('span','',label));$('notation-items').append(row);}
 function showGroup(group){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',group.kind==='stage'?'ЭТАП':'БИЗНЕС-ОПЕРАЦИЯ'),el('h2','',group.name));
@@ -336,6 +489,19 @@ const stages=groups.filter(g=>g.kind==='stage');
 for(const stage of stages){const option=el('option','',stage.name);option.value=text(stage.id);$('stage-select').append(option);}
 $('stage-select').disabled=!stages.length;
 if(!stages.length)$('stage-select').options[0].textContent='Этапы не заданы';
+ // The hidden select stays the source of truth; this menu only presents it.
+ function syncStageMenu(){const select=$('stage-select');$('stage-current').textContent=select.options[select.selectedIndex]?.textContent||'';for(const item of $('stage-menu').children)item.setAttribute('aria-selected',String(item.dataset.value===select.value));}
+ function openStageMenu(open){$('stage-menu').classList.toggle('open',open);$('stage-button').setAttribute('aria-expanded',String(open));if(open)([...$('stage-menu').children].find(item=>item.getAttribute('aria-selected')==='true')||$('stage-menu').firstElementChild)?.focus();}
+ for(const option of $('stage-select').options){const item=el('button','stage-option',option.textContent);item.type='button';item.tabIndex=-1;item.setAttribute('role','option');item.dataset.value=option.value;
+  item.addEventListener('click',()=>{openStageMenu(false);$('stage-button').focus();if($('stage-select').value!==option.value){$('stage-select').value=option.value;$('stage-select').dispatchEvent(new Event('change'));}syncStageMenu();});$('stage-menu').append(item);}
+ $('stage-button').disabled=$('stage-select').disabled;
+ $('stage-button').addEventListener('click',()=>openStageMenu(!$('stage-menu').classList.contains('open')));
+ $('stage-button').addEventListener('keydown',event=>{if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();openStageMenu(true);}});
+ $('stage-menu').addEventListener('keydown',event=>{const items=[...$('stage-menu').children],index=items.indexOf(document.activeElement);
+  if(event.key==='ArrowDown'||event.key==='ArrowUp'){event.preventDefault();items[(index+(event.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();}
+  else if(event.key==='Escape'){event.preventDefault();event.stopPropagation();openStageMenu(false);$('stage-button').focus();}else if(event.key==='Tab')openStageMenu(false);});
+ document.addEventListener('pointerdown',event=>{if(!event.target.closest('.stage-picker'))openStageMenu(false);});
+ syncStageMenu();
 $('stage-select').addEventListener('change',()=>{
  const group=groupById.get($('stage-select').value);closePopovers();closeInspector(false);
  if(group){selected={type:'group',id:group.id};updateHighlight();requestAnimationFrame(()=>frameGroup(group));announce('Выбран этап: '+group.name);}
@@ -412,7 +578,7 @@ function updateHighlight(){
  const selectedGroup=selected?.type==='group'?groupById.get(text(selected.id)):null;
  $('clear-selection').hidden=!selected;
  const selectedStage=selectedGroup?.kind==='stage'?selectedGroup:null;
- $('stage-select').value=selectedStage?text(selectedStage.id):'';
+ $('stage-select').value=selectedStage?text(selectedStage.id):'';syncStageMenu();
  for(const node of nodes){const button=nodeButtons.get(text(node.id));if(button){button.classList.toggle('in-scope',!!selected&&scopeIds.has(text(node.id)));button.classList.toggle('selected',selected?.type==='node'&&text(selected.id)===text(node.id));button.setAttribute('aria-pressed',String(selected?.type==='node'&&text(selected.id)===text(node.id)));button.classList.toggle('dimmed',!!selected&&!scopeIds.has(text(node.id)));}}
  for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=selected?.type==='node'?nodeScope.edges.has(text(edge.id)):selected?.type==='group'&&scopeIds.has(text(edge.source))&&scopeIds.has(text(edge.target));group.classList.toggle('in-scope',isRelated);group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
 }
@@ -454,7 +620,7 @@ __GRAPH_LAYOUT_JS__
 function draw(){
  const nodeContainer=$('nodes');nodeContainer.replaceChildren();$('connections').replaceChildren();positions.clear();nodeButtons.clear();edgeGroups.clear();
  if(!nodes.length){$('empty-map').hidden=false;$('canvas-size').hidden=true;return;}else{$('empty-map').hidden=true;$('canvas-size').hidden=false;}
- const vertical=$('viewport').clientWidth<740,sizes=new Map();
+ const vertical=$('viewport').clientWidth<740,sizes=new Map(),measured=[];
  for(const node of nodes){
   const id=text(node.id),kind=!legacy?'operation':Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';
   const button=el('button','node kind-'+kind);button.type='button';button.dataset.nodeId=id;
@@ -467,6 +633,12 @@ function draw(){
   const findingCount=gaps.filter(g=>array(g.node_ids).map(text).includes(id)).length;if(findingCount)content.append(el('span','node-gap','Не установлено: '+findingCount));
   button.append(content);button.addEventListener('click',()=>selectNode(node));nodeContainer.append(button);
   if(kind==='decision')button.style.height=Math.max(230,content.offsetHeight*2+32)+'px';
+  measured.push({id,kind,button});
+ }
+ // Every card takes the largest card's size, so the map reads as a uniform grid.
+ const uniform=measured.filter(item=>item.kind!=='decision'),cardW=Math.max(0,...uniform.map(item=>item.button.offsetWidth)),cardH=Math.max(0,...uniform.map(item=>item.button.offsetHeight));
+ for(const {id,kind,button} of measured){
+  if(kind!=='decision'){button.style.width=cardW+'px';button.style.height=cardH+'px';}
   const w=button.offsetWidth,h=button.offsetHeight,surface=svg('svg',{'class':'node-surface',viewBox:'0 0 '+w+' '+h,'aria-hidden':'true',focusable:'false'});
   if(kind==='decision')surface.append(svg('path',{d:`M ${w/2} 1 L ${w-1} ${h/2} L ${w/2} ${h-1} L 1 ${h/2} Z`}));
   else surface.append(svg('rect',{x:1,y:1,width:w-2,height:h-2,rx:kind==='start'||kind==='end'?Math.min(38,h/2):12}));
@@ -477,11 +649,10 @@ function draw(){
  $('stage').style.width=graphWidth+'px';$('stage').style.height=graphHeight+'px';
  const drawing=$('connections');drawing.setAttribute('width',graphWidth);drawing.setAttribute('height',graphHeight);drawing.setAttribute('viewBox','0 0 '+graphWidth+' '+graphHeight);
  const defs=svg('defs');const marker=svg('marker',{id:'arrow',viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#8b9ca7'}));defs.append(marker);drawing.append(defs);
- let backIndex=0;const pairCounts=new Map(),pairUsed=new Map();for(const edge of validEdges){const key=JSON.stringify([edge.source,edge.target]);pairCounts.set(key,(pairCounts.get(key)||0)+1);}
+ const routing={};const pairCounts=new Map(),pairUsed=new Map();for(const edge of validEdges){const key=JSON.stringify([edge.source,edge.target]);pairCounts.set(key,(pairCounts.get(key)||0)+1);}
  for(const edge of validEdges){const a=positions.get(text(edge.source)),b=positions.get(text(edge.target)),key=JSON.stringify([edge.source,edge.target]),pairIndex=pairUsed.get(key)||0;pairUsed.set(key,pairIndex+1);const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28,port=Math.max(-18,Math.min(18,bend/2));let start,c1,c2,end,routed;
- if(text(edge.source)===text(edge.target)){const reach=65+pairIndex*24;if(vertical){start={x:a.x+a.w/2,y:a.y+a.h};c1={x:start.x,y:start.y+reach};c2={x:a.x+a.w+reach,y:a.y+a.h/2+reach};end={x:a.x+a.w+3,y:a.y+a.h/2};}else{start={x:a.x+a.w,y:a.y+a.h/2};c1={x:start.x+reach,y:start.y};c2={x:a.x+a.w/2+reach,y:a.y-reach};end={x:a.x+a.w/2,y:a.y-3};}backIndex++;}
- else if(layout.outerEdges.has(text(edge.id)))routed=routeScenarioOuterEdge(edge,layout,vertical,backIndex++);
- else routed=routeScenarioForwardEdge(edge,layout,vertical,port,bend);
+ if(text(edge.source)===text(edge.target)){const reach=65+pairIndex*24;if(vertical){start={x:a.x+a.w/2,y:a.y+a.h};c1={x:start.x,y:start.y+reach};c2={x:a.x+a.w+reach,y:a.y+a.h/2+reach};end={x:a.x+a.w+3,y:a.y+a.h/2};}else{start={x:a.x+a.w,y:a.y+a.h/2};c1={x:start.x+reach,y:start.y};c2={x:a.x+a.w/2+reach,y:a.y-reach};end={x:a.x+a.w/2,y:a.y-3};}routing.back=(routing.back||0)+1;}
+ else routed=routeScenarioEdge(edge,layout,vertical,routing,port,bend);
  const path=routed?routed.path:`M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
  const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','data-edge-id':text(edge.id),'aria-label':'Переход: '+(byId.get(text(edge.source)).name||edge.source)+' → '+(byId.get(text(edge.target)).name||edge.target)});
   group.append(svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
@@ -515,7 +686,8 @@ function applyZoom(value,anchor){
  if(point){view.scrollLeft=scrollX;view.scrollTop=scrollY;}
  $('zoom-value').textContent=Math.round(zoom*100)+'%';$('zoom-out').disabled=zoom<=minimumZoom();$('zoom-in').disabled=zoom>=1.7;
 }
-function fit(){if(!nodes.length)return;const view=$('viewport');applyZoom(Math.min((availableWidth()-24)/graphWidth,(view.clientHeight-24)/graphHeight,1));view.scrollTo(0,0);}
+// Fit across the flow only: cards stay readable and the flow scrolls.
+function fit(){if(!nodes.length)return;const view=$('viewport'),vertical=view.clientWidth<740;applyZoom(Math.min(vertical?(availableWidth()-24)/graphWidth:(view.clientHeight-24)/graphHeight,1));view.scrollTo(0,0);}
 function initialView(){if(!nodes.length)return;if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group){frameGroup(group);return;}}const fitted=Math.min((availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight,1);applyZoom(Math.max(.8,fitted));if(fitted<.8)centerNode(byId.get(text(array(scenario.entry_operation_ids)[0]))||nodes.find(n=>legacy&&n.kind==='start')||nodes[0]);else $('viewport').scrollTo(0,0);}
 function zoomBy(factor){const view=$('viewport');applyZoom(zoom*factor,{x:availableWidth()/2,y:view.clientHeight/2});}
 $('zoom-in').addEventListener('click',()=>zoomBy(1.2));$('zoom-out').addEventListener('click',()=>zoomBy(1/1.2));$('fit').addEventListener('click',fit);

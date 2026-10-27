@@ -7,6 +7,12 @@ const path = require('node:path');
 const assert = require('node:assert/strict');
 const {chromium} = require('playwright');
 
+// The stage menu is a custom listbox over a hidden select: drive it like a user.
+async function chooseStage(page, id) {
+  await page.locator('#stage-button').click();
+  await page.locator(`#stage-menu .stage-option[data-value=${JSON.stringify(id)}]`).click();
+}
+
 async function checkCursorZoom(page, member) {
   // Observe delivered browser events; never invoke the renderer's zoom helpers.
   await page.evaluate(()=>{
@@ -130,7 +136,9 @@ async function checkCursorZoom(page, member) {
   assert.equal(await page.locator('#zoom-out').isDisabled(),true,'Minimum clamp agrees with zoom controls');
 
   async function checkCenteringThreshold(label){
-    await page.locator('#fit').click();point=await fieldPoint();
+    // "Вписать" fits across the flow only; the minimum zoom fits the whole graph.
+    for(let i=0;i<60&&!(await page.locator('#zoom-out').isDisabled());i++)await page.locator('#zoom-out').click();
+    point=await fieldPoint();
     const fits=s=>s.stage.width<=s.area.width+.5&&s.stage.height<=s.area.height+.5;
     let state=await snapshot(point);assert(fits(state),`${label}: fitted graph is smaller than its visible field`);
     for(let i=0;fits(state)&&i<40;i++){
@@ -189,6 +197,7 @@ async function main() {
         assert.equal(await page.locator('.node,.edge').count(),0);
         assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
         if(model.validation?.issues?.length||model.source_omissions?.length){
+          await page.locator('#status-toggle').click();
           await page.locator('.checks-notice').click();
           const findings=await page.locator('#inspector-content').innerText();
           for(const issue of model.validation?.issues||[])assert(findings.includes(issue));
@@ -203,7 +212,8 @@ async function main() {
       assert.equal(await page.locator('.node').count(), model.nodes.length);
       assert.equal(await page.locator('.edge').count(), model.edges.length);
       assert.equal(await page.locator('.edge-label,.edge text,.edge title').count(),0,'Links must have no text, including hover labels');
-      assert.equal(await page.locator('#legacy-note').isVisible(),legacy,'Old reports must remain explicitly marked');
+      if(legacy)assert.equal(await page.locator('#status-toggle').isVisible(),true,'Old reports must remain explicitly marked');
+      assert.equal(await page.locator('#legacy-note').evaluate(e=>!e.hidden),legacy,'Old reports must remain explicitly marked');
       if(!legacy){
         assert.equal(await page.locator('.node.kind-operation').count(),model.nodes.length);
         assert.equal(await page.locator('.node-surface>rect').count(),model.nodes.length,'Every operation uses the same card shape');
@@ -260,7 +270,7 @@ async function main() {
       }
       const groups=model.groups||[],stages=groups.filter(g=>g.kind==='stage');
       for(const stage of [stages[0],stages[stages.length-1]].filter(Boolean)) {
-        await page.locator('#stage-select').selectOption(stage.id);
+        await chooseStage(page,stage.id);
         const memberIds=model.nodes.filter(n=>n.group_id===stage.id||model.groups.find(g=>g.id===n.group_id)?.parent_id===stage.id).map(n=>n.id);
         assert.equal(await page.locator('#inspector').isVisible(), false);
         assert.equal(await page.locator('.node.in-scope').count(), memberIds.length);
@@ -272,12 +282,12 @@ async function main() {
         },memberIds);
         assert(visible,'All stage members must be inside viewport after stage selection');
       }
-      if(stages.length)await page.locator('#stage-select').selectOption('');
+      if(stages.length)await chooseStage(page,'');
       assert.equal(await page.locator('.node.dimmed').count(),0);
       const reviewedBranch=[...model.nodes].reverse().find(n=>n.code_explanations?.length&&model.edges.filter(e=>e.source===n.id).length>1);
       const member=reviewedBranch||model.nodes.find(n=>n.basis&&n.code_explanations?.length)||model.nodes.find(n=>n.basis)||model.nodes[0];
       const memberGroup=groups.find(g=>g.id===member.group_id);
-      if(memberGroup)await page.locator('#stage-select').selectOption(memberGroup.kind==='stage'?memberGroup.id:memberGroup.parent_id);
+      if(memberGroup)await chooseStage(page,memberGroup.kind==='stage'?memberGroup.id:memberGroup.parent_id);
       await page.locator('[data-node-id="'+member.id+'"]').focus();
       await page.keyboard.press('Enter');
       assert.equal(await page.locator('.node.selected').count(), 1);

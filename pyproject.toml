@@ -34,4 +34,4 @@ where = ["backend"]
 
 [tool.setuptools.package-data]
 "pko.scenario_map" = ["*.md"]
-"pko.render" = ["assets/dpss/*.woff2", "assets/dpss/*.md"]
+"pko.render" = ["assets/dpss/*.woff2", "assets/dpss/*.md", "design/horizon/tokens.css", "design/horizon/components/bundle.css"]

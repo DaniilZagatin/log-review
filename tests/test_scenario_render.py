@@ -146,8 +146,8 @@ class ScenarioRenderTests(unittest.TestCase):
         elements = {attrs.get("id"): attrs for _, attrs in Document(result).elements if "id" in attrs}
         self.assertIn("hidden", elements["inspector"])
         self.assertEqual(elements["close-inspector"]["aria-label"], "Закрыть описание")
-        self.assertIn("--mint:#F6FAF8", result)
-        self.assertIn("--accent:#C17DF7", result)
+        self.assertIn("--accent:#8B3FD9", result)
+        self.assertIn("--purple:var(--accent-ink)", result)
         self.assertIn("height:100dvh", result)
         self.assertNotIn("Паспорт инициативы", result)
 
@@ -395,9 +395,8 @@ console.log(JSON.stringify({width:result.width,height:result.height,
         runner = _GRAPH_LAYOUT_JS + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const layout=layoutScenarioGraph(input.nodes,input.edges,new Map(input.sizes),input.vertical,input.entry_ids);
-let index=0;const routes=input.edges.map(edge=>({
- id:edge.id,source:edge.source,target:edge.target,
- ...(layout.outerEdges.has(edge.id)?routeScenarioOuterEdge(edge,layout,input.vertical,index++):routeScenarioForwardEdge(edge,layout,input.vertical))}));
+const state={};const routes=input.edges.map(edge=>({
+ id:edge.id,source:edge.source,target:edge.target,...routeScenarioEdge(edge,layout,input.vertical,state)}));
 console.log(JSON.stringify({positions:[...layout.positions],routes,width:layout.width,height:layout.height}));
 """
         for vertical in (False, True):
