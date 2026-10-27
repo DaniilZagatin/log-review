@@ -16,6 +16,7 @@
 - scenario_map/context.py, research_memory.py, compaction.py — память вне диалога и сжатие.
 - render/scenario_map.py — автономный HTML, единое поле и панель операции.
 - llm/, audit.py, output/ — клиент, единый наблюдаемый trace, опциональный Phoenix, сохранение.
+- observability/ — этапы после сохранения карты (`--observability`): статический каталог логирования, кандидаты связи с операциями, `process_report.json` со ссылкой на ревизию карты. render/process_report.py — вкладки отчёта вокруг карты. План развития — docs/integration-belka-rashid.md.
 
 ## Принципы
 
@@ -41,4 +42,4 @@ PowerShell: `.\.venv\Scripts\python.exe -B tests/run_tests.py`.
 Демо: `.\.venv\Scripts\python.exe -B scripts/demo_scenario_map.py`.
 Unix: `make test` / `make test-report`.
 
-Изменения схемы — test_scenario_schema/quality/stage_evidence; цикла — test_scenario_agent; памяти — test_scenario_memory/compaction; источников — test_scenario_sources; HTML — test_scenario_render и scripts/check_scenario_map_ui.cjs с визуальной проверкой подробного графа. Синтетическое демо не является проверкой реальной модели. Семантическую полноту оценивают на размеченных специалистом реальных фрагментах; число узлов не является метрикой качества само по себе.
+Изменения схемы — test_scenario_schema/quality/stage_evidence; цикла — test_scenario_agent; памяти — test_scenario_memory/compaction; источников — test_scenario_sources; HTML — test_scenario_render и scripts/check_scenario_map_ui.cjs с визуальной проверкой подробного графа; отчёт наблюдаемости и вкладки — test_process_report. Синтетическое демо не является проверкой реальной модели. Семантическую полноту оценивают на размеченных специалистом реальных фрагментах; число узлов не является метрикой качества само по себе.

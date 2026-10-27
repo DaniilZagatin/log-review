@@ -11,6 +11,7 @@ from uuid import uuid4
 from pko.audit import audit_run, record
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_span
+from pko.observability.pipeline import run_observability
 from pko.output.publisher import write_outputs
 from pko.render.scenario_map import render_scenario_map
 from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAULT_MODEL_TIMEOUT, run_agent
@@ -23,7 +24,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  max_seconds: float = DEFAULT_MAX_SECONDS, thinking=None,
                  model_timeout: float = DEFAULT_MODEL_TIMEOUT,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
-                 on_event=None) -> dict:
+                 observability: bool = False, on_event=None) -> dict:
     scenario = scenario.strip()
     if not scenario or len(scenario) > 20000:
         raise PkoError("Нужно краткое описание варианта сценария (до 20 000 символов).",
@@ -92,6 +93,24 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                             "scenario-map": ("scenario_map.html", html),
                         })
                         output_span.set_output({"files": ["scenario_map.json", "scenario_map.html"]})
+                    if observability:
+                        # The map is already published; a report failure leaves it as is.
+                        try:
+                            with trace_span("process_observability") as report_span:
+                                report = run_observability(model, workspace.tree)
+                                report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
+                            with trace_span("render_report"):
+                                html = render_scenario_map(model, report)
+                            with trace_span("publish_report") as output_span:
+                                write_outputs(out_dir, {
+                                    "process-report": ("process_report.json", json.dumps(report, ensure_ascii=False, indent=2)),
+                                    "scenario-map": ("scenario_map.html", html),
+                                })
+                                output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
+                            model["run"]["process_report"] = "process_report.json"
+                        except Exception as exc:
+                            record("process_report_failed", error_type=type(exc).__name__, error=str(exc)[:500])
+                            model["run"]["process_report_error"] = f"{type(exc).__name__}: {exc}"[:500]
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
                                          "gaps": len(model.get("gaps", [])),
@@ -122,6 +141,8 @@ def add_cli_command(subparsers):
                          help="Бюджет ответа суммаризации, 512–32768 токенов (по умолчанию 8192)")
     command.add_argument("--summary-mode", choices=("standard", "inherit"), default="standard",
                          help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
+    command.add_argument("--observability", action="store_true",
+                         help="Дополнительно построить каталог логирования и вкладки отчёта (пилотный режим)")
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -155,7 +176,7 @@ def command_main(args) -> int:
     model = run_scenario(scenario, args.source, Path(args.out), max_steps=args.max_steps,
                          max_seconds=args.max_seconds, model_timeout=args.model_timeout,
                          thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
-                         summary_mode=args.summary_mode, on_event=event)
+                         summary_mode=args.summary_mode, observability=args.observability, on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
               "failed": "Исследование не выполнено"}
@@ -164,6 +185,10 @@ def command_main(args) -> int:
         print(model["run"]["reason"])
     print(f"Карта: {(Path(args.out).resolve() / 'scenario_map.html')}")
     print(f"Данные: {(Path(args.out).resolve() / 'scenario_map.json')}")
+    if model["run"].get("process_report"):
+        print(f"Отчёт наблюдаемости: {(Path(args.out).resolve() / 'process_report.json')}")
+    elif model["run"].get("process_report_error"):
+        print(f"Отчёт наблюдаемости не построен: {model['run']['process_report_error']}")
     if model["run"].get("interrupted"):
         return 130
     return 0 if status == "completed" else (2 if status == "partial" else 1)

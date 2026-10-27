@@ -12,8 +12,10 @@ import json
 import re
 from typing import Any
 
+from pko.observability.contracts import validate_report
 from pko.render.dpss_theme import embedded_fonts
 from pko.render.horizon_theme import horizon_tokens
+from pko.render.process_report import REPORT_PANELS, REPORT_SCRIPT, REPORT_STYLE, REPORT_TABS
 
 
 def _script_json(value: Any) -> str:
@@ -23,26 +25,35 @@ def _script_json(value: Any) -> str:
             .replace("\u2029", "\\u2029"))
 
 
-def render_scenario_map(model: dict[str, Any]) -> str:
+def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = None) -> str:
     """Return one self-contained HTML document without modifying ``model``.
 
     Unknown evidence or run statuses display as unknown, never as confirmed.
     Empty/partial models remain inspectable; facts are not created by rendering.
+    A process report adds tabs only after it is validated against this map.
     """
     if not isinstance(model, dict):
         raise TypeError("scenario map must be a dictionary")
+    if report is not None:
+        validate_report(report, model)
     scenario = model.get("scenario") or {}
     run = model.get("run") or {}
     title = str(scenario.get("title") or "Карта сценария")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
-        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE, "SCRIPT": _SCRIPT, "MODEL": _script_json(model),
+        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + (REPORT_STYLE if report else ""),
+        "SCRIPT": _SCRIPT.replace("/*__REPORT_JS__*/", REPORT_SCRIPT if report else ""),
+        "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
         "RUN_NOTE": html.escape(str(run.get("reason") or ""), quote=True),
         "RUN_NOTE_HIDDEN": "" if run.get("reason") and run.get("status") in ("partial", "failed") else " hidden",
+        "REPORT_TABS": REPORT_TABS if report else "",
+        "REPORT_PANELS": REPORT_PANELS if report else "",
+        "REPORT_DATA": (f'<script id="process-report" type="application/json">{_script_json(report)}</script>'
+                        if report else ""),
     }
     # A single pass also keeps placeholder-like words in user text literal.
-    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN)__",
+    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|REPORT_TABS|REPORT_PANELS|REPORT_DATA)__",
                   lambda match: values[match.group(1)], _DOCUMENT)
 
 
@@ -57,7 +68,7 @@ __FONTS__<style>__STYLE__</style></head>
 <section id="status-panel" class="map-popover status-panel" aria-label="Предупреждения" hidden><div class="header-status" id="header-status">
 <p id="legacy-note" class="legacy-note"__LEGACY_HIDDEN__>Архивная карта прежней методологии. Её узлы и группировки не подтверждают атомарность по правилам версии 2.0.</p>
 <p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></div></section></div></div>
-<p id="scenario-description" class="description"></p></header>
+<p id="scenario-description" class="description"></p>__REPORT_TABS__</header>
 <main id="workspace" tabindex="-1">
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
@@ -66,12 +77,12 @@ __FONTS__<style>__STYLE__</style></head>
 <div class="map-toolbar">
 <div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button><button id="notation-toggle" type="button" aria-label="Обозначения" title="Обозначения" aria-expanded="false" aria-controls="notation-panel">?</button></div></div>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Карта сценария. Колесо мыши и pinch меняют масштаб относительно курсора; перетаскивание фона перемещает схему. Tab выбирает операции."><div id="canvas-size"><div id="stage"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-label="Переходы между операциями"></svg><div id="nodes"></div></div></div><div id="empty-map" class="empty" hidden>Карта пока не содержит операций. Причина и незавершённые участки указаны в результатах исследования.</div></div>
-</section>
+</section>__REPORT_PANELS__
 </div><aside id="inspector" class="inspector" aria-label="Описание выбранного элемента" hidden><div class="inspector-head"><span>Описание элемента</span><button type="button" id="close-inspector" aria-label="Закрыть описание">×</button></div><div id="inspector-content"></div></aside></div>
 <p class="footnote">Карта восстановлена по переданным материалам. Подтверждение в коде не гарантирует поведение работающих систем и полноту бизнес-процесса.</p>
 </main><div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
 <noscript><p class="empty">Для просмотра интерактивной карты включите JavaScript. Все данные находятся внутри этого HTML-файла; подключение к сети не требуется.</p></noscript>
-<script id="scenario-model" type="application/json">__MODEL__</script><script>__SCRIPT__</script></body></html>'''
+<script id="scenario-model" type="application/json">__MODEL__</script>__REPORT_DATA__<script>__SCRIPT__</script></body></html>'''
 
 
 _STYLE = r'''
@@ -596,7 +607,7 @@ function frameGroup(group){
  const stage=$('stage');view.scrollTo({left:Math.max(0,(left+right)/2*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(top+bottom)/2*zoom+(parseFloat(stage.style.top)||0)-(view.clientHeight-48)/2)});
 }
 $('close-inspector').addEventListener('click',()=>closeInspector());
-document.addEventListener('keydown',event=>{if(event.defaultPrevented)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
+document.addEventListener('keydown',event=>{if(event.defaultPrevented||$('panel-map').inert)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
 
 function showFindings(){
  closePopovers();selected=null;const panel=$('inspector-content');panel.replaceChildren();
@@ -716,5 +727,6 @@ let drag=null;viewport.addEventListener('pointerdown',event=>{if(event.button!==
 let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{draw();initialView();});});
 showOverview();draw();initialView();updateHighlight();
 if(document.fonts?.ready)document.fonts.ready.then(()=>{draw();initialView();});
+/*__REPORT_JS__*/
 })();
 '''.replace('__GRAPH_LAYOUT_JS__', _GRAPH_LAYOUT_JS)
