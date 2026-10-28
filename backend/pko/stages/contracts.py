@@ -10,7 +10,7 @@ import re
 
 from pko.stages.inputs import INPUT_MODES, METHODOLOGY, STAGE, input_fingerprint, map_revision, methodology
 
-HIERARCHY_VERSION = "1.1"
+HIERARCHY_VERSION = "1.2"
 _STAGE_ID = re.compile(r"stage-[1-9]\d{0,2}")
 
 

@@ -481,14 +481,17 @@ const kindNames={start:'Начало',action:'Действие',decision:'Усл
 const operationKinds={action:'Действие',validation:'Проверка',read:'Чтение данных',write:'Запись данных',integration:'Вызов системы',publish:'Публикация события',wait:'Ожидание',calculation:'Расчёт',transform:'Преобразование данных',error_handling:'Обработка отказа / ошибки'};
 const outcomeNames={success:'Успешное завершение',refusal:'Бизнес-отказ',failure:'Технический сбой',cancelled:'Отмена',deferred:'Отложенная обработка',no_decision:'Решение не принято',unknown:'Завершение · исход не уточнён'};
 const terminalIds=new Set(array(scenario.terminal_operation_ids).map(text));
+// A successful command, decision or recommendation is named as such: it does not prove the recipient's result.
+const successByEffect={command:'Успех · команда отправлена',decision:'Успех · решение принято',recommendation:'Успех · рекомендация сформирована'};
 function terminalPresentation(node){
  const terminal=legacy?node.kind==='end':terminalIds.has(text(node.id));
  if(!terminal)return null;
  // A dangling operation is not a terminal; names and technical execution status do not determine the business outcome.
  const outcome=Object.prototype.hasOwnProperty.call(outcomeNames,node.outcome)?node.outcome:'unknown';
  const tone=outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
- const label=node.completion_condition?'При завершении: '+outcomeNames[outcome]:
-  outcome==='success'||outcome==='unknown'?outcomeNames[outcome]:'Завершение · '+outcomeNames[outcome].toLocaleLowerCase('ru');
+ const name=outcome==='success'&&successByEffect[node.effect_kind]||outcomeNames[outcome];
+ const label=node.completion_condition?'При завершении: '+name:
+  outcome==='success'||outcome==='unknown'?name:'Завершение · '+name.toLocaleLowerCase('ru');
  return {tone,label,outcome,conditional:!!node.completion_condition};
 }
 function stageOutcomes(members){
@@ -534,7 +537,8 @@ let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null;
 $('page-title').textContent=scenario.title || 'Карта сценария';
 const fullDescription=text(scenario.description).trim();
 // The header names the variant briefly; the submitted description, possibly structured text, stays in the overview.
-const briefDescription=scenario.start&&scenario.end?text(scenario.start)+' → '+text(scenario.end):/^[\[{]/.test(fullDescription)?'':fullDescription.split('\n')[0];
+const briefDescription=(scenario.coverage?'Исследован участок: '+text(scenario.coverage)+' · ':'')+
+ (scenario.start&&scenario.end?text(scenario.start)+' → '+text(scenario.end):/^[\[{]/.test(fullDescription)?'':fullDescription.split('\n')[0]);
 $('scenario-description').textContent=briefDescription?(briefDescription.length>260?briefDescription.slice(0,257)+'…':briefDescription):'Описание выбранного варианта сценария не задано.';
 for(const [count,label,inspect] of [[nodes.length,plural(nodes.length,legacy?['узел','узла','узлов']:['операция','операции','операций'])],[validEdges.length,plural(validEdges.length,['переход','перехода','переходов'])],[gaps.length,plural(gaps.length,['пробел','пробела','пробелов']),gaps.length>0]]){
  const entry=el(inspect?'button':'span',inspect?'findings-toggle':'');if(inspect){entry.type='button';entry.setAttribute('aria-label','Посмотреть пробелы исследования');entry.addEventListener('click',showFindings);}entry.append(el('b','',count),document.createTextNode(label)); $('overview').append(entry);
@@ -647,6 +651,7 @@ function showOverview(){
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
  panel.append(el('p','muted',model.summary || 'Выберите операцию, чтобы увидеть её смысл, вход, результат, условия продолжения и подтверждения в коде.'));
  field(panel,'Описание варианта сценария',fullDescription);
+ field(panel,'Исследованный участок процесса',scenario.coverage);
  const exclusions=array(scenario.exclusions),excludedTasks=array(model.research_tasks).filter(task=>task.status==='out_of_scope');
  if(exclusions.length){const block=el('div','field');block.append(el('dt','','Вне исследования'));
   for(const item of exclusions){const count=excludedTasks.filter(task=>text(task.exclusion)===text(item)).length;block.append(el('dd','',text(item)+(count?' · исключено участков кода: '+count:'')));}
@@ -817,7 +822,7 @@ function selectStage(stage){
 function showStage(stage){
  const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
  panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
- field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
+ field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);field(panel,'Граница этапа',stage.boundary);
  const starts=members.filter(n=>array(scenario.entry_operation_ids).map(text).includes(text(n.id)));
  const transitions=(title,list,outer,lead)=>{if(!list.length&&!lead.length)return;const section=el('section','details continuations');section.append(el('h3','',title));
   for(const node of lead){const row=el('article','continuation');relatedButton(row,'Начало сценария: '+(node.name||node.id),()=>selectNode(node,true)).classList.add('continuation-target');section.append(row);}

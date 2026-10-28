@@ -1,0 +1,50 @@
+{
+  "id": "java-worker-route-regressions",
+  "status": "synthetic_fixture",
+  "description": "Маршрутные регрессии синтетического обработчика очереди (tests/fixtures/scenario_java_worker). Каждая ситуация имеет ожидаемый и запрещённый вариант. Разметка проверяет только перечисленные случаи.",
+  "expected_operations": [
+    {"id": "take_to_work", "label": "Взятие задачи в работу", "name_pattern": "^Взятие задачи в работу"},
+    {"id": "error_check", "label": "Проверка причины отклонения", "name_pattern": "^Проверка причины отклонения"},
+    {"id": "kind_check", "label": "Проверка вида платежа", "name_pattern": "^Проверка вида платежа"},
+    {"id": "document_fetch", "label": "Получение платёжного документа", "name_pattern": "^Получение платёжного документа"},
+    {"id": "details_check", "label": "Проверка наличия реквизитов для поиска", "name_pattern": "наличия реквизитов"},
+    {"id": "agency_contract_check", "label": "Проверка договора агентского платежа", "name_pattern": "договора агентского платежа"},
+    {"id": "search_both", "label": "Поиск договора по счёту и номеру договора", "name_pattern": "^Поиск договора по счёту и номеру"},
+    {"id": "search_contract_names", "label": "Поиск договора по номеру договора и ФИО", "name_pattern": "^Поиск договора по номеру договора и ФИО"},
+    {"id": "search_account_names", "label": "Поиск договора по счёту и ФИО", "name_pattern": "^Поиск договора по счёту и ФИО"},
+    {"id": "rows_check", "label": "Проверка найденных договоров", "name_pattern": "^Проверка найденных договоров"},
+    {"id": "reject", "label": "Отказ по платежу", "name_pattern": "^Отказ по платежу"},
+    {"id": "reject_close", "label": "Закрытие задачи после отказа", "name_pattern": "^Закрытие задачи после отказа"},
+    {"id": "manual_close", "label": "Закрытие задачи перед передачей сотруднику", "name_pattern": "^Закрытие задачи перед передачей"},
+    {"id": "manual_create", "label": "Создание задачи сотруднику", "name_pattern": "^Создание задачи сотруднику$"},
+    {"id": "failure_create", "label": "Создание задачи сотруднику после сбоя", "name_pattern": "^Создание задачи сотруднику после сбоя"},
+    {"id": "failure_close", "label": "Закрытие задачи после сбоя", "name_pattern": "^Закрытие задачи после сбоя"},
+    {"id": "mark_completed", "label": "Отметка задачи очереди обработанной", "name_pattern": "обработанной"},
+    {"id": "mark_exception", "label": "Отметка задачи очереди ошибочной", "name_pattern": "ошибочной"}
+  ],
+  "expected_transitions": [
+    {"source": "error_check", "target": "kind_check", "condition_pattern": "не сопоставлен|мало реквизитов"},
+    {"source": "kind_check", "target": "document_fetch", "condition_pattern": "поддерживается"},
+    {"source": "rows_check", "target": "reject", "condition_pattern": "^(?=.*(?:не найден|нет))(?=.*стандарт)"},
+    {"source": "rows_check", "target": "manual_close", "condition_pattern": "^(?=.*(?:не найден|нет))(?=.*(?:не стандарт|нестандарт|иной|другой))"},
+    {"source": "search_both", "target": "rows_check", "condition_pattern": "(?:нет|без)\\s+ФИО|ФИО\\s+(?:нет|не)"},
+    {"source": "details_check", "target": "reject", "condition_pattern": "нет|не указан|пуст"},
+    {"source": "take_to_work", "target": "mark_exception"}
+  ],
+  "forbidden_transitions": [
+    {"source": "error_check", "target": "document_fetch"},
+    {"source": "rows_check", "target": "manual_close", "condition_pattern": "^(?!.*(?:не стандарт|нестандарт|иной|другой)).*(?:не найден|нет)"},
+    {"source": "details_check", "target": "agency_contract_check"},
+    {"source": "take_to_work", "target": "failure_create"}
+  ],
+  "expected_paths": [
+    {"path": ["search_both", "search_contract_names", "search_account_names"]},
+    {"path": ["reject", "reject_close", "mark_completed"]},
+    {"path": ["manual_close", "manual_create", "mark_completed"]},
+    {"path": ["failure_create", "failure_close", "mark_exception"]}
+  ],
+  "expected_properties": [
+    {"operation": "reject", "field": "effect_kind", "values": ["command"]},
+    {"operation": "mark_completed", "field": "effect_kind", "values": ["command", "result"]}
+  ]
+}

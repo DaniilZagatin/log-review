@@ -24,12 +24,13 @@ _STRINGS = {"type": "array", "items": {"type": "string"}}
 
 TOOL = {
     "name": "submit_business_stages",
-    "description": "Вернуть бизнес-этапы карты: цель, результат и операции каждого этапа; остальные операции — в unassigned с причиной.",
+    "description": "Вернуть бизнес-этапы карты: цель, результат, границу и операции каждого этапа; остальные операции — в unassigned с причиной.",
     "parameters": {"type": "object", "additionalProperties": False, "required": ["stages", "unassigned"], "properties": {
         "stages": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-                   "required": ["id", "name", "goal", "result", "operation_ids"], "properties": {
+                   "required": ["id", "name", "goal", "result", "boundary", "operation_ids"], "properties": {
                        "id": {"type": "string"}, "name": {"type": "string"}, "goal": {"type": "string"},
-                       "result": {"type": "string"}, "operation_ids": _STRINGS, "note": {"type": "string"}}}},
+                       "result": {"type": "string"}, "boundary": {"type": "string"},
+                       "operation_ids": _STRINGS, "note": {"type": "string"}}}},
         "unassigned": {"type": "array", "items": {"type": "object", "additionalProperties": False,
                        "required": ["operation_id", "reason"], "properties": {
                            "operation_id": {"type": "string"}, "reason": {"type": "string"}}}}}},
@@ -53,7 +54,7 @@ def _validate(arguments: dict, operations: set[str]) -> tuple[list | None, dict,
             continue
         label, problems = item["id"], []
         fields = {}
-        for name, limit in (("name", 300), ("goal", 1500), ("result", 1500)):
+        for name, limit in (("name", 300), ("goal", 1500), ("result", 1500), ("boundary", 1000)):
             try:
                 fields[name] = ResearchQuality.business_text(item.get(name), name, limit)
             except QualityError as exc:
@@ -174,7 +175,7 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
     records = []
     for stage in stages:
         collapsible, entry, why = collapse_check(set(stage["operation_ids"]), graph)
-        records.append({key: stage[key] for key in ("id", "name", "goal", "result", "note")} |
+        records.append({key: stage[key] for key in ("id", "name", "goal", "result", "boundary", "note")} |
                        {"collapsible": collapsible, "entry_operation_id": entry if collapsible else None,
                         "collapse_reason": why})
     status = "complete" if stages and not errors else "partial" if stages else "none"

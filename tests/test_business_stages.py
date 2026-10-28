@@ -27,11 +27,14 @@ NAMES = ["Приём платежа", "Поиск договора по рекв
          "Зачисление платежа на договор", "Уведомление клиента о зачислении", "Передача платежа специалисту"]
 STAGES = {"stages": [
     {"id": "stage-1", "name": "Определение договора по платежу", "goal": "Установить, к какому договору относится платёж.",
-     "result": "Договор найден либо не найден.", "operation_ids": ["step-1", "step-2", "step-3"]},
+     "result": "Договор найден либо не найден.", "boundary": "На выходе известен договор платежа или его отсутствие.",
+     "operation_ids": ["step-1", "step-2", "step-3"]},
     {"id": "stage-2", "name": "Зачисление платежа", "goal": "Зачислить платёж на найденный договор.",
-     "result": "Платёж зачислен, клиент уведомлён.", "operation_ids": ["step-4", "step-5"]},
+     "result": "Платёж зачислен, клиент уведомлён.", "boundary": "Меняется состояние договора: платёж учтён.",
+     "operation_ids": ["step-4", "step-5"]},
     {"id": "stage-3", "name": "Передача случая специалисту", "goal": "Передать платёж без договора на ручной разбор.",
-     "result": "Задача передана специалисту; её выполнение не показано.", "operation_ids": ["step-6"]}],
+     "result": "Задача передана специалисту; её выполнение не показано.",
+     "boundary": "Ответственность переходит к специалисту.", "operation_ids": ["step-6"]}],
     "unassigned": []}
 
 
@@ -202,6 +205,21 @@ class HierarchyTests(unittest.TestCase):
         self.assertEqual(hierarchy["status"]["result"], "partial")
         self.assertNotIn("stage-1", {stage["id"] for stage in hierarchy["stages"]})
         self.assertTrue(any("stage-1" in reason for reason in hierarchy["status"]["reasons"]))
+
+    def test_every_stage_states_its_boundary(self):
+        hierarchy, _ = self.ask(STAGES)
+        self.assertEqual(hierarchy["stages"][2]["boundary"], "Ответственность переходит к специалисту.")
+        unbounded = copy.deepcopy(STAGES)
+        del unbounded["stages"][1]["boundary"]
+        feedback = []
+
+        def repaired(payload, messages):
+            feedback.append(messages[-1]["content"])
+            return STAGES
+        client = ScriptedStageClient({"submit_business_stages": [lambda payload, messages: unbounded, repaired]})
+        hierarchy = grouping.build_hierarchy(payment_map(), stage_model(client), run_id="run-2")
+        self.assertEqual(hierarchy["status"]["result"], "complete")
+        self.assertIn("stage-2: boundary", feedback[0])
 
     def test_compact_packet_is_used_when_the_full_one_does_not_fit(self):
         model = payment_map()
