@@ -15,28 +15,36 @@ from typing import Any
 from pko.util.paths import harden_file
 
 _CURRENT: ContextVar[Any] = ContextVar("pko_audit", default=None)
+_SPAN: ContextVar[str | None] = ContextVar("pko_audit_span", default=None)
+SCHEMA = "belka-audit/2"
 _PRIVATE = re.compile(r"reasoning|chain.of.thought|thinking|api.?key|password|secret|authorization|credential|access.?token", re.I)
 
 
 def sanitize(value: Any) -> Any:
     """Best-effort credential masking; never export provider private reasoning."""
+    # A message tree can have thousands of string leaves. Read the environment
+    # once for this value, but never reuse secrets across independent calls.
+    secrets = tuple(secret for key, secret in os.environ.items() if _PRIVATE.search(key) and len(secret) >= 8)
+    return _sanitize(value, secrets)
+
+
+def _sanitize(value: Any, secrets: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
         if str(value.get("type", "")).lower() in ("reasoning", "thinking", "redacted_thinking"):
             return {"type": "omitted_private_reasoning"}
-        return {str(k): sanitize(v) for k, v in value.items() if not _PRIVATE.search(str(k))}
+        return {str(k): _sanitize(v, secrets) for k, v in value.items() if not _PRIVATE.search(str(k))}
     if isinstance(value, (list, tuple)):
-        return [sanitize(v) for v in value]
+        return [_sanitize(v, secrets) for v in value]
     if not isinstance(value, str):
         return value if value is None or isinstance(value, (bool, int, float)) else str(value)
     # Tool arguments and OpenInference messages can contain nested JSON strings.
     if value.lstrip().startswith(("{", "[")):
         try:
-            return json.dumps(sanitize(json.loads(value)), ensure_ascii=False)
+            return json.dumps(_sanitize(json.loads(value), secrets), ensure_ascii=False)
         except (ValueError, TypeError, RecursionError):
             pass
-    for key, secret in os.environ.items():
-        if _PRIVATE.search(key) and len(secret) >= 8:
-            value = value.replace(secret, "[REDACTED]")
+    for secret in secrets:
+        value = value.replace(secret, "[REDACTED]")
     value = re.sub(r"<(think|thinking|reasoning)>.*?</\1>", "[OMITTED]", value, flags=re.S | re.I)
     value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[REDACTED]", value, flags=re.S)
     value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
@@ -49,7 +57,9 @@ class RunAudit:
     def __init__(self, path: Path, run_id: str):
         self.path, self.run_id = path, run_id
         self.sequence = 0
+        self.spans = 0
         self.failed = False
+        self.trace_export_state: dict[str, Any] = {"status": "disabled", "failures": []}
         self.clients: list[AuditedClient] = []
 
     def emit(self, event: str, **fields: Any) -> None:
@@ -57,6 +67,9 @@ class RunAudit:
             return
         try:
             self.sequence += 1
+            # Every event names the span it happened in, so model calls and tool
+            # results join the stage tree without Phoenix.
+            fields.setdefault("span_id", _SPAN.get())
             entry = sanitize({"event": event, "run_id": self.run_id, **fields})
             stamp = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,7 +101,8 @@ def current_audit() -> RunAudit | None:
 def audit_run(path: Path, run_id: str):
     audit = RunAudit(path, run_id)
     token = _CURRENT.set(audit)
-    audit.emit("run_started", scope="Наблюдаемые действия, материалы, ответы инструментов и объяснения выводов. Внутренние рассуждения не записываются.")
+    audit.emit("run_started", schema=SCHEMA,
+               scope="Наблюдаемые действия, материалы, ответы инструментов и объяснения выводов. Внутренние рассуждения не записываются.")
     try:
         yield audit
     except BaseException as exc:
@@ -109,18 +123,56 @@ def flush() -> None:
         audit.flush()
 
 
+class LocalSpan:
+    """Terminal status of a local span; a handled failure is reported by its owner."""
+
+    def __init__(self, span_id: str | None):
+        self.span_id = span_id
+        self.status: str | None = None
+        self.error: dict = {}
+
+    def fail(self, exc: BaseException) -> None:
+        self.status, self.error = "error", {"error_type": type(exc).__name__, "error_message": str(exc)}
+
+    def set_status(self, status: str, reason: str = "") -> None:
+        self.status = status
+        if reason:
+            self.error = {"reason": reason}
+
+
 @contextmanager
 def audit_span(name: str, attributes: dict):
-    record("span_started", name=name, attributes=attributes)
+    """A local span with its own ID and parent, so the tree survives without Phoenix.
+
+    Every started span ends with a terminal status, including cancellation and
+    exceptions; durations come from the monotonic clock. A failure handled
+    inside the span is reported through the yielded ``LocalSpan``.
+    """
+    audit = _CURRENT.get()
+    parent = _SPAN.get()
+    span_id = None
+    if audit is not None:
+        audit.spans += 1
+        span_id = f"span-{audit.spans}"
+    token = _SPAN.set(span_id)
+    started = time.monotonic()
+    record("span_started", name=name, span_id=span_id, parent_span_id=parent, attributes=attributes)
+    status, error, local = "ok", {}, LocalSpan(span_id)
     try:
-        yield
+        yield local
     except BaseException as exc:
-        record("span_failed", name=name, error_type=type(exc).__name__, error_message=str(exc))
+        status = "interrupted" if isinstance(exc, (KeyboardInterrupt, GeneratorExit)) else "error"
+        error = {"error_type": type(exc).__name__, "error_message": str(exc)}
+        record("span_failed", name=name, span_id=span_id, parent_span_id=parent, **error)
         raise
     finally:
+        _SPAN.reset(token)
+        if local.status and status == "ok":
+            status, error = local.status, local.error
         if name == "scenario_research":
             flush()
-        record("span_finished", name=name)
+        record("span_finished", name=name, span_id=span_id, parent_span_id=parent, status=status,
+               duration_seconds=round(time.monotonic() - started, 3), **error)
 
 
 class AuditedClient:

@@ -1,12 +1,29 @@
 """Names and dependency hints from delivered text only; never execute sources.
 
-Java declarations are deliberately conservative lexical hints, not a call graph.
+Declarations are deliberately conservative lexical hints, not a call graph.
 Unrecognized syntax remains a file fragment instead of receiving an invented name.
 """
 from __future__ import annotations
 
 import ast
 import re
+
+# Keyword declarations: Kotlin/Scala/Swift fun/def/func, Go func with an
+# optional receiver, JavaScript/TypeScript/PHP function, Rust fn, Ruby def.
+_MODIFIERS = (r'(?:(?:public|private|protected|internal|static|final|open|override|abstract|suspend|inline|'
+              r'async|export|default|pub(?:\([^)]*\))?|unsafe|extern|private\s*\[\w+\])\s+)*')
+_KEYWORD_DECLARATION = re.compile(
+    r'(?m)^\s*' + _MODIFIERS + r'(?:fun|func|function\*?|fn|def)\s+(?:\([^)]*\)\s*)?(?:<[^>]*>\s*)?'
+    r'(?:[A-Za-z_][\w.]*(?:<[^>]*>)?\??\.)?([A-Za-z_]\w*[!?]?)\s*(?=[(<\[:=]|$)')
+# JavaScript/TypeScript functions bound to a name and class methods with a body.
+_ASSIGNED_FUNCTION = re.compile(
+    r'(?m)^\s*(?:export\s+)?(?:const|let|var)\s+(\w+)\s*(?::[^=]+)?=\s*(?:async\s+)?'
+    r'(?:function\b|\([^)]*\)\s*(?::\s*[^=]+?)?\s*=>|\w+\s*=>)')
+_METHOD = re.compile(
+    r'(?m)^\s*(?:(?:public|private|protected|static|async|override|readonly|get|set)\s+)*'
+    r'(\w+)\s*\([^)]*\)\s*(?::\s*[^{;=]+)?\{')
+_NOT_METHODS = frozenset({"if", "for", "while", "switch", "catch", "with", "return", "function", "else",
+                          "do", "try", "new", "await", "typeof", "match", "when", "foreach", "using", "lock"})
 
 
 def code_only(value: str) -> str:
@@ -27,6 +44,9 @@ def symbols(text: str) -> set[str]:
         r'(?m)^\s*(?:(?:public|private|protected|static|final|synchronized|abstract|override)\s+)+'
         r'(?:[\w.$<>?,\[\]]+\s+)+(\w+)\s*\(', cleaned))
     result.update(re.findall(r'(?m)^\s*(?:async\s+)?def\s+(\w+)\s*\(', cleaned))
+    result.update(_KEYWORD_DECLARATION.findall(cleaned))
+    result.update(_ASSIGNED_FUNCTION.findall(cleaned))
+    result.update(name for name in _METHOD.findall(cleaned) if name not in _NOT_METHODS)
     return result
 
 

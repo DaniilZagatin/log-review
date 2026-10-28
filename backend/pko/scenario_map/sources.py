@@ -116,6 +116,28 @@ def _under_excluded(path: Path, excluded: tuple[Path, ...]) -> bool:
     return any(resolved.is_relative_to(root) for root in excluded)
 
 
+def read_process_description(path) -> str:
+    """The process description file: plain text, masked like sources, bounded only by file size.
+
+    Its length in characters is checked against the model window before research.
+    """
+    path = Path(path)
+    if path.is_symlink() or not path.is_file() or _is_blocked(path.name):
+        raise PkoError("Описание процесса: нужен обычный текстовый файл, не ссылка и не файл с ключами.")
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(MAX_FILE_BYTES + 1)
+    except OSError as exc:
+        raise PkoError(f"Не удалось прочитать описание процесса: {exc}") from exc
+    if len(data) > MAX_FILE_BYTES:
+        raise PkoError("Описание процесса больше допустимого размера файла.",
+                       hint=f"Ограничение: {MAX_FILE_BYTES} байт; оставьте в файле описание варианта и полезные сведения.")
+    text = _decode(data)
+    if text is None or not text.strip():
+        raise PkoError("Описание процесса: ожидается непустой текст в UTF-8 или UTF-16.")
+    return text.strip()
+
+
 def _decode(data: bytes) -> str | None:
     try:
         if data.startswith((b"\xff\xfe", b"\xfe\xff")):
@@ -342,7 +364,9 @@ def build_workspace(paths: list[str | Path], dest: Path, *,
                 notes.append(f"{source_id} ({path.name}): нет доступных текстовых файлов.")
         tree.files.sort()
         extraction = extract_all(tree)
-        notes.extend(extraction.notes)
+        notes.append("Все текстовые файлы доступны для list_files, read_file и search независимо от языка. "
+                     "show_facts и who_calls дают структурные подсказки только для части языков; "
+                     "отсутствие подсказки не означает отсутствия кода.")
         omissions.extend({"source_id": path.split("/", 1)[0], "kind": "parse_failure",
                           "count": 1, "path": path,
                           "detail": "Статический экстрактор не разобрал файл; исходный текст доступен агенту."}

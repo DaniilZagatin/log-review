@@ -109,12 +109,14 @@ ROUTE_CASES = {"type": "array", "maxItems": 500, "items": {
 TOOLS = [
     _tool("save_research_task", "Зарегистрировать или обновить единицу работы: функцию, ветвь, вложенный исполнитель или промпт. "
           "Задачи, найденные автоматически, видны в inspect_map(section='research_tasks'). open/read/analyzed — работа не закончена; "
-          "mapped — участок раскрыт операциями карты или дочерними задачами; gap — нужен пробел именно по этой задаче; "
-          "out_of_scope — нужна найденная причина.",
+          "mapped — участок раскрыт операциями карты или дочерними задачами; gap — пробел именно по этой задаче, "
+          "в том числе unexplored для локального кода варианта, который не исследован; out_of_scope — участок относится "
+          "к исключению из set_scope(exclusions), указанному в exclusion, и не отражён операциями карты.",
           {"id": EDIT_ID, "kind": _string("function, branch, prompt или executor; для новой задачи обязательно"),
            "target": _string("Имя исследуемого элемента; для новой задачи обязательно"),
            "status": {"type": "string", "enum": ["open", "read", "analyzed", "mapped", "out_of_scope", "gap"]},
            "resolution": _string("Что раскрыто, почему вне варианта или чего не хватает; обязательно для любого статуса, кроме open"),
+           "exclusion": _string("Для out_of_scope: дословно одно из исключений set_scope(exclusions)"),
            "evidence": EVIDENCE,
            "node_ids": _list(), "gap_ids": _list(),
            "child_task_ids": _list("Дочерние задачи из реализации родителя; mapped родителя требует их покрытия")}, ["status"]),
@@ -148,16 +150,12 @@ TOOLS = [
           []),
     _tool("set_scope", "Зафиксировать границы выбранного варианта по описанию и коду. Допущения указывай явно; исходный сценарий не подменяй. "
           "Списки entry_operation_ids и terminal_operation_ids можно дополнить позже повторным вызовом.",
-          {"title": _string("Название выбранного варианта"), "process_name": _string("Краткое название процесса, если установлено"), "start": _string("Событие начала"), "end": _string("Допустимые результаты завершения"),
+          {"title": _string("Название выбранного варианта"), "process_name": _string("Краткое название процесса, если установлено"),
+           "coverage": _string("Если исследуется только часть описанного процесса: какая именно, предметным языком; для всего варианта опусти"),
+           "start": _string("Событие начала"), "end": _string("Допустимые результаты завершения"),
            "exclusions": _list("Соседние сценарии вне исследования"), "assumptions": _list("Неустановленные границы и допущения"),
            "entry_operation_ids": _list("ID реальных первых операций; обязательно к finish"), "terminal_operation_ids": _list("ID реальных последних операций; обязательно к finish")},
           ["title", "start", "end"]),
-    _tool("upsert_group", "Добавить или изменить этап — навигационную группу операций с общей промежуточной целью. Операции привязываются к этапу "
-          "через свой group_id. Этап не выполняется и переходов не создаёт.",
-          {"id": EDIT_ID, "name": _string("Промежуточная цель, например «Рассмотрение претензии»"),
-           "description": _string("Какие операции объединяет этап"),
-           "result": _string("Промежуточный результат этапа; для нового этапа обязательно"), "evidence": EVIDENCE},
-          []),
     _tool("upsert_step", "Добавить или изменить операцию карты — наименьший самостоятельный шаг процесса, который можно наблюдать отдельно. "
           "Несколько шагов внутри одной функции раскрывай отдельными операциями. Название и смысл — предметным языком, технические имена "
           "и коды событий — в основаниях. "
@@ -168,10 +166,9 @@ TOOLS = [
            "input": _string("Используемые данные или событие"), "output": _string("Результат или изменение состояния"),
            "condition": _string("Предусловие операции"), "basis": BASIS,
            "completion_condition": _string("Смысловое условие, при котором сценарий завершается на этой операции; требует её ID в terminal_operation_ids"),
-           "group_id": _string("Этап для навигации, необязательно"),
            "continuation_mode": {"type": "string", "enum": ["sequence", "choice", "all"], "description": "sequence — одно продолжение; choice — выбирается одна ветвь; all — выполняются все подходящие продолжения"},
            "join_mode": {"type": "string", "enum": ["any", "all"], "description": "any — достаточно одного входящего результата; all — код ждёт все"},
-           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Только для операции, которая сама формирует итог процесса: deferred — перенос срока, no_decision — нет решения, это не refusal и не cancelled. У проверок и операций с выбором продолжения не указывай"},
+           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Бизнес-итог операции согласно методологии; при условном завершении относится к completion_condition"},
            "effect_kind": {"type": "string", "enum": list(EFFECT_KINDS),
                            "description": "decision — решение, recommendation — рекомендация, command — отправленная команда, result — подтверждённый эффект"},
            "external_interactions": EXTERNAL_INTERACTIONS,
@@ -188,9 +185,11 @@ TOOLS = [
            "evidence_status": EVIDENCE_STATUS, "evidence": EVIDENCE, "code_explanations": CODE_EXPLANATIONS},
           []),
     _tool("add_gap", "Зафиксировать адресный пробел: какие задачи, операции или переходы он касается и каких сведений не хватает. "
-          "missing_source — нужного кода нет в источниках; непрочитанный локальный код пробелом не закрывается.",
+          "missing_source — нужного кода нет в источниках; unexplored — локальный код внутри варианта не исследован, результат "
+          "частичный; unresolved_behavior и unresolved_transition — код прочитан, но поведение или продолжение не установлено.",
           {"description": _string(), "node_ids": _list(), "edge_ids": _list(), "task_ids": _list(), "evidence": EVIDENCE,
-           "category": {"type": "string", "enum": ["missing_source", "unresolved_behavior", "unresolved_transition"]}}, ["description", "category"]),
+           "category": {"type": "string", "enum": ["missing_source", "unresolved_behavior", "unresolved_transition", "unexplored"]}},
+          ["description", "category"]),
     _tool("review_source", "Отметить источник: reviewed — его код прочитан (это не доказательство полного покрытия); out_of_scope или unavailable — с причиной. "
           "Исключение без чтения делает результат частичным; источник с кодом на карте исключить нельзя.",
           {"source_id": _string(), "disposition": {"type": "string", "enum": ["reviewed", "out_of_scope", "unavailable"]},
@@ -208,8 +207,8 @@ TOOLS = [
                       "properties": {name: EXECUTION_CHECK for name in EXECUTION_CHECKS}, "required": list(EXECUTION_CHECKS)}},
           ["name", "evidence", "operations", "checks"]),
     _tool("remove_element", "Удалить ошибочный элемент карты. Удаление не каскадное: сначала обнови или удали ссылки на него.",
-          {"kind": {"type": "string", "enum": ["group", "step", "transition", "gap", "execution_review"],
-                    "description": "group — этап, step — операция, transition — переход, gap — пробел, execution_review — обзор"},
+          {"kind": {"type": "string", "enum": ["step", "transition", "gap", "execution_review"],
+                    "description": "step — операция, transition — переход, gap — пробел, execution_review — обзор"},
            "id": _string()}, ["kind", "id"]),
     _tool("inspect_map", "Прочитать карту или память. research_brief — рабочая сводка целиком; context_summary — автоматическая сводка прошлой работы, "
           "не доказательство. Остальные разделы постраничные: frontier — ID операций, начало и конец, несвязанные операции и открытые выходы; "

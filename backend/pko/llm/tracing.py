@@ -170,6 +170,9 @@ _tracer: Optional[Any] = None
 _provider: Optional[Any] = None
 # True после любой попытки инициализации (успех/отказ/выключено).
 _initialized: bool = False
+# Initialization is process-wide, but each run must retain its own explanation
+# when a failed initialization is reused or happened before its audit opened.
+_initialization_failure: Optional[dict[str, str]] = None
 
 # Текущая сессия агента, её открытый шаг и выполняемый инструмент.
 _SESSION: ContextVar[Optional["_SessionState"]] = ContextVar("pko_trace_session", default=None)
@@ -203,6 +206,61 @@ def tracing_enabled() -> bool:
     return _tracer is not None
 
 
+def tracing_health() -> dict:
+    """Health of this run's optional exporter, independent of analysis success."""
+    journal = current_audit()
+    state = journal.trace_export_state if journal is not None else {"status": "disabled", "failures": []}
+    enabled = os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on")
+    if enabled or _tracer is not None or _provider is not None:
+        if _tracer is None or _provider is None:
+            missing = ", ".join(name for name, value in (("tracer", _tracer), ("provider", _provider)) if value is None)
+            failure = _initialization_failure or {
+                "operation": "initialize", "reason": f"Phoenix включён, но не инициализирован: отсутствует {missing}."}
+            if failure not in state["failures"]:
+                _record_trace_failure(state, failure, failed=True)
+            else:
+                state["status"] = "failed"
+        elif state["status"] == "disabled":
+            state["status"] = "pending"
+    return sanitize({**state, "failures": list(state["failures"])})
+
+
+def _record_trace_failure(state: dict, failure: dict, *, failed: bool = False) -> None:
+    state["status"] = "failed" if failed or _tracer is None else "partial"
+    if len(state["failures"]) < 20:
+        state["failures"].append(dict(failure))
+    else:
+        state["omitted_failures"] = state.get("omitted_failures", 0) + 1
+    record("trace_export_failure", **failure)
+
+
+def _trace_failure(operation: str, exc: Exception | str, *, initialization: bool = False) -> None:
+    global _initialization_failure
+    failure = {"operation": operation, "reason": str(sanitize(str(exc)))[:500] or type(exc).__name__}
+    if initialization:
+        _initialization_failure = failure
+    journal = current_audit()
+    state = journal.trace_export_state if journal is not None else {"status": "disabled", "failures": []}
+    _record_trace_failure(state, failure, failed=initialization)
+
+
+def _start_span(name: str):
+    """Exporter admission cannot prevent a model, tool or pipeline operation."""
+    try:
+        span = _tracer.start_span(name)
+    except Exception as exc:
+        _trace_failure("start_span", exc)
+        return None
+    try:
+        context = span.get_span_context()
+        # span_id is the local correlation ID supplied by RunAudit.emit.
+        record("phoenix_span", name=name, trace_id=f"{context.trace_id:032x}",
+               otel_span_id=f"{context.span_id:016x}")
+    except Exception as exc:
+        _trace_failure("span_context", exc)
+    return span
+
+
 def init_phoenix_tracing() -> Optional[object]:
     """Включить экспорт трейсов в Phoenix, если задан `PKO_PHOENIX_ENABLED`.
 
@@ -210,11 +268,13 @@ def init_phoenix_tracing() -> Optional[object]:
     `arize-phoenix-otel` не установлен или сервер недоступен. Прогон в любом
     случае продолжается: наблюдаемость не должна его останавливать.
     """
-    global _tracer, _provider, _initialized
+    global _tracer, _provider, _initialized, _initialization_failure
 
     if _initialized:
+        tracing_health()
         return _provider
     _initialized = True
+    _initialization_failure = None
 
     enabled = os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -228,13 +288,24 @@ def init_phoenix_tracing() -> Optional[object]:
     try:
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from phoenix.otel import PROJECT_NAME, HTTPSpanExporter, Resource, TracerProvider
-    except ImportError:
-        print("Phoenix: PKO_PHOENIX_ENABLED=true, но пакет arize-phoenix-otel не установлен — "
-              "трассировка выключена. Установите: pip install -r requirements-phoenix.txt",
+    except Exception as exc:
+        _trace_failure("import", f"Не удалось загрузить зависимости Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
+        print(f"Phoenix: не удалось загрузить зависимости ({sanitize(str(exc))}); трассировка выключена. "
+              "Проверьте установку requirements-phoenix.txt.",
               file=sys.stderr)
         return None
-    if not _reachable(endpoint):
-        print(f"Phoenix недоступен по адресу {endpoint}: трассировка этого запуска выключена. "
+    try:
+        reachable = _reachable(endpoint)
+    except Exception as exc:
+        _trace_failure("probe", f"Не удалось проверить доступность Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
+        print(f"Phoenix: ошибка проверки доступности ({sanitize(str(exc))})", file=sys.stderr)
+        return None
+    if not reachable:
+        _trace_failure("probe", f"Phoenix недоступен по адресу {endpoint}; проверьте сервер и PKO_PHOENIX_ENDPOINT.",
+                       initialization=True)
+        print(f"Phoenix недоступен по адресу {sanitize(endpoint)}: трассировка этого запуска выключена. "
               "Запустите `phoenix serve` или проверьте PKO_PHOENIX_ENDPOINT.", file=sys.stderr)
         return None
     try:
@@ -247,9 +318,14 @@ def init_phoenix_tracing() -> Optional[object]:
             HTTPSpanExporter(endpoint=endpoint, headers=headers),
             max_export_batch_size=_EXPORT_BATCH,
         ))
-        _tracer = provider.get_tracer("pko")
+        tracer = provider.get_tracer("pko")
+        if tracer is None:
+            raise RuntimeError("Phoenix provider не вернул tracer.")
+        _tracer = tracer
         _provider = provider
     except Exception as exc:
+        _trace_failure("initialize", f"Не удалось включить Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
         print(f"Phoenix: не удалось включить трассировку ({sanitize(str(exc))})", file=sys.stderr)
         return None
     print(f"Phoenix: {_base_url(endpoint)} · проект {project}", flush=True)
@@ -262,16 +338,23 @@ def span_limits() -> Any:
     return SpanLimits(max_span_attributes=_MAX_SPAN_ATTRIBUTES)
 
 
-def flush_tracing() -> None:
+def flush_tracing() -> dict:
     """Дождаться отправки спанов: CLI-процесс завершается сразу после прогона."""
     if _provider is None:
-        return
+        return tracing_health()
     try:
         if not _provider.force_flush(_FLUSH_TIMEOUT_MS):
+            _trace_failure("flush", "Не все спаны отправлены за отведённое время.")
             print("Phoenix: не все спаны успели уйти за "
                   f"{_FLUSH_TIMEOUT_MS // 1000} с — трейс может быть неполным", file=sys.stderr)
+        else:
+            journal = current_audit()
+            if journal is not None and not journal.trace_export_state["failures"]:
+                journal.trace_export_state["status"] = "complete"
     except Exception as exc:
+        _trace_failure("flush", exc)
         print(f"Phoenix: ошибка отправки спанов ({sanitize(str(exc))})", file=sys.stderr)
+    return tracing_health()
 
 
 @contextmanager
@@ -290,16 +373,18 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
     Исключение внутри блока помечается на спане (`record_error`) и
     пробрасывается дальше — трассировка не глотает ошибки.
     """
-    with audit_span(name, attributes):
+    with audit_span(name, attributes) as local:
         if _tracer is None:
-            yield _AuditedSpan(_NoopSpan())
+            yield _AuditedSpan(_NoopSpan(), local)
             return
-
-        from opentelemetry import trace as otel_trace
 
         is_session = name in SESSION_PASSES
         step = attributes.get("step") if name in STEP_PASSES else None
-        span = _tracer.start_span(_display_name(name, step))
+        span = _start_span(_display_name(name, step))
+        if span is None:
+            yield _AuditedSpan(_NoopSpan(), local)
+            return
+        from opentelemetry import trace as otel_trace
         handle = _SpanHandle(span, session=is_session, step=step)
         handle._raw(_KIND, "AGENT" if is_session else "CHAIN")
         handle._raw("pko.span", name)
@@ -308,12 +393,7 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
         if journal is not None:
             handle._raw("pko.run_id", journal.run_id)
             handle._raw("session.id", journal.run_id)
-        try:
-            context = span.get_span_context()
-            record("phoenix_span", name=name, trace_id=f"{context.trace_id:032x}", span_id=f"{context.span_id:016x}")
-        except Exception:
-            pass
-        observed = _AuditedSpan(handle)
+        observed = _AuditedSpan(handle, local)
         for key, value in attributes.items():
             observed.set_attribute(key, value)
         handle._opened = True
@@ -337,6 +417,27 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
 
 
 def trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict) -> dict:
+    """A local tool span and matching call/result exist even without Phoenix."""
+    function = call.get("function") or {}
+    name, call_id = str(function.get("name") or "tool"), str(call.get("id") or "")
+    with audit_span(name, {"kind": "tool", "tool_call_id": call_id}) as local:
+        record("tool_started", tool_call_id=call_id, name=name,
+               arguments=_bounded(_arguments(function.get("arguments"))))
+        try:
+            reply = _trace_tool_call(answer, state, call)
+        except BaseException as exc:
+            record("tool_failed", tool_call_id=call_id, name=name,
+                   error_type=type(exc).__name__, error_message=str(exc))
+            raise
+        content = reply.get("content") if isinstance(reply, dict) else reply
+        payload = _parsed(content)
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            local.set_status("rejected", str(payload.get("error", ""))[:500])
+        record("tool_result", tool_call_id=call_id, name=name, result=_bounded(payload))
+        return reply
+
+
+def _trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict) -> dict:
     """Выполнить вызов инструмента агента в TOOL-спане текущего шага.
 
     `answer` — `_answer_call` прохода: протокол или инструмент репозитория.
@@ -346,11 +447,12 @@ def trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict)
     if _tracer is None:
         return answer(state, call)
 
-    from opentelemetry import trace as otel_trace
-
     function = call.get("function") or {}
     name = str(function.get("name") or "tool")
-    span = _tracer.start_span(name)
+    span = _start_span(name)
+    if span is None:
+        return answer(state, call)
+    from opentelemetry import trace as otel_trace
     handle = _SpanHandle(span)
     handle._raw(_KIND, "TOOL")
     handle._raw("tool.name", name)
@@ -413,8 +515,6 @@ class TracedClient:
         if _tracer is None:
             return self.delegate.chat(messages, **kwargs)
 
-        from opentelemetry import trace as otel_trace
-
         session = _SESSION.get()
         if session is not None:
             new, first = session.fresh(messages)
@@ -426,7 +526,10 @@ class TracedClient:
         spec = getattr(self.delegate, "spec", None)
         model = str(getattr(spec, "model", "") or "")
 
-        span = _tracer.start_span(f"llm · {model}" if model else "llm")
+        span = _start_span(f"llm · {model}" if model else "llm")
+        if span is None:
+            return self.delegate.chat(messages, **kwargs)
+        from opentelemetry import trace as otel_trace
         handle = _SpanHandle(span)
         attributes: dict[str, Any] = {
             _KIND: "LLM",
@@ -474,7 +577,6 @@ class TracedClient:
         if "cached_tokens" in usage:
             handle._raw("llm.token_count.prompt_details.cache_read", int(usage["cached_tokens"]))
         handle._raw("pko.llm.from_cache", bool(result.from_cache))
-        handle._raw("pko.llm.reasoning_chars", len(result.reasoning_content or ""))
         output = _reply_output(reply)
         handle.set_output(output)
         handle.finish()
@@ -506,8 +608,9 @@ class TracedClient:
 class _AuditedSpan:
     """Mirror bounded span metadata to the CLI journal, even without Phoenix."""
 
-    def __init__(self, delegate: Any) -> None:
+    def __init__(self, delegate: Any, local: Any = None) -> None:
         self._delegate = delegate
+        self._local = local
 
     @property
     def trace_id(self) -> str:
@@ -520,9 +623,16 @@ class _AuditedSpan:
 
     def set_input(self, value: Any) -> None:
         self._delegate.set_input(value)
+        record("span_input", value=_bounded(value))
 
     def set_output(self, value: Any) -> None:
         self._delegate.set_output(value)
+        record("span_output", value=_bounded(value))
+
+    def set_status(self, status: str, reason: str = "") -> None:
+        """Local terminal status for a failure the span's owner handled."""
+        if self._local is not None:
+            self._local.set_status(status, reason)
 
     def add_event(self, name: str, **attributes: Any) -> None:
         self._delegate.add_event(name, **attributes)
@@ -530,6 +640,14 @@ class _AuditedSpan:
 
     def record_error(self, exc: BaseException) -> None:
         self._delegate.record_error(exc)
+        if self._local is not None:
+            self._local.fail(exc)
+
+
+def _bounded(value: Any, limit: int = 4000) -> Any:
+    """Span payloads in the local journal are capped; truncation is explicit."""
+    text = _dumps(value)
+    return value if len(text) <= limit else {"truncated": True, "chars": len(text), "head": text[:limit]}
 
 
 def _display_name(name: str, step: Any) -> str:

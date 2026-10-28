@@ -64,11 +64,15 @@ def retry_delay(error: Exception, attempt: int) -> float | None:
     return delay
 
 
-def call_model(client, messages, *, deadline: float, before_retry=None, on_event=None, **kwargs):
+def call_model(client, messages, *, deadline: float, before_retry=None, before_attempt=None, on_event=None, **kwargs):
     """Retry one unchanged conversation turn inside its existing trace and budget."""
     for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
         if time.monotonic() >= deadline:
             raise ModelDeadlineExceeded('Достигнут лимит времени исследования при обращении к модели.')
+        # The owner charges each physical dispatch, including transport retries.
+        # Admission failures are not transport errors and must not be retried.
+        if before_attempt:
+            before_attempt()
         try:
             with trace_span('model_attempt', attempt=attempt, max_attempts=MAX_MODEL_ATTEMPTS):
                 return client.chat(messages, **kwargs)

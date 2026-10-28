@@ -117,7 +117,9 @@ class ScenarioTracingIntegrationTests(unittest.TestCase):
                         llms = [s for s in tree if attrs(s)['openinference.span.kind'].string_value == 'LLM']
                         if model is completed:
                             self.assertEqual(len(tools), len(research_calls()) + 1)
-                            self.assertEqual(len(llms), model['run']['steps'] + 1 + model['run'].get('context_summary_calls', 0))
+                            # Research steps, one retried request, summaries and one business-stage request.
+                            self.assertEqual(len(llms), model['run']['steps'] + 1 + model['run'].get('context_summary_calls', 0) + 1)
+                            self.assertIn('business_stages', names)
                             self.assertGreater(model['run'].get('context_summaries', 0), 0)
                             self.assertEqual(model['run'].get('context_summary_fallbacks', 0), 0)
                             compact_spans = [s for s in tree if attrs(s).get('pko.span') and attrs(s)['pko.span'].string_value == 'compact_context']

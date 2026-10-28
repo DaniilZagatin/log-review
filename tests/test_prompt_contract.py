@@ -91,7 +91,7 @@ class PromptContractTests(unittest.TestCase):
             self.assertNotIn(phrase, tools, phrase)
         properties = {tool["function"]["name"]: tool["function"]["parameters"]["properties"] for tool in TOOLS}
         self.assertNotIn("kind", properties["upsert_step"])
-        self.assertNotIn("kind", properties["upsert_group"])
+        self.assertNotIn("upsert_group", properties)
         for legacy in ("channel", "correlation", "contract", "sender_evidence", "receiver_evidence"):
             self.assertNotIn(legacy, properties["upsert_transition"])
         reading = json.dumps(TOOL_SCHEMAS, ensure_ascii=False)

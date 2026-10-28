@@ -10,6 +10,7 @@ import json
 from typing import Any, Callable
 
 from pko.audit import record
+from pko.llm.registry import DEFAULT_CONTEXT_WINDOW
 
 
 COMPACTION_MARKER = "[scenario-context-recovery]"
@@ -45,7 +46,7 @@ def context_budget(window: int, schemas: list[dict]) -> tuple[int, int]:
     Provider context is shared by messages, tool schemas, and the response.
     The message queue contains public output and tool exchanges, never thinking.
     """
-    window = window or 64000
+    window = window or DEFAULT_CONTEXT_WINDOW
     response_tokens = min(8192, max(1024, window // 8))
     budget = int((window - response_tokens - 2048) * 1.6) - len(_json(schemas))
     return budget, response_tokens
@@ -94,7 +95,7 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
                                 for edge in edges if edge.get("kind") != "data")))],
         }
     unlinked, open_exits = frontier.get("unlinked", []), frontier.get("open_exits", [])
-    fields = ("id", "name", "group_id", "continuation_mode", "join_mode", "completion_condition")
+    fields = ("id", "name", "continuation_mode", "join_mode", "completion_condition")
     result = {
         "node_count": len(nodes), "all_node_ids": [node.get("id", "") for node in nodes],
         "registry_complete": True,
@@ -119,6 +120,11 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
         # The rows themselves are the complete ID index; do not duplicate it.
         result.pop("all_node_ids")
         result["nodes"] = [{key: node.get(key, "") for key in fields} for node in nodes]
+        for node, row in zip(nodes, result["nodes"]):
+            # Preserve business outcomes without repeating empty placeholders on
+            # every intermediate operation and displacing the complete registry.
+            if node.get("id") in terminals or node.get("outcome") not in (None, "", "unknown"):
+                row.update(outcome=node.get("outcome", "unknown"), effect_kind=node.get("effect_kind", "unknown"))
         result["names_complete"] = True
     else:
         result["names_complete"] = False
@@ -181,7 +187,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     notes = _rows(model, "research_notes")
     coverage = _rows(model, "read_coverage")
     counts = {field: len(model.get(field, [])) for field in
-              ("groups", "nodes", "edges", "gaps", "read_coverage",
+              ("nodes", "edges", "gaps", "read_coverage",
                "research_history", "research_notes", "research_tasks")}
     rejections = (model.get("run") or {}).get("recent_rejections") or []
     result: dict[str, Any] = {
@@ -200,7 +206,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
             "research_notes": "inspect_map(section='research_notes'): сохранённые факты, гипотезы, вопросы и next_action",
             "read_coverage": "inspect_map(section='read_coverage'): уже прочитанные файлы и диапазоны",
             "read_fragments": "inspect_map(section='read_fragments',path=...,offset=строка,limit=30): сохранённые буквальные строки без повторного чтения исходников",
-            "map": "inspect_map(section='frontier'): текущий участок и незавершённые маршруты; nodes/edges/groups/gaps: ID и подробности карты",
+            "map": "inspect_map(section='frontier'): текущий участок и незавершённые маршруты; nodes/edges/gaps: ID и подробности карты",
         },
     }
     # This smallest variant still directs recovery to facts, outstanding work,
@@ -240,7 +246,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     result["map_ids"] = {
         field: [{"id": row.get("id", ""), "name": _short(row.get("name"), text_limit)}
                 for row in _rows(model, field)[-take:]]
-        for field in ("groups", "edges")
+        for field in ("edges",)
     }
     result["gaps"] = [
         {**{key: _short(row.get(key), text_limit) for key in ("id", "description", "category")},
@@ -253,7 +259,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
 def _minimal_manifest() -> dict:
     return {"recover_with": "inspect_map",
             "sections": ["research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
-                         "frontier", "nodes", "edges", "groups", "gaps"],
+                         "frontier", "nodes", "edges", "gaps"],
             "next": "Восстанови research_brief и продолжи незавершённые проверки; прежние результаты и цитаты доступны в памяти."}
 
 

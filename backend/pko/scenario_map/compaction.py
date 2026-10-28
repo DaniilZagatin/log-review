@@ -111,10 +111,35 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
     return request()
 
 
+def _summary_json(text: str) -> str:
+    """The JSON object of a summary answer; a code fence or a lead-in line is not the summary."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0]
+    start, end = text.find("{"), text.rfind("}")
+    return text[start:end + 1] if 0 <= start < end else text
+
+
+def _bounded_summary(result: dict) -> dict:
+    """Trim list tails until the summary fits; the trimming is recorded, never silent."""
+    dropped = 0
+    while len(json.dumps(result, ensure_ascii=False)) > SUMMARY_MAX_CHARS:
+        candidates = [field for field in (*SUMMARY_LIST_FIELDS, "references") if result.get(field)]
+        if not candidates:
+            raise ValueError("Сводка превышает 6000 символов")
+        longest = max(candidates, key=lambda field: len(json.dumps(result[field], ensure_ascii=False)))
+        result[longest] = result[longest][:-1]
+        dropped += 1
+    if dropped:
+        record("context_summary_trimmed", dropped_items=dropped, limit=SUMMARY_MAX_CHARS)
+    return result
+
+
 def validate_summary(text: str, state) -> dict:
-    if not isinstance(text, str) or len(text) > SUMMARY_MAX_CHARS * 2:
+    if not isinstance(text, str) or len(text) > SUMMARY_MAX_CHARS * 3:
         raise ValueError("Слишком большой ответ суммаризации")
-    value = json.loads(text)
+    value = json.loads(_summary_json(text))
     if (not isinstance(value, dict) or not set(SUMMARY_FIELDS) <= set(value)
             or set(value) - set(SUMMARY_FIELDS) - set(SUMMARY_OPTIONAL_FIELDS)):
         raise ValueError("Сводка должна содержать только предусмотренные поля JSON")
@@ -137,9 +162,7 @@ def validate_summary(text: str, state) -> dict:
         raise ValueError("references: ожидается список прочитанных диапазонов")
     result["references"] = [{key: part for key, part in ref.items() if key != "quote"}
                             for ref in state._evidence(value["references"])]
-    if len(json.dumps(result, ensure_ascii=False)) > SUMMARY_MAX_CHARS:
-        raise ValueError("Сводка превышает 6000 символов")
-    return result
+    return _bounded_summary(result)
 
 
 def compact_research_context(messages: list[dict], state, budget: int, *,

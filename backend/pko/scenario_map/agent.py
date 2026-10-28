@@ -13,6 +13,7 @@ from typing import Any, Callable
 from pko.audit import AuditedClient, record, sanitize
 from pko.errors import LlmError
 from pko.llm.client import ChatClient
+from pko.llm.registry import DEFAULT_CONTEXT_WINDOW
 from pko.llm.tracing import trace_client, trace_span, trace_tool_call
 from pko.code_tools.tools import TOOL_SCHEMAS, ToolBox
 from pko.scenario_map.schema import MapState
@@ -141,7 +142,7 @@ class GraphFrontierGuide:
         self.at_last_nudge = ids
         # Include only navigation metadata. Full descriptions and evidence stay
         # in inspect_map; the prompt does not assert how the nodes should connect.
-        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name", "group_id")}
+        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name")}
                   for node in nodes if node["id"] in pending][:12]
         return (
             "[scenario-graph-frontier]\n"
@@ -246,7 +247,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
               "tools_sha256": hashlib.sha256(_json(schemas).encode("utf-8")).hexdigest()}
     state.model["run"].update(bundle)
     record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
-           context_window=spec.context_window or 64000, max_steps=max_steps, max_seconds=max_seconds, **bundle)
+           context_window=spec.context_window or DEFAULT_CONTEXT_WINDOW, max_steps=max_steps, max_seconds=max_seconds, **bundle)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": _json({
         "scenario_description": scenario, "sources": workspace.sources,
         "source_notes": workspace.notes, "source_omissions": getattr(workspace, "omissions", []),
@@ -261,7 +262,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     failed_calls = 0
     failure_guidance_used = False
     next_compaction_step = 1
-    window = spec.context_window or 64000
+    window = spec.context_window or DEFAULT_CONTEXT_WINDOW
     summary_tokens = min(summary_max_tokens, max(512, window // 4))
     message_budget, response_tokens = context_budget(window, schemas)
     state.model["run"]["context_budget_chars"] = message_budget
@@ -277,8 +278,11 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
 
     try:
         save()
-        if sum(len(_json(m)) for m in messages) + 1600 > message_budget:
-            raise ValueError("Окно модели слишком мало для инструментов и описания сценария; используйте модель с большим контекстом или сократите описание.")
+        # The opening stays in context after every compaction, so it must fit the window itself.
+        opening_size = sum(len(_json(m)) for m in messages)
+        if opening_size + 1600 > message_budget:
+            raise ValueError(f"Описание процесса и инструкции занимают {opening_size} символов и не помещаются в окно "
+                             f"модели ({message_budget}). Сократите описание или используйте модель с большим контекстом.")
         if client is None:
             client = DeadlineClient(spec=spec, timeout=model_timeout)
             client.deadline = started + max_seconds

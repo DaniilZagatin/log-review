@@ -7,6 +7,7 @@ cited. Mutations are transactional, including edits of already linked objects.
 """
 from __future__ import annotations
 
+from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -19,11 +20,10 @@ from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
 from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
-from pko.scenario_map.code_references import code_only
+from pko.scenario_map.code_references import code_only, symbols
 
 SCHEMA_VERSION = "2.0"
 STEP_KINDS = ("operation",)
-GROUP_KINDS = ("stage",)
 OUTCOME_KINDS = ("success", "refusal", "failure", "cancelled", "deferred", "no_decision", "unknown")
 EDGE_KINDS = ("sequence", "branch", "call", "event", "return", "retry", "error")
 EVIDENCE_STATUSES = ("observed", "inferred", "unknown")
@@ -33,7 +33,7 @@ MAX_TEXT = 6000
 OPERATION_KINDS = ("action", "validation", "read", "write", "integration", "publish", "wait", "calculation", "transform", "error_handling")
 OPERATION_NODE_KINDS = ("operation",)
 EXECUTION_CHECKS = ("branches", "failures", "integrations", "state_changes", "computations")
-INSPECT_SECTIONS = ("summary", "scenario", "groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "research_brief", "context_summary", "research_tasks", "semantic_review", "frontier", "validation")
+INSPECT_SECTIONS = ("summary", "scenario", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "operations", "read_coverage", "read_fragments", "research_history", "research_notes", "research_brief", "context_summary", "research_tasks", "semantic_review", "frontier", "validation")
 LIMITATIONS = [
     "Карта ограничена выбранным вариантом сценария и переданными материалами.",
     "Статический анализ и проверка цитат не доказывают исполнение в рабочей среде, полноту анализа или правильность бизнес-интерпретации.",
@@ -53,13 +53,13 @@ class MapValidationError(ValueError):
         self.code = code
 
 
-def _text(value: Any, field: str, *, required: bool = False, limit: int = MAX_TEXT) -> str:
+def _text(value: Any, field: str, *, required: bool = False, limit: int | None = MAX_TEXT) -> str:
     if not isinstance(value, str):
         raise MapValidationError(f"{field}: ожидается строка")
     value = value.strip()
     if required and not value:
         raise MapValidationError(f"{field}: укажите содержательное значение")
-    if len(value) > limit:
+    if limit is not None and len(value) > limit:
         raise MapValidationError(f"{field}: максимум {limit} символов")
     return value
 
@@ -97,9 +97,10 @@ class MapState(ResearchQuality):
         self._source_ids = set(source_ids)
         self.model: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
-            "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=20000),
-                         "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
-            "sources": sources, "groups": [], "nodes": [], "edges": [], "gaps": [],
+            # The process description is bounded by the model window, checked before research.
+            "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=None),
+                         "title": "", "process_name": "", "coverage": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
+            "sources": sources, "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,
             "research_tasks": [], "semantic_review": None,
             "run": {"status": "running", "reason": "", "steps": 0},
@@ -169,7 +170,7 @@ class MapState(ResearchQuality):
             if incomplete:
                 open_exits.append(identifier)
         return {
-            "nodes": [{key: deepcopy(n.get(key)) for key in ("id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition")} for n in nodes],
+            "nodes": [{key: deepcopy(n.get(key)) for key in ("id", "name", "kind", "continuation_mode", "join_mode", "completion_condition", "outcome", "effect_kind")} for n in nodes],
             "starts": list(self.model["scenario"]["entry_operation_ids"]),
             "ends": list(terminals),
             "unlinked": [n["id"] for n in nodes if not outgoing[n["id"]] and not incoming[n["id"]]],
@@ -272,7 +273,7 @@ class MapState(ResearchQuality):
 
     # An edit by id names only the changed fields. The stored object supplies the
     # rest, and the merged object is validated as a whole like a new one.
-    EDITABLE = {"upsert_group": "groups", "upsert_step": "nodes", "upsert_transition": "edges",
+    EDITABLE = {"upsert_step": "nodes", "upsert_transition": "edges",
                 "save_research_task": "research_tasks", "save_research_note": "research_notes"}
 
     def _with_existing(self, name: str, args: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
@@ -297,14 +298,13 @@ class MapState(ResearchQuality):
             return {"ok": False, "error": "Аргументы должны быть объектом JSON"}
         args = args or {}
         allowed = {
-            "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
-            "upsert_group": {"id", "name", "kind", "parent_id", "description", "result", "evidence"},
-            "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "group_id", "outcome", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
+            "set_scope": {"title", "process_name", "coverage", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
+            "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "outcome", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
             "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis", "code_explanations"},
             "add_gap": {"description", "node_ids", "edge_ids", "task_ids", "category", "evidence"},
             "review_source": {"source_id", "disposition", "reason"},
             "review_execution": {"id", "name", "evidence", "operations", "checks"},
-            "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids", "child_task_ids"},
+            "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids", "child_task_ids", "exclusion"},
             "review_semantics": {"checks", "route_cases"},
             "save_research_note": {"id", "kind", "status", "finding", "next_action", "evidence"},
             "save_research_brief": {"project_overview", "scenario_alignment", "confirmed_facts", "flow_hypothesis", "open_questions", "next_actions", "evidence"},
@@ -361,7 +361,11 @@ class MapState(ResearchQuality):
             raise MapValidationError(f"{name}: для нового объекта заполните {', '.join(missing)}; "
                                      "при последующей правке по id передаются только изменяемые поля", "missing_fields")
 
-    BRANCH = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\b|^\s*(?:switch|when)\b|^\s*case\b|^\s*elif\b|^\s*default\s*:")
+    BRANCH = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\b|^\s*(?:switch|when|match)\b|^\s*case\b|^\s*elif\b|^\s*default\s*:")
+    # Too common to identify one executor across operations.
+    GENERIC_SYMBOLS = frozenset({"execute", "run", "process", "handle", "call", "apply", "invoke", "main", "send",
+                                 "get", "post", "put", "build", "create", "close", "update", "save", "init"})
+    CODE_WORDS = re.compile(r"(?<![а-яё])(?:обработчик\w*|стратеги\w*|метод\w*|класс\w*|фасад\w*)", re.IGNORECASE)
 
     def _atomicity_hint(self, node: dict[str, Any]) -> str:
         """Advisory: a node resting on several branches or executor calls that no
@@ -387,6 +391,37 @@ class MapState(ResearchQuality):
                 "Каждый шаг процесса должен быть отдельной операцией: если здесь несколько проверок, вызовов, расчётов "
                 "или результатов, раздели эту операцию и свяжи части переходами.")
 
+    def _shared_executor_hints(self, node: dict[str, Any]) -> list[str]:
+        """Advisory: the node's own code calls an executor through which another
+        operation performs an external action. If this node performs it too,
+        that action is a separate step; one implementation may serve several."""
+        own = node.get("evidence", [])
+        source = code_only("\n".join(self._reads.get(ref["path"], {}).get(line, "") for ref in own
+                                     for line in range(ref["line_start"], ref["line_end"] + 1)))
+        declared = symbols(source)
+        systems = {row.get("name", "").casefold() for row in node.get("external_interactions", [])}
+        hints = []
+        for other in self.model["nodes"]:
+            rows = other.get("external_interactions") or []
+            if other["id"] == node["id"] or not rows or systems & {row.get("name", "").casefold() for row in rows}:
+                continue
+            refs = [ref for row in rows for ref in row["evidence"]]
+            if any(self._overlap(a, b) for a in refs for b in own):
+                continue
+            names = {ref["path"].rsplit("/", 1)[-1].rsplit(".", 1)[0] for ref in refs}
+            names = {name for name in names if name[:1].isupper()}
+            names |= {row["symbol"] for row in other.get("code_explanations", [])
+                      if row.get("kind") == "function" and len(row.get("symbol", "")) >= 4}
+            called = sorted(name for name in names - self.GENERIC_SYMBOLS - declared
+                            if re.search(r"\b" + re.escape(name) + r"\s*[.(]", source))
+            if called:
+                system = next((row.get("name") for row in rows if row.get("name")), "внешняя система")
+                hints.append(f"{node['id']}: основания вызывают {', '.join(called[:3])}; через это {other['id']} "
+                             f"«{other['name']}» обращается к внешней системе ({system}). Если {node['id']} тоже выполняет "
+                             "это действие, покажи его отдельной операцией в фактическом порядке вызовов; одна реализация "
+                             "может участвовать в нескольких операциях карты.")
+        return hints[:3]
+
     def _hints(self, name: str, result: dict[str, Any]) -> list[str]:
         """Immediate, non-blocking feedback; finish still enforces the hard rules."""
         hints = []
@@ -397,12 +432,24 @@ class MapState(ResearchQuality):
             hint = self._atomicity_hint(node)
             if hint:
                 hints.append(hint)
+            hints.extend(self._shared_executor_hints(node))
+            words = self.CODE_WORDS.search(node.get("name", ""))
+            if words:
+                hints.append(f"{node['id']}: название описывает устройство кода («{words.group(0)}»), а не шаг процесса; "
+                             "назови действие и его предмет, а имена реализаций оставь в основаниях.")
             if re.search(r"\s(?:и|или|а также)\s", node.get("name", "")):
                 hints.append(f"{node['id']}: в названии несколько действий через «и»/«или»; если это отдельные шаги процесса, "
                              "сделай из них отдельные операции.")
-            if node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown":
+            if (node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown"
+                    and not (node['id'] in terminals and node.get('completion_condition'))):
                 hints.append(f"{node['id']}: у операции с выбором продолжения нет единственного исхода; outcome не указывай, "
                              "исходы выражаются переходами к операциям, формирующим результат.")
+        if name in ("set_scope", "upsert_step"):
+            unresolved = [identifier for identifier in sorted(terminals) if identifier in nodes
+                          and nodes[identifier].get('outcome', 'unknown') == 'unknown']
+            if unresolved:
+                hints.append("Уточните бизнес-исход конечных операций по их основаниям: " + ", ".join(unresolved)
+                             + ". Если он не установлен, сохраните outcome=unknown и адресный пробел; название не доказывает исход.")
         if name == "upsert_transition" and result.get("id"):
             edge = next((row for row in self.model["edges"] if row["id"] == result["id"]), None)
             if edge and edge["source"] in terminals and not nodes.get(edge["source"], {}).get("completion_condition"):
@@ -415,6 +462,7 @@ class MapState(ResearchQuality):
                     hint = self._atomicity_hint(nodes[operation["node_id"]])
                     if hint:
                         hints.append(hint)
+                    hints.extend(self._shared_executor_hints(nodes[operation["node_id"]]))
         return hints[:12]
 
     def _inspect_map(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -499,7 +547,7 @@ class MapState(ResearchQuality):
                 return {k: compact(v, k) for k, v in value.items() if k != "quote"}
             return value
 
-        counts = {key: len(self.model[key]) for key in ("groups", "nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "research_tasks")}
+        counts = {key: len(self.model[key]) for key in ("nodes", "edges", "gaps", "sources", "source_reviews", "execution_reviews", "research_tasks")}
         counts['open_tasks'] = sum(task['status'] in ('open', 'read', 'analyzed') for task in self.model['research_tasks'])
         counts["operations"] = sum(len(review["operations"]) for review in self.model["execution_reviews"])
         if section == "summary":
@@ -615,27 +663,16 @@ class MapState(ResearchQuality):
         self.model["scenario"].update({
             "title": _text(args.get("title"), "title", required=True, limit=300),
             "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
-            "start": _text(args.get("start"), "start", required=True),
-            "end": _text(args.get("end"), "end", required=True),
-            "exclusions": _strings(args.get("exclusions", []), "exclusions"),
+            # The header and overview show these to the process owner, so they are business text.
+            "coverage": self.business_text(args["coverage"], "coverage", 1000) if args.get("coverage") else "",
+            "start": self.business_text(args.get("start"), "start", MAX_TEXT),
+            "end": self.business_text(args.get("end"), "end", MAX_TEXT),
+            "exclusions": [self.business_text(value, "exclusions", 1000)
+                           for value in _strings(args.get("exclusions", []), "exclusions")],
             "assumptions": _strings(args.get("assumptions", []), "assumptions"),
             **{key: _strings(args.get(key, self.model["scenario"][key]), key, limit=MAX_NODES) for key in ("entry_operation_ids", "terminal_operation_ids")},
         })
         return {"scenario": deepcopy(self.model["scenario"])}
-
-    def _upsert_group(self, args: dict[str, Any]) -> dict[str, Any]:
-        """A stage groups actions directly; stages do not create control flow."""
-        evidence = self._evidence(args.get("evidence", []))
-        if not evidence:
-            raise MapValidationError("Группировка требует оснований из прочитанных материалов")
-        item = {"id": self._id("groups", "group", args.get("id"), MAX_NODES),
-                "kind": _choice(args.get("kind", "stage"), "kind", GROUP_KINDS),
-                "name": _text(args.get("name"), "name", required=True, limit=300),
-                "description": _text(args.get("description", ""), "description"),
-                "result": _text(args.get("result"), "result", required=True),
-                "parent_id": _text(args.get("parent_id") or "", "parent_id") or None,
-                "evidence": evidence}
-        return self._put("groups", item)
 
     def _upsert_step(self, args: dict[str, Any]) -> dict[str, Any]:
         status, evidence = self._support(args)
@@ -643,17 +680,22 @@ class MapState(ResearchQuality):
                 "name": self.business_text(args.get("name"), "name", 300),
                 "kind": _choice(args.get("kind", "operation"), "kind", STEP_KINDS),
                 "evidence_status": status, "evidence": evidence,
-                "group_id": _text(args.get("group_id") or "", "group_id") or None,
                 "outcome": _choice(args.get("outcome") or "unknown", "outcome", OUTCOME_KINDS),
                 "effect_kind": _choice(args.get("effect_kind", "unknown"), "effect_kind", EFFECT_KINDS),
                 "continuation_mode": _choice(args.get("continuation_mode", "sequence"), "continuation_mode", ("sequence", "choice", "all")),
                 "join_mode": _choice(args.get("join_mode", "any"), "join_mode", ("any", "all"))}
         for field in ("description", "input", "output", "condition"):
-            item[field] = _text(args.get(field, ""), field)
+            value = _text(args.get(field, ""), field)
+            # Names of variables, methods and statuses belong to basis and code_explanations.
+            item[field] = self.business_text(value, field, MAX_TEXT) if value else value
         item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
         item["code_explanations"] = self.code_explanations(args.get("code_explanations", []), evidence)
         item["completion_condition"] = self.business_text(args["completion_condition"], "completion_condition") if args.get("completion_condition") else ""
         item["external_interactions"] = self.external_interactions(args.get("external_interactions", []), evidence)
+        systems = {row["name"].casefold() for row in item["external_interactions"]}
+        if len(systems) > 1:
+            raise MapValidationError("Одна операция — вызов одной внешней системы: вызовы разных систем и их частичный успех "
+                                     "покажите отдельными операциями", "several_systems")
         return self._put("nodes", item)
 
     def _upsert_transition(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -681,7 +723,7 @@ class MapState(ResearchQuality):
     def _add_gap(self, args: dict[str, Any]) -> dict[str, Any]:
         item = {"description": _text(args.get("description"), "description", required=True),
                 "category": _choice(args.get("category", "unresolved_behavior"), "category",
-                                    ("missing_source", "unresolved_behavior", "unresolved_transition")),
+                                    ("missing_source", "unresolved_behavior", "unresolved_transition", "unexplored")),
                 "evidence": self._evidence(args.get("evidence", []))}
         for key in ("node_ids", "edge_ids", "task_ids"):
             item[key] = _strings(args.get(key, []), key, limit=MAX_EDGES)
@@ -710,8 +752,8 @@ class MapState(ResearchQuality):
         return review
 
     def _remove_element(self, args: dict[str, Any]) -> dict[str, Any]:
-        kind = _choice(args.get("kind"), "kind", ("group", "step", "transition", "gap", "execution_review"))
-        collection = {"group": "groups", "step": "nodes", "transition": "edges", "gap": "gaps", "execution_review": "execution_reviews"}[kind]
+        kind = _choice(args.get("kind"), "kind", ("step", "transition", "gap", "execution_review"))
+        collection = {"step": "nodes", "transition": "edges", "gap": "gaps", "execution_review": "execution_reviews"}[kind]
         identifier = _text(args.get("id"), "id", required=True)
         if not any(row["id"] == identifier for row in self.model[collection]):
             raise MapValidationError(f"Объект {identifier} не найден")
@@ -722,10 +764,9 @@ class MapState(ResearchQuality):
 
     @staticmethod
     def _fingerprint(value: Any) -> str:
-        # Renaming, explaining, or regrouping an action does not alter its
-        # execution. Conditions, results, provenance, and transitions still do.
+        # Renaming or explaining an action does not alter its execution. Conditions, results, provenance, and transitions still do.
         # description/input/output state what the operation does, so they stay.
-        wording = ("name", "group_id", "basis", "code_explanations")
+        wording = ("name", "basis", "code_explanations")
         substantive = {k: v for k, v in value.items() if k not in wording} if isinstance(value, dict) else value
         return hashlib.sha256(json.dumps(substantive, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -821,16 +862,9 @@ class MapState(ResearchQuality):
     def _reference_errors(self) -> list[str]:
         errors = []
         nodes = {item["id"]: item for item in self.model["nodes"]}
-        groups = {item["id"]: item for item in self.model["groups"]}
         edges = {item["id"]: item for item in self.model["edges"]}
         gaps = {item["id"]: item for item in self.model["gaps"]}
         tasks = {item["id"]: item for item in self.model["research_tasks"]}
-        for group in groups.values():
-            if group["kind"] != "stage" or group.get("parent_id"):
-                errors.append(f"{group['id']}: этап должен иметь kind=stage и не иметь родительского этапа")
-        for node in nodes.values():
-            if node.get("group_id") and node["group_id"] not in groups:
-                errors.append(f"{node['id']}: group_id должен указывать на существующий этап")
         for edge in edges.values():
             if edge["source"] not in nodes or edge["target"] not in nodes:
                 errors.append(f"{edge['id']}: переход ссылается на отсутствующую операцию")
@@ -864,7 +898,7 @@ class MapState(ResearchQuality):
             for key, existing in (("node_ids", nodes), ("gap_ids", gaps), ("child_task_ids", tasks)):
                 if set(task.get(key, [])) - set(existing):
                     errors.append(f"{task['id']}: неизвестные ссылки {key}")
-        used_sources = {self._source_for(c["path"]) for collection in ("groups", "nodes", "edges")
+        used_sources = {self._source_for(c["path"]) for collection in ("nodes", "edges")
                         for row in self.model[collection] for field in ("evidence", "sender_evidence", "receiver_evidence")
                         for c in row.get(field, [])}
         used_sources.update(self._source_for(c["path"]) for n in nodes.values() for x in n.get("external_interactions", []) for c in x["evidence"])
@@ -1022,12 +1056,64 @@ class MapState(ResearchQuality):
                 edge["id"] in g.get("edge_ids", []) or {edge["source"], edge["target"]}.issubset(g["node_ids"])
                 for g in self.model["gaps"]):
                 errors.append(f"{edge['id']}: неизвестный переход требует gap с обеими операциями или edge_ids")
-        for group in self.model["groups"]:
-            used = any(n.get("group_id") == group["id"] for n in nodes.values())
-            if not used:
-                errors.append(f"{group['id']}: пустая группа; свяжите с действиями или удалите")
+        errors.extend(self._loop_exit_errors(nodes, outgoing))
         errors.extend(self._detail_errors())
         errors.extend(self.quality_errors())
+        return errors
+
+    @staticmethod
+    def _loop_exit_errors(nodes: dict[str, dict], outgoing: dict[str, set[str]]) -> list[str]:
+        """A cycle without an exit edge or conditional completion is an endless loop on the map.
+
+        Loops in code end on an empty result, a break, a limit or a stop request;
+        that end is a transition out of the loop. A gap cannot replace it: an exit
+        whose behaviour is unknown is drawn with evidence_status unknown.
+        """
+        index, low, stack, on_stack, counter, cycles = {}, {}, [], set(), [0], []
+        for root in nodes:
+            if root in index:
+                continue
+            work = [(root, iter(sorted(outgoing[root])))]
+            index[root] = low[root] = counter[0]
+            counter[0] += 1
+            stack.append(root)
+            on_stack.add(root)
+            while work:
+                node, successors = work[-1]
+                advanced = False
+                for successor in successors:
+                    if successor not in index:
+                        index[successor] = low[successor] = counter[0]
+                        counter[0] += 1
+                        stack.append(successor)
+                        on_stack.add(successor)
+                        work.append((successor, iter(sorted(outgoing[successor]))))
+                        advanced = True
+                        break
+                    if successor in on_stack:
+                        low[node] = min(low[node], index[successor])
+                if advanced:
+                    continue
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    component = set()
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.add(member)
+                        if member == node:
+                            break
+                    if len(component) > 1 or node in outgoing[node]:
+                        cycles.append(component)
+        errors = []
+        for component in cycles:
+            exits = any(target not in component for member in component for target in outgoing[member])
+            if not exits and not any(nodes[member].get("completion_condition") for member in component):
+                members = ", ".join(sorted(component, key=lambda value: (len(value), value)))
+                errors.append(f"Цикл без выхода ({members}): покажите переход, по которому исполнение выходит из цикла "
+                              "(пустой результат, break, лимит, остановка), либо условное завершение completion_condition")
         return errors
 
     def _finish(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -1036,6 +1122,7 @@ class MapState(ResearchQuality):
         if errors:
             raise MapValidationError("Исправьте карту перед завершением: " + "; ".join(errors[:30]), "finish_blocked")
         partial = bool(self.model["gaps"] or self.model["source_omissions"] or self.model["scenario"]["assumptions"]
+                       or self.model["scenario"].get("coverage")
                        or any(r["disposition"] == "unavailable" for r in self.model["source_reviews"])
                        or any(r["disposition"] == "out_of_scope" and not r.get("inspected", False)
                               for r in self.model["source_reviews"])
@@ -1045,4 +1132,11 @@ class MapState(ResearchQuality):
                   if partial else "Исследование переданных материалов завершено; это не подтверждение семантической полноты или исполнения в рабочей среде.")
         self.model["summary"] = summary
         self.model["run"].update(status=status, reason=reason)
+        branching = Counter(edge["source"] for edge in self.model["edges"] if edge.get("kind") != "data")
+        if not self.model["research_tasks"] and any(count > 1 for count in branching.values()):
+            # Not a gate: a minimum number of tasks would only invite placeholders.
+            note = ("Реестр задач исследования пуст: раскрытие вызванных обработчиков и ветвей "
+                    "не прослежено по задачам, полноту участков оценивает специалист.")
+            if note not in self.model["limitations"]:
+                self.model["limitations"].append(note)
         return {"status": status, "reason": reason, "limitations": list(self.model["limitations"])}

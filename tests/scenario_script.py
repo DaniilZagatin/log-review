@@ -11,7 +11,9 @@ from pko.llm.registry import ModelSpec
 from pko.scenario_map.code_references import symbols
 from pko.scenario_map.quality import SEMANTIC_CHECKS
 
-SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed")
+# A small window on purpose: scripted runs must exercise context compaction.
+SPEC = ModelSpec(role="scenario_researcher", base_url="https://stub.invalid/v1", model="fixture", api_key="not-needed",
+                 context_window=64000)
 FIXTURE = Path(__file__).parent / "fixtures" / "scenario_banking"
 SCENARIO = "Выпуск новой дебетовой карты действующему клиенту через мобильный канал, до выпуска либо отказа. Перевыпуск исключён."
 NODE_COUNT, EDGE_COUNT, OPERATION_COUNT = 18, 17, 18
@@ -62,14 +64,6 @@ def research_calls():
         "next_actions": ["Проследить исполнение от входа, выделяя отдельные действия и подтверждённые переходы."],
         "evidence": [ref for scope in scopes.values() for ref in scope],
     }))
-    # Stages are optional navigation across source files, not executable nodes.
-    for name, result, systems in [
-        ("Подача заявки", "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
-        ("Рассмотрение заявки", "Заявка направлена на выпуск либо отклонена", [2, 3]),
-        ("Выпуск карты", "Карта и результат выпуска сохранены", [3]),
-    ]:
-        calls.append(("upsert_group", {"name": name, "kind": "stage", "result": result,
-                                      "evidence": [ref for system in systems for ref in scopes[system]]}))
     # key, source, business name, graph kind, operation kind, start/end snippets, effect
     specs = [
         ("channel_receive", 1, "Приём заявки в мобильном канале", "operation", "action",
@@ -77,13 +71,13 @@ def research_calls():
         ("variant_check", 1, "Проверка варианта оформления", "operation", "validation",
          "if request['client_type'] != 'existing':", None, "Выбран допуск действующего клиента либо отказ по неподдерживаемому варианту."),
         ("application_build", 1, "Формирование запроса на оформление", "operation", "transform",
-         "application = {", "    }", "Подготовлены request_id, client_id и продукт debit для запроса в АС заявок."),
+         "application = {", "    }", "Подготовлены идентификаторы заявки и клиента и вид карты «дебетовая» для запроса в АС заявок."),
         ("application_send", 1, "Отправка заявки на рассмотрение", "operation", "integration",
          "return http.post('https://applications.example/applications/debit'", None, "Подготовленный запрос передан по HTTP; это ещё не подтверждение выпуска."),
         ("variant_rejection", 1, "Формирование отказа по варианту", "operation", "error_handling",
-         "rejection = {'request_id':", "return rejection", "Возвращён идентификатор заявки со статусом unsupported_variant."),
+         "rejection = {'request_id':", "return rejection", "Возвращён идентификатор заявки со статусом «вариант не поддерживается»."),
         ("application_receive", 2, "Получение заявки на рассмотрение", "operation", "action",
-         "@app.post('/applications/debit')", "def accept(request):", "АС заявок приняла request_id, client_id и product по HTTP-контракту."),
+         "@app.post('/applications/debit')", "def accept(request):", "АС заявок приняла идентификаторы заявки и клиента и вид карты по HTTP-контракту."),
         ("profile_read", 2, "Получение профиля клиента", "operation", "read",
          "profile = client_profiles[request['client_id']]", None, "Из учебного локального справочника получены признаки активности и допуска клиента."),
         ("eligibility_check", 2, "Проверка возможности выпуска", "operation", "validation",
@@ -91,23 +85,23 @@ def research_calls():
         ("rejection_write", 2, "Сохранение отказа по заявке", "operation", "write",
          "applications[request['request_id']] = {'status': 'rejected'", None, "В учебном хранилище по заявке сохранены статус rejected и клиент."),
         ("rejection_response", 2, "Формирование ответа об отказе", "operation", "error_handling",
-         "rejection = {'request_id':", "return rejection", "Сформирован и возвращён ответ с request_id и статусом rejected."),
+         "rejection = {'request_id':", "return rejection", "Сформирован и возвращён ответ с идентификатором заявки и статусом «отклонена»."),
         ("acceptance_write", 2, "Сохранение принятой заявки", "operation", "write",
-         "applications[request['request_id']] = {'status': 'accepted'", None, "В учебном хранилище сохранены request_id, клиент и статус accepted."),
+         "applications[request['request_id']] = {'status': 'accepted'", None, "В учебном хранилище сохранены идентификатор заявки, клиент и статус «принята»."),
         ("message_build", 2, "Формирование сообщения на выпуск", "operation", "transform",
-         "message = {", "    }", "Подготовлено сообщение с request_id, client_id и product."),
+         "message = {", "    }", "Подготовлено сообщение с идентификаторами заявки и клиента и видом карты."),
         ("message_publish", 2, "Публикация заявки на выпуск", "operation", "publish",
          "broker.publish('card.issue.requested', message)", None, "Сообщение отправлено в card.issue.requested; результат выпуска ещё не подтверждён."),
         ("message_receive", 3, "Получение сообщения о выпуске карты", "operation", "action",
          "@subscriber('card.issue.requested')", "def issue(message):", "Обработчик выпуска получил сообщение канала card.issue.requested."),
         ("issue_parameters", 3, "Извлечение параметров выпуска", "operation", "transform",
-         "parameters = {'request_id':", None, "Из сообщения выделены request_id, client_id и product для выпуска."),
+         "parameters = {'request_id':", None, "Из сообщения выделены идентификаторы заявки и клиента и вид карты для выпуска."),
         ("card_build", 3, "Формирование данных новой карты", "operation", "transform",
          "card = {", "    }", "Подготовлена учебная запись карты: идентификатор, клиент, продукт и статус issued."),
         ("card_issue", 3, "Сохранение выпущенной карты", "operation", "write",
-         "cards[card['card_id']] = card", None, "Учебная карта со статусом issued сохранена по card_id в хранилище карт."),
+         "cards[card['card_id']] = card", None, "Учебная карта со статусом «выпущена» сохранена по номеру карты в хранилище карт."),
         ("result_write", 3, "Сохранение результата выпуска", "operation", "write",
-         "results[parameters['request_id']] =", None, "По request_id сохранены статус issued и card_id, связывающие результат с заявкой."),
+         "results[parameters['request_id']] =", None, "По идентификатору заявки сохранены статус «выпущена» и номер карты, связывающие результат с заявкой."),
     ]
     failures = {
         "variant_check": "Для клиента другого типа выбирается окончательный отказ по варианту.",
@@ -121,13 +115,6 @@ def research_calls():
         "issue_parameters": "Отсутствие обязательного поля вызывает исключение; локальная обработка не показана.",
     }
     nodes = {}
-    memberships = {
-        **dict.fromkeys(["start", "channel_receive", "variant_check", "variant_rejection", "variant_end",
-                        "application_build", "application_send", "application_receive"], "group-1"),
-        **dict.fromkeys(["profile_read", "eligibility_check", "rejection_write", "rejection_response", "rejection_end",
-                        "acceptance_write", "message_build", "message_publish", "message_receive"], "group-2"),
-        **dict.fromkeys(["issue_parameters", "card_build", "card_issue", "result_write", "issued_end"], "group-3"),
-    }
     explanations = {
         "variant_check": "Обработчик проверяет тип клиента до подготовки запроса. При неподдерживаемом типе возвращает отказ, поэтому проверка показана отдельной развилкой.",
         "application_send": "Подготовленная заявка передаётся HTTP-вызовом в обработчик системы заявок. Получение ответа ещё не подтверждает выпуск карты.",
@@ -140,7 +127,6 @@ def research_calls():
                 "failure": failures.get(key, "В обследованном участке отдельная обработка технического отказа не показана.")}
         nodes[key] = node
         calls.append(("upsert_step", {"name": name, "kind": kind, "description": effect,
-                                      "group_id": memberships[key],
                                       **({"basis": explanations[key]} if key in explanations else {}),
                                       **({"outcome": "success" if key == "result_write" else "refusal", "effect_kind": "result"}
                                          if key in ("variant_rejection", "rejection_response", "result_write") else {}),
@@ -265,6 +251,43 @@ def research_calls():
     return calls
 
 
+# Business stages of the fixture: name, goal, result and member operations by name.
+STAGE_PLAN = [
+    ("Проверка варианта оформления", "Установить, поддерживается ли запрошенный вариант оформления карты для клиента.",
+     "Заявка допущена к передаче на рассмотрение либо завершена отказом по варианту.",
+     ["Приём заявки в мобильном канале", "Проверка варианта оформления", "Формирование отказа по варианту"]),
+    ("Передача заявки на рассмотрение", "Подготовить заявку и передать её в систему рассмотрения заявок.",
+     "Заявка отправлена на рассмотрение; решение по ней ещё не принято.",
+     ["Формирование запроса на оформление", "Отправка заявки на рассмотрение"]),
+    ("Рассмотрение допуска клиента", "Решить по профилю клиента, можно ли выпустить ему дебетовую карту.",
+     "Заявка принята и сохранена либо отклонена с ответом об отказе.",
+     ["Получение заявки на рассмотрение", "Получение профиля клиента", "Проверка возможности выпуска",
+      "Сохранение отказа по заявке", "Формирование ответа об отказе", "Сохранение принятой заявки"]),
+    ("Передача заявки на выпуск", "Передать принятую заявку на выпуск карты.",
+     "Сообщение на выпуск отправлено; выпуск карты ещё не подтверждён.",
+     ["Формирование сообщения на выпуск", "Публикация заявки на выпуск"]),
+    ("Выпуск карты", "Выпустить карту по принятой заявке и связать результат с заявкой.",
+     "Карта и результат выпуска по заявке сохранены.",
+     ["Получение сообщения о выпуске карты", "Извлечение параметров выпуска", "Формирование данных новой карты",
+      "Сохранение выпущенной карты", "Сохранение результата выпуска"]),
+]
+
+
+def scripted_business_stages(payload):
+    """Group operations of the grouping packet by ``STAGE_PLAN``; others stay unassigned."""
+    by_name = {row["name"]: row["id"] for row in payload["operations"]}
+    stages, used = [], set()
+    for number, (name, goal, result, members) in enumerate(STAGE_PLAN, 1):
+        ids = [by_name[member] for member in members if member in by_name]
+        if ids:
+            used.update(ids)
+            stages.append({"id": f"stage-{number}", "name": name, "goal": goal, "result": result, "operation_ids": ids,
+                           "boundary": "На выходе участка задача решена; следующие операции решают другую задачу."})
+    unassigned = [{"operation_id": row["id"], "reason": "Операция не относится к этапам учебного сценария"}
+                  for row in payload["operations"] if row["id"] not in used]
+    return {"stages": stages, "unassigned": unassigned}
+
+
 def scripted_summary():
     return ChatResult(text=json.dumps({
         "project_and_scenario": "Учебный выпуск карты действующему клиенту.",
@@ -285,6 +308,11 @@ class ScriptedClient:
     def chat(self, messages, **kwargs):
         if not kwargs.get("tools"):
             return scripted_summary()
+        if kwargs["tools"][0]["function"]["name"] == "submit_business_stages":
+            arguments = scripted_business_stages(json.loads(messages[1]["content"]))
+            return ChatResult(text="", usage={}, tool_calls=[{
+                "id": "call-stages", "type": "function",
+                "function": {"name": "submit_business_stages", "arguments": json.dumps(arguments, ensure_ascii=False)}}])
         self.seen = messages
         for item in messages:
             if item["role"] == "tool":
