@@ -26,9 +26,13 @@ def validate_hierarchy(hierarchy: dict, model: dict) -> None:
         raise HierarchyError("unsupported hierarchy version")
     if hierarchy.get("map_revision") != map_revision(model):
         raise HierarchyError("hierarchy belongs to another map revision")
-    if hierarchy.get("input_mode") not in INPUT_MODES:
+    # Only a hierarchy that proposes nothing may lack an input: building that input is what failed.
+    unbuilt = (hierarchy.get("input_mode") is None and hierarchy.get("input_sha256") is None
+               and not hierarchy.get("stages") and not hierarchy.get("membership")
+               and (hierarchy.get("status") or {}).get("result") == "none")
+    if not unbuilt and hierarchy.get("input_mode") not in INPUT_MODES:
         raise HierarchyError("unknown business-stage input mode")
-    if hierarchy.get("input_sha256") != input_fingerprint(model, hierarchy["input_mode"]):
+    if not unbuilt and hierarchy.get("input_sha256") != input_fingerprint(model, hierarchy["input_mode"]):
         raise HierarchyError("hierarchy belongs to another grouping input")
     if hierarchy.get("methodology_sha256") != methodology(STAGE, METHODOLOGY)["sha256"]:
         raise HierarchyError("hierarchy uses another grouping methodology")

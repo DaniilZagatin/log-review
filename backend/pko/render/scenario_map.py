@@ -733,6 +733,12 @@ function projectScenarioScope(canonical,view){
  for(const link of view.links)if((link.transitions||[link]).some(edge=>canonical.edges.has(String(edge.id))))edges.add(String(link.id));
  return {nodes,edges};
 }
+function stageScope(ids,edges){
+ // A whole stage lies on every path through any of its operations.
+ const nodes=new Set(),scoped=new Set();
+ for(const id of ids){const scope=scenarioNodeScope(id,edges);for(const node of scope.nodes)nodes.add(node);for(const edge of scope.edges)scoped.add(edge);}
+ return {nodes,edges:scoped};
+}
 function updateHighlight(){
  // The selection stays a map element; the current view resolves it. An operation
  // inside a collapsed stage is represented by that stage's block.
@@ -746,6 +752,7 @@ function updateHighlight(){
  // Reachability belongs to the atomic graph. Traversing the collapsed graph would
  // incorrectly include another member's exits when only one operation is selected.
  if(selected?.type==='node')project(scenarioNodeScope(selected.id,validEdges));
+ else if(block&&!block.open)project(stageScope(stageMembers(stage).map(node=>text(node.id)),validEdges));
  else if(stage)members(stageMembers(stage));
  else if(group)members(groupMembers(group));
  else if(selected?.type==='edge'||selected?.type==='link'){const link=selected.type==='edge'?display.linkOf.get(text(selected.id)):display.linkById.get(text(selected.id));if(link){focusLink=text(link.id);scope.add(link.source);scope.add(link.target);}}

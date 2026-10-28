@@ -189,9 +189,14 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
 def unavailable_hierarchy(model: dict, reason: str, *, run_id: str | None = None, budget: dict | None = None) -> dict:
     """Stages that could not be built: every operation stays unassigned with the reason."""
     operations = [node["id"] for node in model.get("nodes") or []]
+    # The failure may be in building the input itself; the fallback must not fail again.
+    try:
+        mode, digest = "full", input_fingerprint(model, "full")
+    except Exception:
+        mode = digest = None
     return _hierarchy(model, [], {}, dict.fromkeys(operations, "Этапы не построены"),
                       {"result": "none", "reasons": [reason]}, run_id=run_id,
-                      input_sha256=input_fingerprint(model, "full"), input_mode="full", budget=budget)
+                      input_sha256=digest, input_mode=mode, budget=budget)
 
 
 def _hierarchy(model: dict, records: list, membership: dict, reasons: dict, status: dict, *,

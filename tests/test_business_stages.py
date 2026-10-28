@@ -291,6 +291,18 @@ class HierarchyTests(unittest.TestCase):
         self.assertEqual(hierarchy["input_sha256"], input_fingerprint(model, "full"))
         self.assertEqual(hierarchy["status"]["result"], "none")
 
+    def test_an_input_that_cannot_be_built_still_gives_a_stage_less_hierarchy(self):
+        model = payment_map()
+        with patch("pko.stages.inputs.immediate_dominators", side_effect=KeyError("broken edge")):
+            hierarchy = grouping.unavailable_hierarchy(model, "Вход группировки не собран")
+            validate_hierarchy(hierarchy, model)
+        self.assertEqual((hierarchy["input_mode"], hierarchy["input_sha256"]), (None, None))
+        # Only a hierarchy proposing nothing may lack its input identity.
+        proposed, _ = self.ask(STAGES)
+        proposed.update(input_mode=None, input_sha256=None)
+        with self.assertRaisesRegex(HierarchyError, "input mode"):
+            validate_hierarchy(proposed, model)
+
     def test_contract_rejects_foreign_or_incomplete_hierarchies(self):
         hierarchy, _ = self.ask(STAGES)
         model = payment_map()
@@ -362,6 +374,16 @@ class StagePublicationTests(unittest.TestCase):
         html = (output / "scenario_map.html").read_text(encoding="utf-8")
         self.assertIn('id="scenario-model"', html)
         self.assertIn('id="map-hierarchy"', html, "the reason reaches the reader of the map")
+
+    def test_a_grouping_input_failure_does_not_end_the_run(self):
+        output = self.root / "input"
+        with patch("pko.stages.inputs.immediate_dominators", side_effect=KeyError("broken edge")):
+            model = run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient())
+        self.assertEqual(model["run"]["status"], "completed")
+        hierarchy = json.loads((output / HIERARCHY_FILE).read_text(encoding="utf-8"))
+        self.assertEqual((hierarchy["stages"], hierarchy["status"]["result"]), ([], "none"))
+        self.assertIn("broken edge", hierarchy["status"]["reasons"][0])
+        self.assertIn('id="map-hierarchy"', (output / "scenario_map.html").read_text(encoding="utf-8"))
 
     def test_disabled_stages_remove_stale_ones(self):
         output = self.root / "plain"
@@ -475,6 +497,26 @@ console.log(JSON.stringify(input.map(c=>{const view=projectScenarioStages(c.node
         self.assertEqual(links[("e", "f")]["outer"], ["stage:stage-1", "f"])
         self.assertEqual(links[("a", "b")]["outer"], ["a", "stage:stage-1"])
         self.assertEqual(links[("b", "e")]["inner"], "stage:stage-1")
+
+    def test_a_closed_stage_lights_the_paths_through_it_only(self):
+        from pko.render.scenario_map import _SCRIPT
+        from test_stage_render_fixes import stage_render_fixture
+        model, _, hierarchy = stage_render_fixture()
+        helpers = _SCRIPT[_SCRIPT.index("function scenarioNodeScope("):_SCRIPT.index("function updateHighlight(")]
+        runner = _STAGE_PROJECTION_JS + helpers + """
+const data=JSON.parse(require('fs').readFileSync(0,'utf8'));
+const view=projectScenarioStages(data.model.nodes,data.model.edges,data.hierarchy.stages,data.hierarchy.membership);
+const ids=Object.keys(data.hierarchy.membership).filter(id=>data.hierarchy.membership[id]==='stage-2');
+const scope=projectScenarioScope(stageScope(ids,data.model.edges),view);
+console.log(JSON.stringify({nodes:[...scope.nodes],transitions:view.links.filter(link=>scope.edges.has(link.id)).flatMap(link=>link.transitions.map(edge=>edge.id))}));
+"""
+        result = subprocess.run([shutil.which("node"), "-e", runner], input=json.dumps({"model": model, "hierarchy": hierarchy}),
+                                capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        scope = json.loads(result.stdout)
+        # The way in through b and d stays lit; the branch from c bypasses the stage.
+        self.assertEqual(set(scope["nodes"]), {"stage:stage-1", "stage:stage-2"})
+        self.assertEqual(set(scope["transitions"]), {"e3", "e4"})
 
     def test_projection_draws_no_path_the_map_does_not_have(self):
         # Random graphs and partitions; stages are collapsed only when the region check allows it.
