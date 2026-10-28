@@ -290,11 +290,10 @@ class ResearchQuality:
         # Ignore transient run metadata; public interpretation and evidence matter.
         # research_brief is excluded: its freshness against new reads is checked
         # separately (read_signature), and it does not change routes or outcomes.
-        state = {k: self.model[k] for k in ('scenario', 'groups', 'nodes', 'edges', 'gaps',
+        state = {k: self.model[k] for k in ('scenario', 'nodes', 'edges', 'gaps',
                  'research_tasks', 'execution_reviews', 'source_reviews')}
         state['nodes'] = [self._fingerprint(row) for row in self.model['nodes']]
         state['edges'] = [self._fingerprint(row) for row in self.model['edges']]
-        state.pop('groups', None)
         return hashlib.sha256(json.dumps(state, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
     def _review_semantics(self, args):

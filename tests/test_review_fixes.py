@@ -25,7 +25,7 @@ from pko.errors import PkoError
 from pko.scenario_map.agent import TOOL_SCHEMAS, run_agent
 from pko.scenario_map.context import context_budget
 from pko.scenario_map.tools import TOOLS
-from pko.scenario_map.runner import run_report_from_map, run_scenario
+from pko.scenario_map.runner import rebuild_from_map, run_scenario
 from pko.scenario_map.sources import build_workspace, read_process_description
 from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
@@ -245,14 +245,14 @@ class AnswerReuseTests(unittest.TestCase):
                          report_options=ReportOptions(client=first))
             self.assertTrue(json.loads((output / "report_cache.json").read_text(encoding="utf-8")))
             second = ScriptedReportClient()
-            run_report_from_map(output / "scenario_map.json", sources(), output, spec=SPEC,
+            rebuild_from_map(output / "scenario_map.json", sources(), output, spec=SPEC, observability=True, client=ScriptedReportClient(),
                                 report_options=ReportOptions(client=second))
             report = json.loads((output / "process_report.json").read_text(encoding="utf-8"))
             self.assertEqual(second.requests, [])
             self.assertEqual(report["budget"]["used_requests"], 0)
             self.assertGreater(report["budget"]["cache_hits"], 0)
             third = ScriptedReportClient()
-            run_report_from_map(output / "scenario_map.json", sources(), output, spec=SPEC,
+            rebuild_from_map(output / "scenario_map.json", sources(), output, spec=SPEC, observability=True, client=ScriptedReportClient(),
                                 report_options=ReportOptions(client=third, profile=load_profile("bank-process-kpi")))
             self.assertIn("submit_process_context", [tool for tool, _ in third.requests])
 

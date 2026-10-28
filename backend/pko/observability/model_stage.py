@@ -60,10 +60,10 @@ class ReportBudget:
         return {"max_requests": self.max_requests, "used_requests": self.used, "by_stage": dict(self.by_stage)}
 
 
-def methodology(stage: str) -> dict:
-    """Stage instructions: shared rules plus the stage file, with a content digest."""
-    text = (_METHODOLOGY / "common.md").read_text(encoding="utf-8") + "\n\n" + \
-        (_METHODOLOGY / f"{stage}.md").read_text(encoding="utf-8")
+def methodology(stage: str, folder: Path = _METHODOLOGY) -> dict:
+    """Stage instructions: the folder's shared rules plus the stage file, with a content digest."""
+    text = (folder / "common.md").read_text(encoding="utf-8") + "\n\n" + \
+        (folder / f"{stage}.md").read_text(encoding="utf-8")
     return {"id": stage, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text}
 
 
@@ -148,7 +148,8 @@ def _cache_candidate(responses: list[tuple[dict, Any]], merged, tool: dict, key)
 
 
 class StageModel:
-    def __init__(self, client, budget: ReportBudget, cache: dict | None = None):
+    def __init__(self, client, budget: ReportBudget, cache: dict | None = None, methodology_dir: Path = _METHODOLOGY):
+        self.methodology_dir = methodology_dir
         self.client = client
         self.budget = budget
         # Accepted answers by packet digest; reused only after revalidation.
@@ -174,7 +175,7 @@ class StageModel:
         ``key``, items accepted in the first answer are kept when the repair
         omits them.
         """
-        rules = methodology(stage)
+        rules = methodology(stage, self.methodology_dir)
         schema = {"type": "function", "function": tool}
         messages = [{"role": "system", "content": rules["text"]},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, separators=(",", ":"))}]

@@ -104,7 +104,7 @@ function showOnMap(operationId,rowId){
  const node=byId.get(text(operationId));
  if(!node){notice('Операция «'+text(operationId)+'» не найдена на карте.');return;}
  returnTo={tab:activeTab,rowId};notice('');setTab('map');writeHash('tab=map&node='+encodeURIComponent(text(operationId)));
- $('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];selectNode(node,true);
+ $('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];setMode('atomic');selectNode(node,true);
 }
 $('report-return').addEventListener('click',()=>{
  const target=returnTo;returnTo=null;if(!target)return;setTab(target.tab);writeHash('tab='+target.tab);
@@ -115,7 +115,7 @@ function applyHash(){
  const params=new URLSearchParams(location.hash.slice(1)),tab=params.get('tab'),nodeId=params.get('node');
  if(!tab&&!nodeId)return;
  returnTo=null;notice(tab&&!panels[tab]?'Раздел «'+tab+'» не найден, показана карта.':'');setTab(tab&&panels[tab]?tab:'map');
- if(nodeId){const node=byId.get(nodeId);if(node){setTab('map');selectNode(node,true);}else notice('Операция «'+nodeId+'» не найдена на карте.');}
+ if(nodeId){const node=byId.get(nodeId);if(node){setTab('map');setMode('atomic');selectNode(node,true);}else notice('Операция «'+nodeId+'» не найдена на карте.');}
 }
 window.addEventListener('hashchange',applyHash);
 mapTabHook=()=>{returnTo={tab:activeTab,rowId:null};notice('');setTab('map');writeHash('tab=map');$('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];};

@@ -87,7 +87,6 @@ class ScenarioMapTests(unittest.TestCase):
         for source, path in (("source-2", "source-2/cards.py"), ("source-3", "source-3/worker.py")):
             self.state.observe_read(path, 1, 1)
             self.good("review_source", source_id=source, disposition="out_of_scope", reason="Другой вариант сценария")
-        self.group_current_actions()
         return system, first, last
 
     def review_payload(self, system=None, node_ids=None):
@@ -115,16 +114,6 @@ class ScenarioMapTests(unittest.TestCase):
         if payload['operations']:self.good('review_execution',**payload)
         self.good('review_semantics',**semantic_payload(self.state))
 
-    def group_current_actions(self):
-        nodes = [n for n in self.state.model["nodes"] if n["kind"] == "operation"
-                 and n["evidence_status"] != "unknown" and not n.get("group_id")]
-        if not nodes:
-            return
-        stage = self.good("upsert_group", name="Подача заявки", kind="stage", result="Обращение принято",
-                          evidence=nodes[0]["evidence"])["id"]
-        for node in nodes:
-            self.good("upsert_step", **{**node, "group_id": stage})
-
     def test_unread_quote_is_rejected_and_failed_mutation_is_atomic(self):
         before = self.state.snapshot()
         response = self.state.dispatch("upsert_step", {"name": "Получение обращения", "evidence_status": "observed",
@@ -134,45 +123,19 @@ class ScenarioMapTests(unittest.TestCase):
         self.assertEqual(before, self.state.snapshot())
         self.assertEqual(self.node(), "step-1")
 
-    def test_stages_are_separate_from_flow_and_can_span_sources(self):
-        first, second = self.system(), self.system(2)
-        evidence = self.cite() + self.cite("source-2/cards.py")
-        stage = self.good("upsert_group", name="Принять заявку", kind="stage", result="Заявка доставлена", evidence=evidence)["id"]
-        for system, refs in ((first, evidence[:1]), (second, evidence[1:])):
-            self.good("upsert_step", name="Обработка запроса", kind="operation",
-                      group_id=stage, evidence_status="observed", evidence=refs)
-        self.assertEqual(len(self.state.model["nodes"]), 2)
-        self.assertEqual(self.state.model["edges"], [])
-        self.assertEqual(self.good("inspect_map", section="groups")["total"], 1)
-        before = self.state.snapshot()
-        self.assertFalse(self.state.dispatch("remove_element", {"kind": "group", "id": stage})["ok"])
-        self.assertEqual(before, self.state.snapshot())
-
-    def test_stage_membership_and_evidence_are_checked_transactionally(self):
+    def test_research_does_not_group_operations_into_stages(self):
+        # Business stages are built over the finished map; research has no stage tool or field.
+        self.assertNotIn("upsert_group", {tool["function"]["name"] for tool in TOOLS})
         evidence = self.cite()
-        payload = dict(name="Этап", kind="stage", result="Результат", evidence=evidence)
-        self.assertFalse(self.state.dispatch("upsert_group", {**payload, "evidence": []})["ok"])
-        stage = self.good("upsert_group", **payload)["id"]
+        self.assertEqual(self.state.dispatch("upsert_group", {"name": "Этап", "result": "Результат", "evidence": evidence})["code"],
+                         "unknown_tool")
         before = self.state.snapshot()
-        for parent in (None, "missing", stage):
-            self.assertFalse(self.state.dispatch("upsert_group", {**payload, "kind": "operation", "parent_id": parent})["ok"])
-            self.assertEqual(before, self.state.snapshot())
-        self.assertFalse(self.state.dispatch("upsert_group", {**payload, "id": stage, "parent_id": stage})["ok"])
-        node = self.node(self.system())
-        current = next(n for n in self.state.model["nodes"] if n["id"] == node)
-        self.good("upsert_step", **{**current, "group_id": stage})
-        before = self.state.snapshot()
-        self.assertFalse(self.state.dispatch("upsert_step", {**current, "group_id": "missing"})["ok"])
-        self.assertEqual(before, self.state.snapshot())
-
-
-    def test_empty_groups_cannot_finish(self):
-        self.complete_small_map()
-        self.review_current_operations()
-        self.good("upsert_group", name="Неиспользуемый этап", kind="stage", result="Ожидаемый результат", evidence=self.cite())
-        response = self.state.dispatch("finish", {"summary": "Исследовано"})
+        response = self.state.dispatch("upsert_step", {"name": "Обработка запроса", "kind": "operation", "group_id": "group-1",
+                                                       "evidence_status": "observed", "evidence": evidence})
         self.assertFalse(response["ok"])
-        self.assertIn("пустая группа", response["error"])
+        self.assertIn("group_id", response["error"])
+        self.assertEqual(before, self.state.snapshot())
+        self.assertNotIn("groups", self.state.model)
 
     def test_terminal_outcome_is_explicit_and_not_inferred_from_name(self):
         system = self.system()
@@ -340,7 +303,7 @@ class ScenarioMapTests(unittest.TestCase):
 
     def test_tool_contract_lists_all_mutation_handlers(self):
         names = [tool["function"]["name"] for tool in TOOLS]
-        self.assertEqual(len(set(names)), 14)
+        self.assertEqual(len(set(names)), 13)
         self.assertIn("save_research_brief", names)
         self.assertIn("save_research_note", names)
         self.assertIn("inspect_map", names)
@@ -567,10 +530,6 @@ class OperationSchemaV2Tests(unittest.TestCase):
         result=self.state.dispatch('finish',{'summary':'Исследовано'})
         self.assertFalse(result['ok']);self.assertIn('неизвестные операции',result['error'])
         self.assertEqual(self.state.graph_frontier()['starts'],[n])
-
-    def test_stages_are_optional(self):
-        self.node()
-        self.assertFalse(any('group_id' in e for e in self.state._finish_errors()))
 
     def external(self, **extra):
         return {'name':'Сервис сведений об обращениях','purpose':'Запрашивает сведения об обращении',

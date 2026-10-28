@@ -134,25 +134,23 @@ class EvidenceRangeTests(unittest.TestCase):
         self.assertTrue(accepted["ok"], accepted)
         self.assertEqual(accepted["id"], "step-1")
 
-    def test_range_only_works_for_notes_groups_nodes_and_transition_endpoints(self):
+    def test_range_only_works_for_notes_nodes_and_transition_endpoints(self):
         self.state.observe_read(self.path, 43, 25)
         evidence = [self.ref()]
         system = self.system(evidence)
         self.assertTrue(system["ok"], system)
         note = self.state.dispatch("save_research_note", {"kind": "fact", "finding": "Проверка выполняется перед сохранением", "evidence": evidence})
-        group = self.state.dispatch("upsert_group", {"kind": "stage", "name": "Обработка обращения", "result": "Обращение сохранено", "evidence": evidence})
         self.assertTrue(note["ok"], note)
-        self.assertTrue(group["ok"], group)
         nodes = []
         for name in ("Проверить обращение", "Сохранить обращение"):
-            result = self.state.dispatch("upsert_step", explain_args({"name": name, "group_id": group["id"],
+            result = self.state.dispatch("upsert_step", explain_args({"name": name,
                 "evidence_status": "observed", "evidence": evidence}))
             self.assertTrue(result["ok"], result)
             nodes.append(result["id"])
         transition = self.state.dispatch("upsert_transition", explain_args({"source": nodes[0], "target": nodes[1], "kind": "sequence",
             "evidence_status": "observed", "evidence": evidence}))
         self.assertTrue(transition["ok"], transition)
-        for collection in ("research_notes", "groups", "nodes", "edges"):
+        for collection in ("research_notes", "nodes", "edges"):
             for item in self.state.model[collection]:
                 self.assertTrue(item["evidence"][0]["quote"])
 
@@ -205,13 +203,6 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["status"], "completed")
 
-    def test_moving_action_between_stages_keeps_review_valid(self):
-        old_stage = self.node["group_id"]
-        new_stage = self.helper.good("upsert_group", name="Проверка обращения", kind="stage", result="Сведения проверены", evidence=self.node["evidence"])["id"]
-        self.helper.good("upsert_step", **{**self.node, "group_id": new_stage})
-        result = self.finish()
-        self.assertTrue(result["ok"], result)
-
     def test_semantic_action_changes_require_new_execution_review(self):
         for field, value in (("description", "Другое действие"), ("input", "Параметры нового обращения"),
                              ("output", "Сохранённое обращение"), ("condition", "Обязательные сведения заполнены")):
@@ -255,7 +246,7 @@ class GraphFrontierTests(unittest.TestCase):
         frontier = self.state.graph_frontier()
         self.assertEqual({node["id"] for node in frontier["nodes"]}, set(node_ids))
         for node in frontier["nodes"]:
-            self.assertEqual(set(node), {"id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition", "outcome", "effect_kind"})
+            self.assertEqual(set(node), {"id", "name", "kind", "continuation_mode", "join_mode", "completion_condition", "outcome", "effect_kind"})
             self.assertEqual(node['outcome'], 'unknown')
         self.assertEqual(set(frontier["unlinked"]), set(node_ids))
         self.assertNotIn("quote", json.dumps(frontier))

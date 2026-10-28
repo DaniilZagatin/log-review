@@ -258,7 +258,7 @@ const element=tag=>({tag,children:[],textContent:'',append(...items){this.childr
 const document={createElement:element},panel=element('div'),$=()=>panel;
 const legacy=false,scenario={terminal_operation_ids:['node-1']},operationsByNode=new Map(),
  byId=new Map(),validEdges=[],gaps=[],outcomeNames={};
-const nodeKindLabel=()=> 'Атомарная операция',badge=()=>element('span'),nodeGroups=()=>[],
+const nodeKindLabel=()=> 'Атомарная операция',badge=()=>element('span'),nodeGroups=()=>[],nodeStage=()=>undefined,
  continuations=()=>{},externalInteractions=()=>{},systemBlock=()=>{},codeExplanations=()=>{},evidenceBlock=()=>{};
 """ + helpers + "\n" + card + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));

@@ -16,6 +16,7 @@ from pko.observability.contracts import validate_report
 from pko.render.dpss_theme import embedded_fonts
 from pko.render.horizon_theme import horizon_tokens
 from pko.render.process_report import REPORT_PANELS, REPORT_SCRIPT, REPORT_STYLE, REPORT_TABS
+from pko.stages.contracts import validate_hierarchy
 
 
 def _script_json(value: Any) -> str:
@@ -25,23 +26,27 @@ def _script_json(value: Any) -> str:
             .replace("\u2029", "\\u2029"))
 
 
-def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = None) -> str:
+def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = None,
+                        hierarchy: dict[str, Any] | None = None) -> str:
     """Return one self-contained HTML document without modifying ``model``.
 
     Unknown evidence or run statuses display as unknown, never as confirmed.
     Empty/partial models remain inspectable; facts are not created by rendering.
-    A process report adds tabs only after it is validated against this map.
+    A process report adds tabs only after it is validated against this map;
+    business stages add the second view only for this exact map revision.
     """
     if not isinstance(model, dict):
         raise TypeError("scenario map must be a dictionary")
     if report is not None:
         validate_report(report, model)
+    if hierarchy is not None:
+        validate_hierarchy(hierarchy, model)
     scenario = model.get("scenario") or {}
     run = model.get("run") or {}
     title = str(scenario.get("title") or "Карта сценария")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
-        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + (REPORT_STYLE if report else ""),
+        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + _STAGE_STYLE + (REPORT_STYLE if report else ""),
         "SCRIPT": _SCRIPT.replace("/*__REPORT_JS__*/", REPORT_SCRIPT if report else ""),
         "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
@@ -50,7 +55,9 @@ def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = N
         "REPORT_TABS": REPORT_TABS if report else "",
         "REPORT_PANELS": REPORT_PANELS if report else "",
         "REPORT_DATA": (f'<script id="process-report" type="application/json">{_script_json(report)}</script>'
-                        if report else ""),
+                        if report else "")
+                       + (f'<script id="map-hierarchy" type="application/json">{_script_json(hierarchy)}</script>'
+                          if hierarchy else ""),
     }
     # A single pass also keeps placeholder-like words in user text literal.
     return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|REPORT_TABS|REPORT_PANELS|REPORT_DATA)__",
@@ -72,7 +79,7 @@ __FONTS__<style>__STYLE__</style></head>
 <main id="workspace" tabindex="-1">
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
-<div class="map-navigation"><div class="stage-picker"><span id="stage-label">Этап</span><button type="button" id="stage-button" aria-haspopup="listbox" aria-expanded="false" aria-controls="stage-menu" aria-labelledby="stage-label stage-current"><span id="stage-current">Все этапы</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button><div id="stage-menu" class="stage-menu" role="listbox" aria-labelledby="stage-label"></div><select id="stage-select" aria-label="Выбрать этап сценария" hidden><option value="">Все этапы</option></select></div><button id="clear-selection" type="button" hidden>Снять выделение</button></div>
+<div class="map-navigation"><div class="view-mode" id="view-mode" role="group" aria-label="Вид карты" hidden><button type="button" data-mode="atomic" aria-pressed="true" title="Каждая операция отдельной карточкой"><span class="mode-long">Атомарные операции</span><span class="mode-short">Операции</span></button><button type="button" data-mode="stages" aria-pressed="false" title="Операции объединены в бизнес-этапы"><span class="mode-long">Бизнес-этапы</span><span class="mode-short">Этапы</span></button></div><div class="stage-picker"><span id="stage-label">Этап</span><button type="button" id="stage-button" aria-haspopup="listbox" aria-expanded="false" aria-controls="stage-menu" aria-labelledby="stage-label stage-current"><span id="stage-current">Все этапы</span><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg></button><div id="stage-menu" class="stage-menu" role="listbox" aria-labelledby="stage-label"></div><select id="stage-select" aria-label="Выбрать этап сценария" hidden><option value="">Все этапы</option></select></div><button id="clear-selection" type="button" hidden>Снять выделение</button></div>
 <section id="notation-panel" class="map-popover notation-panel" aria-label="Обозначения карты" hidden><h2>Как читать карту</h2><div id="notation-items"></div><p>Каждая карточка — отдельная операция. Стрелка показывает продолжение исполнения. Условия выбора следующих операций указаны в карточке исходной операции; на стрелках подписей нет.</p><p>Штриховая связь — вывод по коду, пунктирная — не установлена. Направление стрелки сохраняет возвраты и циклы.</p><p>Этап служит навигации. Выбор этапа выделяет его операции; выбор операции — все пути к ней и после неё. Это возможные маршруты карты. Смысл, внешнее взаимодействие и основания доступны в карточке.</p></section>
 <div class="map-toolbar">
 <div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button><button id="notation-toggle" type="button" aria-label="Обозначения" title="Обозначения" aria-expanded="false" aria-controls="notation-panel">?</button></div></div>
@@ -272,6 +279,29 @@ body{text-rendering:optimizeLegibility;-moz-osx-font-smoothing:grayscale;font-op
 '''
 
 
+# Business-stage view: the mode switch, stage blocks and the stage panel.
+_STAGE_STYLE = r'''
+.view-mode{display:flex;flex:none;gap:2px;padding:2px;border-radius:var(--radius-pill);background:var(--bg-subtle)}
+.map-navigation .view-mode button{min-height:32px;padding:4px 12px;font-size:13px;background:transparent;color:var(--ink-secondary)}
+.map-navigation .view-mode button:hover{background:var(--bg-muted);color:var(--ink)}
+.map-navigation .view-mode button[aria-pressed=true]{background:var(--bg-inverse);color:var(--ink-inverse);font-weight:500}
+.mode-short{display:none}
+.node.kind-stage{width:256px;padding:14px 22px 20px 16px}
+.node.kind-stage .node-surface>.stage-stack{fill:var(--bg-subtle)}
+.node-stage-kicker{font-size:11px;font-weight:500;color:var(--accent-ink)}
+.node-stage-result{font-size:12px;line-height:1.4;color:var(--ink-secondary);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden}
+.stage-outcomes{display:flex;flex-wrap:wrap;gap:4px}
+.stage-outcome{font-size:11px;line-height:1.5;padding:1px 8px;border-radius:var(--radius-pill);background:var(--bg-muted);color:var(--ink-secondary)}
+.stage-outcome.success{background:var(--success-soft);color:var(--success)}
+.stage-outcome.negative{background:var(--danger-soft);color:var(--danger)}
+.node .stage-chip{align-self:flex-start;padding:1px 8px;border-radius:var(--radius-pill);background:var(--accent-soft);color:var(--accent-ink)}
+.stage-proposal{margin:2px 0 4px}
+.stage-end.success .continuation-condition{color:var(--success)}.stage-end.negative .continuation-condition{color:var(--danger)}
+.stage-switch{margin-top:16px}
+@media(max-width:700px){.mode-long{display:none}.mode-short{display:inline}.map-navigation .view-mode button{padding:4px 9px;font-size:12px}}
+'''
+
+
 _GRAPH_LAYOUT_JS = r'''
 function layoutScenarioGraph(nodes, edges, sizes, vertical=false, entryIds=[]) {
  const key=value=>String(value),adj=new Map(nodes.map(n=>[key(n.id),[]]));
@@ -372,6 +402,33 @@ function routeScenarioEdge(edge,layout,vertical,state,port=0,bend=0) {
 '''
 
 
+# Pure function, also run by the Node tests: business stages over the atomic graph.
+_STAGE_PROJECTION_JS = r'''
+function projectScenarioStages(nodes, edges, stages, membership) {
+ // A collapsible stage becomes one block; every other operation stays a card.
+ // Each link keeps the transitions it stands for, so no path is invented: a
+ // collapsible stage has one entry from which all its members are reachable.
+ const key=value=>String(value),collapsed=new Map(),owner=membership||{};
+ for(const stage of stages)if(stage&&stage.collapsible)collapsed.set(key(stage.id),stage);
+ const represent=id=>{const stage=owner[key(id)];return stage!==undefined&&stage!==null&&collapsed.has(key(stage))?'stage:'+key(stage):key(id);};
+ const items=[],members=new Map();
+ for(const node of nodes){const id=represent(node.id);
+  if(!members.has(id)){members.set(id,[]);items.push(id.startsWith('stage:')?{id,type:'stage',stage:collapsed.get(id.slice(6)),members:members.get(id)}:{id,type:'node',node});}
+  members.get(id).push(key(node.id));}
+ const links=new Map(),strength={observed:0,inferred:1,unknown:2};
+ for(const edge of edges){const source=represent(edge.source),target=represent(edge.target);
+  if(source===target&&source.startsWith('stage:'))continue;
+  const pair=JSON.stringify([source,target]);
+  if(!links.has(pair))links.set(pair,{id:'link:'+links.size,source,target,transitions:[]});
+  links.get(pair).transitions.push(edge);}
+ const projected=[...links.values()].map(link=>{const kinds=new Set(link.transitions.map(edge=>edge.kind));
+  const status=link.transitions.map(edge=>strength[edge.evidence_status]===undefined?'unknown':edge.evidence_status).reduce((weakest,value)=>strength[value]>strength[weakest]?value:weakest,'observed');
+  return {...link,kind:kinds.size===1?[...kinds][0]:'sequence',evidence_status:status};});
+ return {items,links:projected,represent};
+}
+'''
+
+
 _SCRIPT = r'''
 (() => {
 'use strict';
@@ -400,6 +457,14 @@ const groupMembers=group=>nodes.filter(n=>text(n.group_id)===text(group.id)||(gr
 // Legacy reports may contain an operation between a node and its stage.
 const nodeGroups=node=>{const group=groupById.get(text(node.group_id));return group?[groupById.get(text(group.parent_id)),group].filter(Boolean):[];};
 const nodeSearchText=node=>[node.name,node.description,node.input,node.output,...nodeGroups(node).map(g=>g.name)].map(text).join(' ').toLocaleLowerCase('ru');
+// Business stages are a model proposal over this exact map revision; membership is their only link to it.
+const hierarchy=(()=>{const source=$('map-hierarchy');if(!source)return null;try{return JSON.parse(source.textContent);}catch(error){return null;}})();
+const stageRecords=array(hierarchy?.stages).filter(stage=>stage&&typeof stage==='object');
+const membership=hierarchy?.membership&&typeof hierarchy.membership==='object'?hierarchy.membership:{};
+const businessStageById=new Map(stageRecords.map(stage=>[text(stage.id),stage]));
+const nodeStage=node=>businessStageById.get(text(membership[text(node.id)]));
+const stageMembers=stage=>nodes.filter(node=>text(membership[text(node.id)])===text(stage.id));
+let viewMode=new URLSearchParams(location.hash.slice(1)).get('view')==='stages'&&stageRecords.length?'stages':'atomic',display=null;
 const kindNames={start:'Начало',action:'Действие',decision:'Условие',fork:'Параллельное выполнение',join:'Объединение',wait:'Ожидание',end:'Завершение',external:'Внешний участок'};
 const operationKinds={action:'Действие',validation:'Проверка',read:'Чтение данных',write:'Запись данных',integration:'Вызов системы',publish:'Публикация события',wait:'Ожидание',calculation:'Расчёт',transform:'Преобразование данных',error_handling:'Обработка отказа / ошибки'};
 const outcomeNames={success:'Успешное завершение',refusal:'Бизнес-отказ',failure:'Технический сбой',cancelled:'Отмена',deferred:'Отложенная обработка',no_decision:'Решение не принято',unknown:'Завершение · исход не уточнён'};
@@ -421,6 +486,7 @@ function notationIcon(kind){
  else if(kind==='decision')icon.append(svg('path',{d:'M12 2 L22 12 L12 22 L2 12 Z'}));
  else if(kind==='wait'){icon.append(svg('circle',{cx:12,cy:12,r:9}),svg('path',{d:'M12 6 V12 L16 15'}));}
  else if(kind==='fork'||kind==='join'){icon.append(svg('path',{d:kind==='fork'?'M3 12 H10 M10 4 V20 M10 5 H21 M10 12 H21 M10 19 H21':'M3 5 H14 M3 12 H14 M3 19 H14 M14 4 V20 M14 12 H21'}));}
+ else if(kind==='stage')icon.append(svg('rect',{x:7,y:8,width:14,height:12,rx:3}),svg('rect',{x:3,y:4,width:14,height:12,rx:3,fill:'#fff'}));
  else if(kind==='external')icon.append(svg('rect',{x:3,y:3,width:18,height:18,rx:3,'stroke-dasharray':'3 3'}),svg('path',{d:'M8 16 L16 8 M9 8 H16 V15'}));
  else icon.append(svg('rect',{x:3,y:5,width:18,height:14,rx:3}));return icon;
 }
@@ -447,6 +513,7 @@ function field(container,label,value){ if(!text(value).trim())return; const dl=e
 function listField(container,label,values){ const items=array(values);if(!items.length)return;const section=el('div','field');section.append(el('div','muted',label));const ul=el('ul');for(const item of items)ul.append(el('li','',item));section.append(ul);container.append(section); }
 if(run.reason&&(runState==='partial'||runState==='failed')){$('run-note').textContent=text(run.reason);$('run-note').hidden=false;}
 if(validationIssues.length||omissions.length){const notice=el('button','checks-notice');notice.type='button';notice.textContent=[omissions.length?'Пропуски материалов: '+omissions.length:'',validationIssues.length?'Незакрытые проверки: '+validationIssues.length:''].filter(Boolean).join(' · ')+' — посмотреть';notice.addEventListener('click',()=>{closePopovers();showFindings();});$('header-status').append(notice);}
+if(hierarchy&&hierarchy.status?.result!=='complete')$('header-status').append(el('p','run-note',(stageRecords.length?'Бизнес-этапы построены частично: ':'Бизнес-этапы не построены: ')+text(array(hierarchy.status?.reasons)[0]||'причина не указана')));
 $('header-alerts').hidden=![...$('header-status').children].some(item=>!item.hidden);
 
 function evidenceBlock(container,items,label='Основания в исходниках'){
@@ -504,6 +571,7 @@ for(const name of ['notation','status'])$(name+'-toggle').addEventListener('clic
 document.addEventListener('pointerdown',event=>{if(!event.target.closest('.map-popover,.map-navigation,.map-actions,.header-alerts'))closePopovers();});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const name of ['notation','status'])if(!$(name+'-panel').hidden){closePopovers();$(name+'-toggle').focus();event.preventDefault();break;}});
 for(const [kind,label] of (legacy?[['start','Начало сценария'],['action','Атомарное действие'],['decision','Условие и альтернативные ветви'],['fork','Запуск параллельных ветвей'],['join','Синхронизация параллельных ветвей'],['wait','Ожидание события или результата'],['end','Исход: успех, отказ, сбой или отмена'],['external','Внешний участок с ограниченным описанием']]:[['operation','Атомарная операция']])){const row=el('div','notation-item');row.append(notationIcon(kind),el('span','',label));$('notation-items').append(row);}
+if(stageRecords.length){const row=el('div','notation-item');row.append(notationIcon('stage'),el('span','','Бизнес-этап с одним входом'));$('notation-items').append(row,el('p','','Вид «Бизнес-этапы» — предложение модели поверх карты операций. Этап с одним входом показан блоком; этап с несколькими входами — своими операциями с подписью этапа, чтобы не рисовать путей, которых нет в коде. Связь между блоками объединяет переходы карты.'));}
 $('notation-items').append(el('p','', 'Свечение отмечает итог конечной операции: зелёное — успешное завершение, красное — отказ, сбой или отмена. Подпись уточняет исход. Неизвестный итог, перенос срока и отсутствие решения остаются нейтральными. Условное завершение отмечено словами «При завершении»; другие продолжения сохраняются.'));
 function showGroup(group){
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',group.kind==='stage'?'ЭТАП':'БИЗНЕС-ОПЕРАЦИЯ'),el('h2','',group.name));
@@ -519,7 +587,8 @@ function selectGroup(group){
  closePopovers();selected={type:'group',id:group.id};showGroup(group);openInspector();updateHighlight();
  const members=groupMembers(group);requestAnimationFrame(()=>frameGroup(group));announce('Выбрана группа: '+group.name+'. Операций: '+members.length);
 }
-const stages=groups.filter(g=>g.kind==='stage');
+// The picker lists business stages when they exist, otherwise research-time stages of older maps.
+const stages=stageRecords.length?stageRecords:groups.filter(g=>g.kind==='stage');
 for(const stage of stages){const option=el('option','',stage.name);option.value=text(stage.id);$('stage-select').append(option);}
 $('stage-select').disabled=!stages.length;
 if(!stages.length)$('stage-select').options[0].textContent='Этапы не заданы';
@@ -537,7 +606,9 @@ if(!stages.length)$('stage-select').options[0].textContent='Этапы не за
  document.addEventListener('pointerdown',event=>{if(!event.target.closest('.stage-picker'))openStageMenu(false);});
  syncStageMenu();
 $('stage-select').addEventListener('change',()=>{
- const group=groupById.get($('stage-select').value);closePopovers();closeInspector(false);
+ const value=$('stage-select').value,stage=businessStageById.get(value),group=stage?null:groupById.get(value);closePopovers();
+ if(stage){selectStage(stage);return;}
+ closeInspector(false);
  if(group){selected={type:'group',id:group.id};updateHighlight();requestAnimationFrame(()=>frameGroup(group));announce('Выбран этап: '+group.name);}
  else{requestAnimationFrame(initialView);announce('Показаны все этапы');}
 });
@@ -553,6 +624,10 @@ function showOverview(){
  if(array(scenario.assumptions).length)field(panel,'Допущения',array(scenario.assumptions).join('; '));field(panel,'Начало',scenario.start);field(panel,'Завершение',scenario.end);
  panel.append(el('p','muted',legacy?'Архивный граф сохраняет исходные узлы. Соответствие новой методологии атомарных операций не проверено.':'Граф показывает операции выбранного сценария. Условия продолжения находятся в карточке операции. Наличие цитат не доказывает полноту карты.'));
  if(openFindings)relatedButton(panel,'Посмотреть пробелы и проверки ('+openFindings+')',showFindings);
+ const outside=stageRecords.length?array(hierarchy.unassigned).filter(row=>byId.has(text(row?.operation_id))):[];
+ if(outside.length){const details=el('details','details');details.append(el('summary','','Операции вне бизнес-этапов · '+outside.length));
+  for(const row of outside){const node=byId.get(text(row.operation_id)),item=el('article','continuation');relatedButton(item,node.name||node.id,()=>selectNode(node,true)).classList.add('continuation-target');item.append(el('p','continuation-condition',row.reason));details.append(item);}
+  panel.append(details);}
  const details=el('details','details');details.append(el('summary','','Что проверено'));
  details.append(el('p','muted','Основания показывают найденные участки исходников. Их наличие не доказывает правильность бизнес-интерпретации и полноту карты.'));
  for(const review of array(model.source_reviews)){const source=array(model.sources).find(s=>s.id===review.source_id);const disposition={reviewed:'Рассмотрен',out_of_scope:'Вне выбранного сценария',unavailable:'Недоступен'}[review.disposition];const inspection=review.disposition==='out_of_scope'&&review.inspected===false?'Исключение без изучения кода':Number.isFinite(review.read_files)?'Прочитано файлов: '+review.read_files:'';field(details,source?.name || review.source_id || 'Источник',[disposition,inspection,review.summary || review.reason || review.description].filter(Boolean).join('\n'));}
@@ -579,7 +654,7 @@ function continuations(container,node){
 function showNode(node){
  const panel=$('inspector-content');panel.replaceChildren();
  const meta=el('div','operation-meta');meta.append(el('div','inspector-kicker',nodeKindLabel(node)));
- const ancestry=nodeGroups(node);if(ancestry.length){const links=el('div','group-links');for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Группа: ')+group.name,()=>selectGroup(group));meta.append(links);}
+ const ancestry=nodeGroups(node),stage=nodeStage(node);if(ancestry.length||stage){const links=el('div','group-links');if(stage)relatedButton(links,'Этап: '+stage.name,()=>selectStage(stage));for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Группа: ')+group.name,()=>selectGroup(group));meta.append(links);}
  panel.append(meta,badge(node.evidence_status),el('h2','',node.name || node.id));
  field(panel,'Бизнес-смысл',node.description);field(panel,'Завершение сценария',node.completion_condition);continuations(panel,node);
  field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);
@@ -610,16 +685,22 @@ function scenarioNodeScope(nodeId,edges){
  return {nodes:new Set([...ancestors,...descendants]),edges:scopeEdges};
 }
 function updateHighlight(){
- const nodeScope=selected?.type==='node'?scenarioNodeScope(selected.id,validEdges):null;
- const scopeIds=nodeScope?.nodes||new Set();
- if(selected?.type==='edge'){const e=selected.edge;scopeIds.add(text(e.source));scopeIds.add(text(e.target));}
- if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group)for(const node of groupMembers(group))scopeIds.add(text(node.id));}
- const selectedGroup=selected?.type==='group'?groupById.get(text(selected.id)):null;
+ // The selection stays a map element; the current view resolves it. An operation
+ // inside a collapsed stage is represented by that stage's block.
+ const scope=new Set(),related=new Set();let focus=null,focusLink=null;
+ const stage=selected?.type==='stage'?businessStageById.get(text(selected.id)):null,group=selected?.type==='group'?groupById.get(text(selected.id)):null;
+ const members=list=>{for(const node of list)scope.add(display.represent(node.id));for(const link of display.links)if(scope.has(link.source)&&scope.has(link.target))related.add(text(link.id));};
+ if(selected?.type==='node')focus=display.represent(selected.id);
+ else if(stage&&display.items.has('stage:'+text(stage.id)))focus='stage:'+text(stage.id);
+ if(focus!==null){const paths=scenarioNodeScope(focus,display.links);for(const id of paths.nodes)scope.add(id);for(const id of paths.edges)related.add(id);}
+ else if(stage)members(stageMembers(stage));
+ else if(group)members(groupMembers(group));
+ else if(selected?.type==='edge'||selected?.type==='link'){const link=selected.type==='edge'?display.linkOf.get(text(selected.id)):display.linkById.get(text(selected.id));if(link){focusLink=text(link.id);scope.add(link.source);scope.add(link.target);}}
  $('clear-selection').hidden=!selected;
- const selectedStage=selectedGroup?.kind==='stage'?selectedGroup:null;
- $('stage-select').value=selectedStage?text(selectedStage.id):'';syncStageMenu();
- for(const node of nodes){const button=nodeButtons.get(text(node.id));if(button){button.classList.toggle('in-scope',!!selected&&scopeIds.has(text(node.id)));button.classList.toggle('selected',selected?.type==='node'&&text(selected.id)===text(node.id));button.setAttribute('aria-pressed',String(selected?.type==='node'&&text(selected.id)===text(node.id)));button.classList.toggle('dimmed',!!selected&&!scopeIds.has(text(node.id)));}}
- for(const edge of validEdges){const group=edgeGroups.get(text(edge.id));if(!group)continue;const isSelected=selected?.type==='edge'&&text(selected.id)===text(edge.id);const isRelated=selected?.type==='node'?nodeScope.edges.has(text(edge.id)):selected?.type==='group'&&scopeIds.has(text(edge.source))&&scopeIds.has(text(edge.target));group.classList.toggle('in-scope',isRelated);group.classList.toggle('selected',isSelected);group.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
+ const picked=stage||(group?.kind==='stage'?group:null);
+ $('stage-select').value=picked?text(picked.id):'';syncStageMenu();
+ for(const [id,button] of nodeButtons){button.classList.toggle('in-scope',!!selected&&scope.has(id));button.classList.toggle('selected',focus===id);button.setAttribute('aria-pressed',String(focus===id));button.classList.toggle('dimmed',!!selected&&!scope.has(id));}
+ for(const [id,line] of edgeGroups){const isSelected=focusLink===id,isRelated=related.has(id);line.classList.toggle('in-scope',isRelated);line.classList.toggle('selected',isSelected);line.classList.toggle('dimmed',!!selected&&!isSelected&&!isRelated);}
 }
 function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
@@ -627,16 +708,91 @@ function availableWidth(){const view=$('viewport');return Math.max(180,view.clie
 let mapTabHook=null;
 function openInspector(){if($('panel-map').inert&&mapTabHook)mapTabHook();if($('inspector').hidden)restoreFocus=document.activeElement;$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
 function closeInspector(restore=true){selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore&&restoreFocus&&document.contains(restoreFocus))restoreFocus.focus({preventScroll:true});restoreFocus=null;}
-function selectNode(node,center=false){closePopovers();selected={type:'node',id:node.id};showNode(node);openInspector();updateHighlight();announce('Выбрана операция: '+(node.name||node.id));if(center){requestAnimationFrame(()=>centerNode(node));}else if(window.innerWidth>700)centerNode(node);}
-function selectEdge(edge){closePopovers();selected={type:'edge',id:edge.id,edge};showEdge(edge);openInspector();updateHighlight();announce('Выбран переход: '+(edge.description||edgeNames[edge.kind]||'Связь'));}
-function centerNode(node){const p=positions.get(text(node.id));if(!p)return;const view=$('viewport'),stage=$('stage');view.scrollTo({left:Math.max(0,(p.x+p.w/2)*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(p.y+p.h/2)*zoom+(parseFloat(stage.style.top)||0)-view.clientHeight/2)});}
-function frameGroup(group){
- const members=groupMembers(group).map(n=>positions.get(text(n.id))).filter(Boolean);if(!members.length)return;
+function selectNode(node,center=false){if(viewMode==='stages'&&display.represent(node.id)!==text(node.id))setMode('atomic');closePopovers();selected={type:'node',id:node.id};showNode(node);openInspector();updateHighlight();announce('Выбрана операция: '+(node.name||node.id));if(center){requestAnimationFrame(()=>centerNode(node));}else if(window.innerWidth>700)centerNode(node);}
+function selectEdge(edge){if(viewMode==='stages'&&!display.linkOf.has(text(edge.id)))setMode('atomic');closePopovers();selected={type:'edge',id:edge.id,edge};showEdge(edge);openInspector();updateHighlight();announce('Выбран переход: '+(edge.description||edgeNames[edge.kind]||'Связь'));}
+function centerNode(node){centerItem(display.represent(node.id));}
+function centerItem(id){const p=positions.get(id);if(!p)return;const view=$('viewport'),stage=$('stage');view.scrollTo({left:Math.max(0,(p.x+p.w/2)*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(p.y+p.h/2)*zoom+(parseFloat(stage.style.top)||0)-view.clientHeight/2)});}
+function frameGroup(group){frameNodes(groupMembers(group));}
+function frameNodes(list){
+ const members=[...new Set(list.map(n=>display.represent(n.id)))].map(id=>positions.get(id)).filter(Boolean);if(!members.length)return;
  const left=Math.min(...members.map(p=>p.x)),top=Math.min(...members.map(p=>p.y)),right=Math.max(...members.map(p=>p.x+p.w)),bottom=Math.max(...members.map(p=>p.y+p.h));
  const view=$('viewport');applyZoom(Math.min(1,(availableWidth()-48)/(right-left),Math.max(40,view.clientHeight-96)/(bottom-top)));
  const stage=$('stage');view.scrollTo({left:Math.max(0,(left+right)/2*zoom+(parseFloat(stage.style.left)||0)-availableWidth()/2),top:Math.max(0,(top+bottom)/2*zoom+(parseFloat(stage.style.top)||0)-(view.clientHeight-48)/2)});
 }
 $('close-inspector').addEventListener('click',()=>closeInspector());
+// A single continuation needs no condition, as on the operation panel.
+const transitionCondition=edge=>edge.condition||(validEdges.filter(other=>text(other.source)===text(edge.source)).length>1?'Условие продолжения не установлено':'После завершения операции');
+const itemName=id=>{const item=display.items.get(id);return item?.type==='stage'?text(item.stage.name||item.stage.id):text(byId.get(id)?.name||id);};
+function frameStage(stage){const id='stage:'+text(stage.id);if(display.items.has(id))centerItem(id);else frameNodes(stageMembers(stage));}
+function selectStage(stage){
+ closePopovers();selected={type:'stage',id:stage.id};showStage(stage);openInspector();updateHighlight();
+ requestAnimationFrame(()=>frameStage(stage));announce('Выбран бизнес-этап: '+(stage.name||stage.id));
+}
+function showStage(stage){
+ const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
+ panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
+ field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
+ const starts=members.filter(n=>array(scenario.entry_operation_ids).map(text).includes(text(n.id)));
+ const transitions=(title,list,outer,lead)=>{if(!list.length&&!lead.length)return;const section=el('section','details continuations');section.append(el('h3','',title));
+  for(const node of lead){const row=el('article','continuation');relatedButton(row,'Начало сценария: '+(node.name||node.id),()=>selectNode(node,true)).classList.add('continuation-target');section.append(row);}
+  for(const edge of list){const peer=byId.get(text(edge[outer])),own=byId.get(text(edge[outer==='source'?'target':'source'])),peerStage=nodeStage(peer),row=el('article','continuation');
+   relatedButton(row,outer==='source'?(peer.name||peer.id)+' → '+(own.name||own.id):(own.name||own.id)+' → '+(peer.name||peer.id),()=>selectEdge(edge)).classList.add('continuation-target');
+   if(peerStage)row.append(el('p','muted','Этап: '+peerStage.name));
+   row.append(el('p','continuation-condition',transitionCondition(edge)));section.append(row);}
+  panel.append(section);};
+ transitions('Входы в этап',validEdges.filter(e=>inside.has(text(e.target))&&!inside.has(text(e.source))),'source',starts);
+ transitions('Продолжения после этапа',validEdges.filter(e=>inside.has(text(e.source))&&!inside.has(text(e.target))),'target',[]);
+ const ends=members.map(node=>({node,terminal:terminalPresentation(node)})).filter(item=>item.terminal);
+ if(ends.length){const section=el('section','details continuations');section.append(el('h3','','Завершения сценария в этапе'));
+  for(const {node,terminal} of ends){const row=el('article','continuation stage-end '+terminal.tone);relatedButton(row,node.name||node.id,()=>selectNode(node,true)).classList.add('continuation-target');row.append(el('p','continuation-condition',terminal.label+(node.completion_condition?'. '+node.completion_condition:'')));section.append(row);}
+  panel.append(section);}
+ const external=members.flatMap(node=>array(node.external_interactions).map(item=>({node,item})));
+ if(external.length){const section=el('section','details continuations');section.append(el('h3','','Связи с внешними системами'));
+  for(const {node,item} of external){const row=el('article','continuation');relatedButton(row,(item.name||'Внешняя система')+' · '+(node.name||node.id),()=>selectNode(node,true)).classList.add('continuation-target');if(item.purpose)row.append(el('p','continuation-condition',item.purpose));section.append(row);}
+  panel.append(section);}
+ for(const gap of gaps.filter(g=>array(g.node_ids).some(id=>inside.has(text(id)))))field(panel,'Не установлено',gap.description);
+ if(!stage.collapsible){const names=new Map(nodes.map(n=>[text(n.id),text(n.name||n.id)]));
+  field(panel,'Почему этап показан операциями',text(stage.collapse_reason).replace(/[\w.:-]+/g,token=>names.has(token)?'«'+names.get(token)+'»':token)+'. Один блок нарисовал бы пути, которых нет в коде.');}
+ field(panel,'Примечание',stage.note);
+ const list=el('section','details');list.append(el('h3','','Операции этапа · '+members.length));
+ for(const node of members)relatedButton(list,node.name||node.id,()=>selectNode(node,true)).classList.add('group-member');panel.append(list);
+ if(viewMode==='stages')relatedButton(panel,'Показать операции этапа на подробной карте',()=>{setMode('atomic');selectStage(stage);}).classList.add('stage-switch');
+ else if(stage.collapsible)relatedButton(panel,'Показать этап блоком на карте бизнес-этапов',()=>{setMode('stages');selectStage(stage);}).classList.add('stage-switch');
+ panel.append(el('p','muted','Этап предложен моделью по готовой карте операций и наследует её пробелы и ошибки. Входы, продолжения и завершения этапа взяты из переходов карты.'));
+}
+function selectLink(link){closePopovers();selected={type:'link',id:link.id};showLink(link);openInspector();updateHighlight();announce('Выбран переход: '+itemName(link.source)+' → '+itemName(link.target));}
+function showLink(link){
+ const panel=$('inspector-content');panel.replaceChildren();
+ panel.append(el('div','inspector-kicker','ПЕРЕХОД НА КАРТЕ ЭТАПОВ'),badge(link.evidence_status),el('h2','',itemName(link.source)+' → '+itemName(link.target)));
+ panel.append(el('p','muted','Связь объединяет переходы карты операций: '+link.transitions.length+'. Условия и основания указаны у каждого перехода.'));
+ const section=el('section','details continuations');section.append(el('h3','','Переходы карты операций'));
+ for(const edge of link.transitions){const from=byId.get(text(edge.source)),to=byId.get(text(edge.target)),row=el('article','continuation');
+  relatedButton(row,(from.name||from.id)+' → '+(to.name||to.id),()=>{setMode('atomic');selectEdge(edge);}).classList.add('continuation-target');
+  row.append(el('p','continuation-condition',transitionCondition(edge)));section.append(row);}
+ panel.append(section);
+}
+function selectDisplayLink(link){if(viewMode==='atomic')selectEdge(link);else if(link.transitions.length===1&&!link.source.startsWith('stage:')&&!link.target.startsWith('stage:'))selectEdge(link.transitions[0]);else selectLink(link);}
+function buildDisplay(){
+ const view=viewMode==='stages'?projectScenarioStages(nodes,validEdges,stageRecords,membership)
+  :{items:nodes.map(node=>({id:text(node.id),type:'node',node})),links:validEdges,represent:id=>text(id)};
+ const linkOf=new Map();for(const link of view.links)for(const edge of link.transitions||[link])linkOf.set(text(edge.id),link);
+ return {list:view.items,items:new Map(view.items.map(item=>[item.id,item])),links:view.links,represent:view.represent,linkOf,linkById:new Map(view.links.map(link=>[text(link.id),link]))};
+}
+function setMode(mode){
+ if(mode===viewMode||(mode==='stages'&&!stageRecords.length))return;
+ viewMode=mode;display=buildDisplay();syncModeButtons();
+ try{const params=new URLSearchParams(location.hash.slice(1));if(mode==='stages')params.set('view','stages');else params.delete('view');history.replaceState(null,'',params.toString()?'#'+params:location.pathname+location.search);}catch(error){}
+ // A link exists only on the stage view; other selections are kept and framed again.
+ if(selected?.type==='link')closeInspector(false);
+ draw();
+ const stage=selected?.type==='stage'?businessStageById.get(text(selected.id)):null,node=selected?.type==='node'?byId.get(text(selected.id)):null;
+ if(stage){showStage(stage);frameStage(stage);}else if(node)centerNode(node);else initialView();
+ announce(mode==='stages'?'Показаны бизнес-этапы':'Показаны атомарные операции');
+}
+function syncModeButtons(){for(const button of $('view-mode').querySelectorAll('button'))button.setAttribute('aria-pressed',String(button.dataset.mode===viewMode));}
+$('view-mode').hidden=!stageRecords.length;
+for(const button of $('view-mode').querySelectorAll('button'))button.addEventListener('click',()=>setMode(button.dataset.mode));
+display=buildDisplay();syncModeButtons();
 document.addEventListener('keydown',event=>{if(event.defaultPrevented||$('panel-map').inert)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
 
 function showFindings(){
@@ -662,14 +818,16 @@ function draw(){
  const nodeContainer=$('nodes');nodeContainer.replaceChildren();$('connections').replaceChildren();positions.clear();nodeButtons.clear();edgeGroups.clear();
  if(!nodes.length){$('empty-map').hidden=false;$('canvas-size').hidden=true;return;}else{$('empty-map').hidden=true;$('canvas-size').hidden=false;}
  const vertical=$('viewport').clientWidth<740,sizes=new Map(),measured=[];
- for(const node of nodes){
-  const id=text(node.id),kind=!legacy?'operation':Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';
+ for(const item of display.list){
+  if(item.type==='stage'){const button=stageCard(item);nodeContainer.append(button);measured.push({id:item.id,kind:'stage',button});continue;}
+  const node=item.node,id=item.id,kind=!legacy?'operation':Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';
   const button=el('button','node kind-'+kind);button.type='button';button.dataset.nodeId=id;
   const terminal=terminalPresentation(node);if(terminal)button.classList.add('terminal-'+terminal.tone);
   button.setAttribute('aria-label',nodeKindLabel(node)+': '+(node.name||node.id)+(legacy?'. '+systemName(node):'')+'. '+evidenceNames[evidenceStatus(node.evidence_status)]+(terminal?'. '+terminal.label:''));button.setAttribute('aria-pressed','false');
   const content=el('span','node-content');
   content.append(el('span','node-name',node.name||node.id));
   const group=groupById.get(text(node.group_id));if(group){const label=el('span','node-group',group.name);label.title=nodeGroups(node).map(g=>g.name).join(' / ');content.append(label);}
+  const stage=nodeStage(node);if(stage){const label=el('span','node-group'+(viewMode==='stages'?' stage-chip':''),stage.name);label.title=viewMode==='stages'?'Бизнес-этап с несколькими входами показан своими операциями':'Бизнес-этап';content.append(label);}
   if(legacy)content.append(el('span','node-system','АС · '+systemName(node)));
   content.append(el('span','node-status '+evidenceStatus(node.evidence_status),evidenceNames[evidenceStatus(node.evidence_status)]));
   if(terminal)content.append(el('span','node-terminal',terminal.label));
@@ -678,30 +836,48 @@ function draw(){
   if(kind==='decision')button.style.height=Math.max(230,content.offsetHeight*2+32)+'px';
   measured.push({id,kind,button});
  }
- // Every card takes the largest card's size, so the map reads as a uniform grid.
- const uniform=measured.filter(item=>item.kind!=='decision'),cardW=Math.max(0,...uniform.map(item=>item.button.offsetWidth)),cardH=Math.max(0,...uniform.map(item=>item.button.offsetHeight));
+ // Cards of one kind take the largest card's size, so the map reads as a uniform grid.
+ const largest=filter=>{const cards=measured.filter(filter);return {w:Math.max(0,...cards.map(item=>item.button.offsetWidth)),h:Math.max(0,...cards.map(item=>item.button.offsetHeight))};};
+ const cardSize=largest(item=>item.kind!=='decision'&&item.kind!=='stage'),stageSize=largest(item=>item.kind==='stage');
  for(const {id,kind,button} of measured){
-  if(kind!=='decision'){button.style.width=cardW+'px';button.style.height=cardH+'px';}
+  const size=kind==='stage'?stageSize:cardSize;
+  if(kind!=='decision'){button.style.width=size.w+'px';button.style.height=size.h+'px';}
   const w=button.offsetWidth,h=button.offsetHeight,surface=svg('svg',{'class':'node-surface',viewBox:'0 0 '+w+' '+h,'aria-hidden':'true',focusable:'false'});
   if(kind==='decision')surface.append(svg('path',{d:`M ${w/2} 1 L ${w-1} ${h/2} L ${w/2} ${h-1} L 1 ${h/2} Z`}));
+  else if(kind==='stage')surface.append(svg('rect',{'class':'stage-stack',x:7,y:7,width:w-8,height:h-8,rx:12}),svg('rect',{x:1,y:1,width:w-8,height:h-8,rx:12}));
   else surface.append(svg('rect',{x:1,y:1,width:w-2,height:h-2,rx:kind==='start'||kind==='end'?Math.min(38,h/2):12}));
   button.prepend(surface);nodeButtons.set(id,button);sizes.set(id,{w,h});
  }
- const layout=layoutScenarioGraph(nodes,validEdges,sizes,vertical,array(scenario.entry_operation_ids)),rank=layout.rank;graphWidth=layout.width;graphHeight=layout.height;
+ const layout=layoutScenarioGraph(display.list.map(item=>({id:item.id,kind:item.type==='stage'?'stage':item.node.kind})),display.links,sizes,vertical,array(scenario.entry_operation_ids).map(display.represent)),rank=layout.rank;graphWidth=layout.width;graphHeight=layout.height;
  for(const [id,p] of layout.positions){positions.set(id,p);const button=nodeButtons.get(id);button.style.left=p.x+'px';button.style.top=p.y+'px';}
  $('stage').style.width=graphWidth+'px';$('stage').style.height=graphHeight+'px';
  const drawing=$('connections');drawing.setAttribute('width',graphWidth);drawing.setAttribute('height',graphHeight);drawing.setAttribute('viewBox','0 0 '+graphWidth+' '+graphHeight);
  const defs=svg('defs');const marker=svg('marker',{id:'arrow',viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#8b9ca7'}));defs.append(marker);drawing.append(defs);
- const routing={};const pairCounts=new Map(),pairUsed=new Map();for(const edge of validEdges){const key=JSON.stringify([edge.source,edge.target]);pairCounts.set(key,(pairCounts.get(key)||0)+1);}
- for(const edge of validEdges){const a=positions.get(text(edge.source)),b=positions.get(text(edge.target)),key=JSON.stringify([edge.source,edge.target]),pairIndex=pairUsed.get(key)||0;pairUsed.set(key,pairIndex+1);const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28,port=Math.max(-18,Math.min(18,bend/2));let start,c1,c2,end,routed;
+ const routing={};const pairCounts=new Map(),pairUsed=new Map();for(const edge of display.links){const key=JSON.stringify([edge.source,edge.target]);pairCounts.set(key,(pairCounts.get(key)||0)+1);}
+ for(const edge of display.links){const a=positions.get(text(edge.source)),b=positions.get(text(edge.target)),key=JSON.stringify([edge.source,edge.target]),pairIndex=pairUsed.get(key)||0;pairUsed.set(key,pairIndex+1);const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28,port=Math.max(-18,Math.min(18,bend/2));let start,c1,c2,end,routed;
  if(text(edge.source)===text(edge.target)){const reach=65+pairIndex*24;if(vertical){start={x:a.x+a.w/2,y:a.y+a.h};c1={x:start.x,y:start.y+reach};c2={x:a.x+a.w+reach,y:a.y+a.h/2+reach};end={x:a.x+a.w+3,y:a.y+a.h/2};}else{start={x:a.x+a.w,y:a.y+a.h/2};c1={x:start.x+reach,y:start.y};c2={x:a.x+a.w/2+reach,y:a.y-reach};end={x:a.x+a.w/2,y:a.y-3};}}
  else routed=routeScenarioEdge(edge,layout,vertical,routing,port,bend);
  const path=routed?routed.path:`M ${start.x} ${start.y} C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`;
- const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','data-edge-id':text(edge.id),'aria-label':'Переход: '+(byId.get(text(edge.source)).name||edge.source)+' → '+(byId.get(text(edge.target)).name||edge.target)});
+ const group=svg('g',{'class':'edge edge-'+evidenceStatus(edge.evidence_status),tabindex:0,role:'button','data-edge-id':text(edge.id),'aria-label':'Переход: '+itemName(text(edge.source))+' → '+itemName(text(edge.target))});
   group.append(svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
-  group.addEventListener('click',()=>selectEdge(edge));group.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectEdge(edge);}});drawing.append(group);edgeGroups.set(text(edge.id),group);
+  group.addEventListener('click',()=>selectDisplayLink(edge));group.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectDisplayLink(edge);}});drawing.append(group);edgeGroups.set(text(edge.id),group);
  }
  applyZoom(zoom);updateHighlight();
+}
+function stageCard(item){
+ const stage=item.stage,members=item.members.map(id=>byId.get(id)).filter(Boolean),button=el('button','node kind-stage');button.type='button';button.dataset.stageId=text(stage.id);
+ const ends=members.map(terminalPresentation).filter(Boolean),success=ends.filter(end=>end.tone==='success').length,negative=ends.filter(end=>end.tone==='negative').length,other=ends.length-success-negative;
+ const findings=gaps.filter(g=>array(g.node_ids).some(id=>item.members.includes(text(id)))).length,content=el('span','node-content');
+ content.append(el('span','node-stage-kicker','Бизнес-этап · '+members.length+' '+plural(members.length,['операция','операции','операций'])),el('span','node-name',stage.name||stage.id));
+ if(stage.result)content.append(el('span','node-stage-result',stage.result));
+ if(ends.length){const row=el('span','stage-outcomes'),count=value=>value>1?' · '+value:'';
+  if(success)row.append(el('span','stage-outcome success','Успешное завершение'+count(success)));
+  if(negative)row.append(el('span','stage-outcome negative','Отказ или сбой'+count(negative)));
+  if(other)row.append(el('span','stage-outcome','Завершение · исход не уточнён'+count(other)));content.append(row);}
+ if(findings)content.append(el('span','node-gap','Не установлено: '+findings));
+ button.append(content);button.setAttribute('aria-pressed','false');
+ button.setAttribute('aria-label','Бизнес-этап: '+(stage.name||stage.id)+'. Операций: '+members.length+(ends.length?'. Завершений сценария: '+ends.length:''));
+ button.addEventListener('click',()=>selectStage(stage));return button;
 }
 function minimumZoom(){return Math.max(.001,Math.min(.16,(availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight));}
 function applyZoom(value,anchor){
@@ -731,7 +907,7 @@ function applyZoom(value,anchor){
 }
 // Fit across the flow only: cards stay readable and the flow scrolls.
 function fit(){if(!nodes.length)return;const view=$('viewport'),vertical=view.clientWidth<740;applyZoom(Math.min(vertical?(availableWidth()-24)/graphWidth:(view.clientHeight-24)/graphHeight,1));view.scrollTo(0,0);}
-function initialView(){if(!nodes.length)return;if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group){frameGroup(group);return;}}const fitted=Math.min((availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight,1);applyZoom(Math.max(.8,fitted));if(fitted<.8)centerNode(byId.get(text(array(scenario.entry_operation_ids)[0]))||nodes.find(n=>legacy&&n.kind==='start')||nodes[0]);else $('viewport').scrollTo(0,0);}
+function initialView(){if(!nodes.length)return;if(selected?.type==='group'){const group=groupById.get(text(selected.id));if(group){frameGroup(group);return;}}if(selected?.type==='stage'){const stage=businessStageById.get(text(selected.id));if(stage){frameStage(stage);return;}}const fitted=Math.min((availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight,1);applyZoom(Math.max(.8,fitted));if(fitted<.8)centerNode(byId.get(text(array(scenario.entry_operation_ids)[0]))||nodes.find(n=>legacy&&n.kind==='start')||nodes[0]);else $('viewport').scrollTo(0,0);}
 function zoomBy(factor){const view=$('viewport');applyZoom(zoom*factor,{x:availableWidth()/2,y:view.clientHeight/2});}
 $('zoom-in').addEventListener('click',()=>zoomBy(1.2));$('zoom-out').addEventListener('click',()=>zoomBy(1/1.2));$('fit').addEventListener('click',fit);
 $('reset').addEventListener('click',()=>{closeInspector(false);showOverview();updateHighlight();applyZoom(1);if(nodes.length)centerNode(byId.get(text(array(scenario.entry_operation_ids)[0]))||nodes.find(n=>legacy&&n.kind==='start')||nodes[0]);announce('Выбор сброшен. Масштаб 100 процентов.');});
@@ -763,4 +939,4 @@ showOverview();draw();initialView();updateHighlight();
  if(document.fonts?.ready)document.fonts.ready.then(()=>{const view=$('viewport'),left=view.scrollLeft,top=view.scrollTop;draw();view.scrollLeft=left;view.scrollTop=top;});
 /*__REPORT_JS__*/
 })();
-'''.replace('__GRAPH_LAYOUT_JS__', _GRAPH_LAYOUT_JS)
+'''.replace('__GRAPH_LAYOUT_JS__', _GRAPH_LAYOUT_JS + _STAGE_PROJECTION_JS)

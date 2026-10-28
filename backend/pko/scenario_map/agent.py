@@ -142,7 +142,7 @@ class GraphFrontierGuide:
         self.at_last_nudge = ids
         # Include only navigation metadata. Full descriptions and evidence stay
         # in inspect_map; the prompt does not assert how the nodes should connect.
-        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name", "group_id")}
+        roster = [{key: str(node.get(key, ""))[:240] for key in ("id", "name")}
                   for node in nodes if node["id"] in pending][:12]
         return (
             "[scenario-graph-frontier]\n"

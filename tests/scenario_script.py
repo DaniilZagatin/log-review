@@ -64,14 +64,6 @@ def research_calls():
         "next_actions": ["Проследить исполнение от входа, выделяя отдельные действия и подтверждённые переходы."],
         "evidence": [ref for scope in scopes.values() for ref in scope],
     }))
-    # Stages are optional navigation across source files, not executable nodes.
-    for name, result, systems in [
-        ("Подача заявки", "Обращение принято для рассмотрения либо завершено отказом по варианту", [1, 2]),
-        ("Рассмотрение заявки", "Заявка направлена на выпуск либо отклонена", [2, 3]),
-        ("Выпуск карты", "Карта и результат выпуска сохранены", [3]),
-    ]:
-        calls.append(("upsert_group", {"name": name, "kind": "stage", "result": result,
-                                      "evidence": [ref for system in systems for ref in scopes[system]]}))
     # key, source, business name, graph kind, operation kind, start/end snippets, effect
     specs = [
         ("channel_receive", 1, "Приём заявки в мобильном канале", "operation", "action",
@@ -123,13 +115,6 @@ def research_calls():
         "issue_parameters": "Отсутствие обязательного поля вызывает исключение; локальная обработка не показана.",
     }
     nodes = {}
-    memberships = {
-        **dict.fromkeys(["start", "channel_receive", "variant_check", "variant_rejection", "variant_end",
-                        "application_build", "application_send", "application_receive"], "group-1"),
-        **dict.fromkeys(["profile_read", "eligibility_check", "rejection_write", "rejection_response", "rejection_end",
-                        "acceptance_write", "message_build", "message_publish", "message_receive"], "group-2"),
-        **dict.fromkeys(["issue_parameters", "card_build", "card_issue", "result_write", "issued_end"], "group-3"),
-    }
     explanations = {
         "variant_check": "Обработчик проверяет тип клиента до подготовки запроса. При неподдерживаемом типе возвращает отказ, поэтому проверка показана отдельной развилкой.",
         "application_send": "Подготовленная заявка передаётся HTTP-вызовом в обработчик системы заявок. Получение ответа ещё не подтверждает выпуск карты.",
@@ -142,7 +127,6 @@ def research_calls():
                 "failure": failures.get(key, "В обследованном участке отдельная обработка технического отказа не показана.")}
         nodes[key] = node
         calls.append(("upsert_step", {"name": name, "kind": kind, "description": effect,
-                                      "group_id": memberships[key],
                                       **({"basis": explanations[key]} if key in explanations else {}),
                                       **({"outcome": "success" if key == "result_write" else "refusal", "effect_kind": "result"}
                                          if key in ("variant_rejection", "rejection_response", "result_write") else {}),
@@ -267,6 +251,42 @@ def research_calls():
     return calls
 
 
+# Business stages of the fixture: name, goal, result and member operations by name.
+STAGE_PLAN = [
+    ("Проверка варианта оформления", "Установить, поддерживается ли запрошенный вариант оформления карты для клиента.",
+     "Заявка допущена к передаче на рассмотрение либо завершена отказом по варианту.",
+     ["Приём заявки в мобильном канале", "Проверка варианта оформления", "Формирование отказа по варианту"]),
+    ("Передача заявки на рассмотрение", "Подготовить заявку и передать её в систему рассмотрения заявок.",
+     "Заявка отправлена на рассмотрение; решение по ней ещё не принято.",
+     ["Формирование запроса на оформление", "Отправка заявки на рассмотрение"]),
+    ("Рассмотрение допуска клиента", "Решить по профилю клиента, можно ли выпустить ему дебетовую карту.",
+     "Заявка принята и сохранена либо отклонена с ответом об отказе.",
+     ["Получение заявки на рассмотрение", "Получение профиля клиента", "Проверка возможности выпуска",
+      "Сохранение отказа по заявке", "Формирование ответа об отказе", "Сохранение принятой заявки"]),
+    ("Передача заявки на выпуск", "Передать принятую заявку на выпуск карты.",
+     "Сообщение на выпуск отправлено; выпуск карты ещё не подтверждён.",
+     ["Формирование сообщения на выпуск", "Публикация заявки на выпуск"]),
+    ("Выпуск карты", "Выпустить карту по принятой заявке и связать результат с заявкой.",
+     "Карта и результат выпуска по заявке сохранены.",
+     ["Получение сообщения о выпуске карты", "Извлечение параметров выпуска", "Формирование данных новой карты",
+      "Сохранение выпущенной карты", "Сохранение результата выпуска"]),
+]
+
+
+def scripted_business_stages(payload):
+    """Group operations of the grouping packet by ``STAGE_PLAN``; others stay unassigned."""
+    by_name = {row["name"]: row["id"] for row in payload["operations"]}
+    stages, used = [], set()
+    for number, (name, goal, result, members) in enumerate(STAGE_PLAN, 1):
+        ids = [by_name[member] for member in members if member in by_name]
+        if ids:
+            used.update(ids)
+            stages.append({"id": f"stage-{number}", "name": name, "goal": goal, "result": result, "operation_ids": ids})
+    unassigned = [{"operation_id": row["id"], "reason": "Операция не относится к этапам учебного сценария"}
+                  for row in payload["operations"] if row["id"] not in used]
+    return {"stages": stages, "unassigned": unassigned}
+
+
 def scripted_summary():
     return ChatResult(text=json.dumps({
         "project_and_scenario": "Учебный выпуск карты действующему клиенту.",
@@ -287,6 +307,11 @@ class ScriptedClient:
     def chat(self, messages, **kwargs):
         if not kwargs.get("tools"):
             return scripted_summary()
+        if kwargs["tools"][0]["function"]["name"] == "submit_business_stages":
+            arguments = scripted_business_stages(json.loads(messages[1]["content"]))
+            return ChatResult(text="", usage={}, tool_calls=[{
+                "id": "call-stages", "type": "function",
+                "function": {"name": "submit_business_stages", "arguments": json.dumps(arguments, ensure_ascii=False)}}])
         self.seen = messages
         for item in messages:
             if item["role"] == "tool":

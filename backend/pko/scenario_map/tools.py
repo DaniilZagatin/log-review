@@ -154,12 +154,6 @@ TOOLS = [
            "exclusions": _list("Соседние сценарии вне исследования"), "assumptions": _list("Неустановленные границы и допущения"),
            "entry_operation_ids": _list("ID реальных первых операций; обязательно к finish"), "terminal_operation_ids": _list("ID реальных последних операций; обязательно к finish")},
           ["title", "start", "end"]),
-    _tool("upsert_group", "Добавить или изменить этап — навигационную группу операций с общей промежуточной целью. Операции привязываются к этапу "
-          "через свой group_id. Этап не выполняется и переходов не создаёт.",
-          {"id": EDIT_ID, "name": _string("Промежуточная цель, например «Рассмотрение претензии»"),
-           "description": _string("Какие операции объединяет этап"),
-           "result": _string("Промежуточный результат этапа; для нового этапа обязательно"), "evidence": EVIDENCE},
-          []),
     _tool("upsert_step", "Добавить или изменить операцию карты — наименьший самостоятельный шаг процесса, который можно наблюдать отдельно. "
           "Несколько шагов внутри одной функции раскрывай отдельными операциями. Название и смысл — предметным языком, технические имена "
           "и коды событий — в основаниях. "
@@ -170,7 +164,6 @@ TOOLS = [
            "input": _string("Используемые данные или событие"), "output": _string("Результат или изменение состояния"),
            "condition": _string("Предусловие операции"), "basis": BASIS,
            "completion_condition": _string("Смысловое условие, при котором сценарий завершается на этой операции; требует её ID в terminal_operation_ids"),
-           "group_id": _string("Этап для навигации, необязательно"),
            "continuation_mode": {"type": "string", "enum": ["sequence", "choice", "all"], "description": "sequence — одно продолжение; choice — выбирается одна ветвь; all — выполняются все подходящие продолжения"},
            "join_mode": {"type": "string", "enum": ["any", "all"], "description": "any — достаточно одного входящего результата; all — код ждёт все"},
            "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Бизнес-итог операции согласно методологии; при условном завершении относится к completion_condition"},
@@ -212,8 +205,8 @@ TOOLS = [
                       "properties": {name: EXECUTION_CHECK for name in EXECUTION_CHECKS}, "required": list(EXECUTION_CHECKS)}},
           ["name", "evidence", "operations", "checks"]),
     _tool("remove_element", "Удалить ошибочный элемент карты. Удаление не каскадное: сначала обнови или удали ссылки на него.",
-          {"kind": {"type": "string", "enum": ["group", "step", "transition", "gap", "execution_review"],
-                    "description": "group — этап, step — операция, transition — переход, gap — пробел, execution_review — обзор"},
+          {"kind": {"type": "string", "enum": ["step", "transition", "gap", "execution_review"],
+                    "description": "step — операция, transition — переход, gap — пробел, execution_review — обзор"},
            "id": _string()}, ["kind", "id"]),
     _tool("inspect_map", "Прочитать карту или память. research_brief — рабочая сводка целиком; context_summary — автоматическая сводка прошлой работы, "
           "не доказательство. Остальные разделы постраничные: frontier — ID операций, начало и конец, несвязанные операции и открытые выходы; "

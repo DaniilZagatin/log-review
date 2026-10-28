@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 
 from pko.llm.client import ChatResult
-from scenario_script import SPEC
+from scenario_script import SPEC, scripted_business_stages
 
 
 def _role(key: str | None) -> str:
@@ -40,6 +40,9 @@ class ScriptedReportClient:
         return ChatResult(text="", usage={}, tool_calls=[{
             "id": f"call-{len(self.requests)}", "type": "function",
             "function": {"name": tool, "arguments": json.dumps(arguments, ensure_ascii=False)}}])
+
+    def submit_business_stages(self, payload):
+        return scripted_business_stages(payload)
 
     def submit_event_bindings(self, payload):
         bindings = []
