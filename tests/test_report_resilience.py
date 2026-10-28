@@ -40,6 +40,8 @@ class Unavailable:
         raise LlmError("Провайдер отклонил запрос.", "400 Bad Request")
 
 
+# Retained report implementation stays covered while its product entry points are disabled.
+@patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True)
 class RunFaultTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

@@ -72,6 +72,8 @@ class CompletionTests(unittest.TestCase):
         self.assertIn("факт начала", " ".join(metric["readiness"]["blockers"]))
 
 
+# Exercise the dormant feature explicitly; ordinary runs are covered in test_map_only_mode.
+@patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True)
 class PublicationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

@@ -1,6 +1,7 @@
 """Local source snapshots -> one researcher -> offline map and durable audit."""
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import tempfile
@@ -30,6 +31,15 @@ HIERARCHY_FILE = "map_hierarchy.json"
 # One grouping request and one repair, with room for transient retries.
 STAGES_MAX_REQUESTS = 4
 STAGES_MAX_SECONDS = 1200.0
+# Product switch: retained report code is exercised by offline tests only.
+# Business stages and the agent's own audit/Phoenix tracing remain enabled.
+OBSERVABILITY_ENABLED = False
+
+
+def _require_observability_enabled(requested: bool) -> None:
+    if requested and not OBSERVABILITY_ENABLED:
+        raise PkoError("Логи, метрики и рекомендации по доработкам временно отключены. Белка строит только карту.",
+                       hint="уберите --observability и параметры отчёта; технический трейс агента сохраняется")
 
 
 def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
@@ -39,6 +49,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
                  observability: bool = False, report_options: ReportOptions | None = None,
                  stages: bool = True, on_event=None, demo: bool = False) -> dict:
+    _require_observability_enabled(observability or report_options is not None)
     scenario = scenario.strip()
     if not scenario:
         raise PkoError("Нужно описание процесса: вариант сценария, который требуется восстановить по коду.",
@@ -123,6 +134,14 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
                                         options=report_options or ReportOptions(),
                                         client=client, spec=spec, model_timeout=model_timeout, hierarchy=hierarchy)
+                    else:
+                        # Grouping also uses the trace; persist failures observed after the first map save.
+                        _refresh_audit_status(model)
+                        with trace_span("publish_map"):
+                            write_outputs(out_dir, {
+                                "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+                                "scenario-map": ("scenario_map.html", render_scenario_map(model, hierarchy=hierarchy)),
+                            })
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
                                          "gaps": len(model.get("gaps", [])),
@@ -138,7 +157,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
 
 def _publish_stages(model: dict, out_dir: Path, *, run_id: str, client, spec, model_timeout: float,
-                    report: dict | None = None, on_event=None) -> dict:
+                    report: dict | None = None, on_event=None, map_text: str | None = None) -> dict:
     """Business stages over the published map, then the map HTML with both views.
 
     The grouping cannot change the atomic map: its revision is compared after
@@ -163,9 +182,12 @@ def _publish_stages(model: dict, out_dir: Path, *, run_id: str, client, spec, mo
         hierarchy = grouping.unavailable_hierarchy(model, message, run_id=run_id,
                                                    budget=stage_model.budget.snapshot() if stage_model else None)
     with trace_span("render_map"):
-        html = render_scenario_map(model, report, hierarchy)
-    write_outputs(out_dir, {"map-hierarchy": (HIERARCHY_FILE, json.dumps(hierarchy, ensure_ascii=False, indent=2)),
-                            "scenario-map": ("scenario_map.html", html)})
+        html = render_scenario_map(model, report if OBSERVABILITY_ENABLED else None, hierarchy)
+    files = {"map-hierarchy": (HIERARCHY_FILE, json.dumps(hierarchy, ensure_ascii=False, indent=2)),
+             "scenario-map": ("scenario_map.html", html)}
+    if map_text is not None:
+        files["scenario-model"] = ("scenario_map.json", map_text)
+    write_outputs(out_dir, files)
     if on_event:
         on_event("business_stages", {"status": hierarchy["status"], "stages": len(hierarchy["stages"]),
                                      "collapsible": sum(stage["collapsible"] for stage in hierarchy["stages"]),
@@ -193,6 +215,8 @@ def _saved_hierarchy(folder: Path, model: dict) -> dict | None:
 
 def _saved_report(folder: Path, model: dict) -> dict | None:
     """A published report of exactly this map revision, kept in the HTML when only stages change."""
+    if not OBSERVABILITY_ENABLED:
+        return None
     try:
         report = json.loads((Path(folder) / "process_report.json").read_text(encoding="utf-8"))
         validate_report(report, model)
@@ -209,6 +233,7 @@ def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace
     A report failure leaves the published map; a handoff failure leaves both.
     Outcomes are recorded in ``model["run"]``.
     """
+    _require_observability_enabled(True)
     stage_model = None
     latest = None
     interrupted = False
@@ -358,9 +383,15 @@ def _check_report_options(options: ReportOptions | None) -> None:
 
 def load_saved_map(map_path) -> dict:
     """A published map of the current methodology; checkpoints and old maps are refused."""
+    return _read_saved_map(map_path)[0]
+
+
+def _read_saved_map(map_path) -> tuple[dict, str]:
+    """Validate once, retaining the exact UTF-8 text for a rebuild in another folder."""
     map_path = Path(map_path)
     try:
-        model = json.loads(map_path.read_text(encoding="utf-8"))
+        text = map_path.read_bytes().decode("utf-8")
+        model = json.loads(text)
     except (OSError, UnicodeError, ValueError) as exc:
         raise PkoError(f"Не удалось прочитать карту: {exc}", hint="укажите scenario_map.json прошлого запуска") from exc
     run = model.get("run") if isinstance(model, dict) else None
@@ -369,7 +400,7 @@ def load_saved_map(map_path) -> dict:
     if run.get("status") not in ("completed", "partial") or not model.get("nodes"):
         raise PkoError("Карта не содержит результата исследования: этапы и отчёт по ней не строятся.",
                        hint="используйте scenario_map.json завершённого или частичного запуска, не checkpoint")
-    return model
+    return model, text
 
 
 def rebuild_from_map(map_path, sources: list, out_dir: Path, *, stages: bool = True, observability: bool = False,
@@ -383,12 +414,13 @@ def rebuild_from_map(map_path, sources: list, out_dir: Path, *, stages: bool = T
     references the run which built the map. Without ``stages`` the saved stages
     of this map revision are kept.
     """
+    _require_observability_enabled(observability or report_options is not None)
     if not (stages or observability):
         raise PkoError("Перестраивать нечего: этапы отключены, отчёт не запрошен.",
-                       hint="уберите --no-stages или добавьте --observability")
+                       hint="уберите --no-stages")
     if observability:
         _check_report_options(report_options)
-    model = load_saved_map(map_path)
+    model, map_text = _read_saved_map(map_path)
     sources = list(sources or [])
     if observability and not 1 <= len(sources) <= 32:
         raise PkoError("Для отчёта нужно от 1 до 32 источников кода — те же, что при построении карты.")
@@ -399,6 +431,7 @@ def rebuild_from_map(map_path, sources: list, out_dir: Path, *, stages: bool = T
             raise PkoError("Каталог результата совпадает с источником кода или содержит его.",
                            hint="выберите для --out отдельную подпапку, не содержащую источники")
     folder = Path(map_path).resolve().parent
+    copy_saved_map = Path(map_path).resolve() != out_dir / "scenario_map.json"
     hierarchy = None if stages else _saved_hierarchy(folder, model)
     previous = model["run"].get("id")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
@@ -427,7 +460,8 @@ def rebuild_from_map(map_path, sources: list, out_dir: Path, *, stages: bool = T
                     # Only the stages change: a report of this map stays in the HTML.
                     report = None if observability or folder != out_dir else _saved_report(folder, model)
                     hierarchy = _publish_stages(model, out_dir, run_id=run_id, client=client, spec=spec,
-                                                model_timeout=model_timeout, report=report, on_event=on_event)
+                                                model_timeout=model_timeout, report=report, on_event=on_event,
+                                                map_text=map_text if copy_saved_map and not observability else None)
                     journal.outcome = {"complete": "completed", "partial": "partial"}.get(
                         hierarchy["status"]["result"], "failed")
                 if workspace is not None:
@@ -488,8 +522,7 @@ def add_cli_command(subparsers):
                           help="Текстовый файл с описанием варианта процесса и полезными сведениями о нём (UTF-8)")
     scenario.add_argument("--scenario-text", default="", help="Описание варианта сценария строкой")
     scenario.add_argument("--from-map", default="",
-                          help="Перестроить бизнес-этапы по сохранённой scenario_map.json без нового исследования; "
-                               "с --observability — и отчёт, тогда нужны те же --source")
+                          help="Перестроить бизнес-этапы по сохранённой scenario_map.json без нового исследования")
     command.add_argument("--source", action="extend", nargs="+", default=[],
                          help="ZIP-архивы или директории с кодом: несколько через пробел, флаг можно повторять")
     command.add_argument("--out", default="", help="Каталог HTML-карты и JSON (по умолчанию scenario-map-out; с --from-map — папка карты)")
@@ -504,18 +537,16 @@ def add_cli_command(subparsers):
                          help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
     command.add_argument("--no-stages", dest="stages", action="store_false",
                          help="Не строить бизнес-этапы: карта будет только в виде атомарных операций")
-    command.add_argument("--observability", action="store_true",
-                         help="Дополнительно построить отчёт наблюдаемости процесса и комплект передачи (пилотный режим)")
-    command.add_argument("--observability-max-requests", type=int, default=24,
-                         help="Лимит запросов к модели для этапов отчёта, 1–200 (по умолчанию 24)")
-    command.add_argument("--observability-max-seconds", type=float, default=1800,
-                         help="Лимит времени этапов отчёта в секундах, отдельный от исследования (по умолчанию 1800)")
+    # Recognise old commands to explain the disabled feature before reading inputs.
+    command.add_argument("--observability", action="store_true", help=argparse.SUPPRESS)
+    command.add_argument("--observability-max-requests", type=int, default=None, help=argparse.SUPPRESS)
+    command.add_argument("--observability-max-seconds", type=float, default=None, help=argparse.SUPPRESS)
     command.add_argument("--runtime-log", default="",
-                         help="Необязательный JSONL реальных логов (до 100 000 записей, 20 МБ); в отчёт и модель попадает только агрегированный профиль")
+                         help=argparse.SUPPRESS)
     command.add_argument("--domain-profile", default=None, choices=profile_names(),
-                         help="Необязательный предметный профиль вопросов и метрик для этапов отчёта, например bank-process-kpi")
+                         help=argparse.SUPPRESS)
     command.add_argument("--runtime-fields", default="",
-                         help="Имена полей JSONL: event_key=...,case_id=...,occurred_at=...,event_id=...")
+                         help=argparse.SUPPRESS)
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -523,6 +554,9 @@ def add_cli_command(subparsers):
 
 
 def command_main(args) -> int:
+    _require_observability_enabled(bool(args.observability or args.runtime_log or args.domain_profile
+                                       or args.runtime_fields or args.observability_max_requests is not None
+                                       or args.observability_max_seconds is not None))
     scenario = read_process_description(args.process_file) if args.process_file else args.scenario_text
 
     if (args.runtime_log or args.domain_profile) and not args.observability:
@@ -559,9 +593,10 @@ def command_main(args) -> int:
             print(f"Связь с моделью временно недоступна. Попытка {data['next_attempt']} "
                   f"из {data['max_attempts']} через {data['delay_seconds']:g} с.", flush=True)
 
-    options = ReportOptions(max_requests=args.observability_max_requests, max_seconds=args.observability_max_seconds,
+    options = ReportOptions(max_requests=args.observability_max_requests if args.observability_max_requests is not None else 24,
+                            max_seconds=args.observability_max_seconds if args.observability_max_seconds is not None else 1800,
                             runtime=runtime,
-                            profile=load_profile(args.domain_profile) if args.domain_profile else None)
+                            profile=load_profile(args.domain_profile) if args.domain_profile else None) if args.observability else None
     if args.from_map:
         model = rebuild_from_map(args.from_map, args.source, out, stages=args.stages,
                                  observability=args.observability, thinking=args.thinking,
@@ -583,13 +618,13 @@ def command_main(args) -> int:
     print(f"Данные: {(out / 'scenario_map.json')}")
     if stages:
         print(f"Бизнес-этапы: {(out / HIERARCHY_FILE)}")
-    if model["run"].get("process_report"):
+    if args.observability and model["run"].get("process_report"):
         print(f"Отчёт наблюдаемости: {(out / 'process_report.json')}")
         if model["run"].get("handoff"):
             print(f"Комплект передачи: {(out / 'handoff')}")
         elif model["run"].get("handoff_error"):
             print(f"Комплект передачи не построен: {model['run']['handoff_error']}")
-    elif model["run"].get("process_report_error"):
+    elif args.observability and model["run"].get("process_report_error"):
         print(f"Отчёт наблюдаемости не построен: {model['run']['process_report_error']}")
     if model["run"].get("interrupted"):
         return 130
@@ -598,5 +633,5 @@ def command_main(args) -> int:
         result = stages.get("status", {}).get("result", "complete")
         if result == "none":
             return 1
-        return 2 if result == "partial" or model["run"].get("process_report_error") else 0
+        return 2 if result == "partial" or (args.observability and model["run"].get("process_report_error")) else 0
     return 0 if status == "completed" else (2 if status == "partial" else 1)

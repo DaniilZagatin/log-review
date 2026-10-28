@@ -170,6 +170,9 @@ _tracer: Optional[Any] = None
 _provider: Optional[Any] = None
 # True после любой попытки инициализации (успех/отказ/выключено).
 _initialized: bool = False
+# Initialization is process-wide, but each run must retain its own explanation
+# when a failed initialization is reused or happened before its audit opened.
+_initialization_failure: Optional[dict[str, str]] = None
 
 # Текущая сессия агента, её открытый шаг и выполняемый инструмент.
 _SESSION: ContextVar[Optional["_SessionState"]] = ContextVar("pko_trace_session", default=None)
@@ -207,25 +210,38 @@ def tracing_health() -> dict:
     """Health of this run's optional exporter, independent of analysis success."""
     journal = current_audit()
     state = journal.trace_export_state if journal is not None else {"status": "disabled", "failures": []}
-    if state["status"] == "disabled":
-        if _tracer is not None:
+    enabled = os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on")
+    if enabled or _tracer is not None or _provider is not None:
+        if _tracer is None or _provider is None:
+            missing = ", ".join(name for name, value in (("tracer", _tracer), ("provider", _provider)) if value is None)
+            failure = _initialization_failure or {
+                "operation": "initialize", "reason": f"Phoenix включён, но не инициализирован: отсутствует {missing}."}
+            if failure not in state["failures"]:
+                _record_trace_failure(state, failure, failed=True)
+            else:
+                state["status"] = "failed"
+        elif state["status"] == "disabled":
             state["status"] = "pending"
-        elif os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on"):
-            state["status"] = "failed"
     return sanitize({**state, "failures": list(state["failures"])})
 
 
-def _trace_failure(operation: str, exc: Exception | str) -> None:
-    failure = {"operation": operation, "reason": str(sanitize(str(exc)))[:500]}
-    journal = current_audit()
-    if journal is not None:
-        state = journal.trace_export_state
-        state["status"] = "partial" if _tracer is not None else "failed"
-        if len(state["failures"]) < 20:
-            state["failures"].append(failure)
-        else:
-            state["omitted_failures"] = state.get("omitted_failures", 0) + 1
+def _record_trace_failure(state: dict, failure: dict, *, failed: bool = False) -> None:
+    state["status"] = "failed" if failed or _tracer is None else "partial"
+    if len(state["failures"]) < 20:
+        state["failures"].append(dict(failure))
+    else:
+        state["omitted_failures"] = state.get("omitted_failures", 0) + 1
     record("trace_export_failure", **failure)
+
+
+def _trace_failure(operation: str, exc: Exception | str, *, initialization: bool = False) -> None:
+    global _initialization_failure
+    failure = {"operation": operation, "reason": str(sanitize(str(exc)))[:500] or type(exc).__name__}
+    if initialization:
+        _initialization_failure = failure
+    journal = current_audit()
+    state = journal.trace_export_state if journal is not None else {"status": "disabled", "failures": []}
+    _record_trace_failure(state, failure, failed=initialization)
 
 
 def _start_span(name: str):
@@ -252,11 +268,13 @@ def init_phoenix_tracing() -> Optional[object]:
     `arize-phoenix-otel` не установлен или сервер недоступен. Прогон в любом
     случае продолжается: наблюдаемость не должна его останавливать.
     """
-    global _tracer, _provider, _initialized
+    global _tracer, _provider, _initialized, _initialization_failure
 
     if _initialized:
+        tracing_health()
         return _provider
     _initialized = True
+    _initialization_failure = None
 
     enabled = os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on")
     if not enabled:
@@ -270,13 +288,24 @@ def init_phoenix_tracing() -> Optional[object]:
     try:
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
         from phoenix.otel import PROJECT_NAME, HTTPSpanExporter, Resource, TracerProvider
-    except ImportError:
-        print("Phoenix: PKO_PHOENIX_ENABLED=true, но пакет arize-phoenix-otel не установлен — "
-              "трассировка выключена. Установите: pip install -r requirements-phoenix.txt",
+    except Exception as exc:
+        _trace_failure("import", f"Не удалось загрузить зависимости Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
+        print(f"Phoenix: не удалось загрузить зависимости ({sanitize(str(exc))}); трассировка выключена. "
+              "Проверьте установку requirements-phoenix.txt.",
               file=sys.stderr)
         return None
-    if not _reachable(endpoint):
-        print(f"Phoenix недоступен по адресу {endpoint}: трассировка этого запуска выключена. "
+    try:
+        reachable = _reachable(endpoint)
+    except Exception as exc:
+        _trace_failure("probe", f"Не удалось проверить доступность Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
+        print(f"Phoenix: ошибка проверки доступности ({sanitize(str(exc))})", file=sys.stderr)
+        return None
+    if not reachable:
+        _trace_failure("probe", f"Phoenix недоступен по адресу {endpoint}; проверьте сервер и PKO_PHOENIX_ENDPOINT.",
+                       initialization=True)
+        print(f"Phoenix недоступен по адресу {sanitize(endpoint)}: трассировка этого запуска выключена. "
               "Запустите `phoenix serve` или проверьте PKO_PHOENIX_ENDPOINT.", file=sys.stderr)
         return None
     try:
@@ -289,9 +318,14 @@ def init_phoenix_tracing() -> Optional[object]:
             HTTPSpanExporter(endpoint=endpoint, headers=headers),
             max_export_batch_size=_EXPORT_BATCH,
         ))
-        _tracer = provider.get_tracer("pko")
+        tracer = provider.get_tracer("pko")
+        if tracer is None:
+            raise RuntimeError("Phoenix provider не вернул tracer.")
+        _tracer = tracer
         _provider = provider
     except Exception as exc:
+        _trace_failure("initialize", f"Не удалось включить Phoenix: {type(exc).__name__}: {exc}",
+                       initialization=True)
         print(f"Phoenix: не удалось включить трассировку ({sanitize(str(exc))})", file=sys.stderr)
         return None
     print(f"Phoenix: {_base_url(endpoint)} · проект {project}", flush=True)

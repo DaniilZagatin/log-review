@@ -499,7 +499,25 @@ function terminalPresentation(node){
  const tone=outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
  const label=node.completion_condition?'При завершении: '+outcomeNames[outcome]:
   outcome==='success'||outcome==='unknown'?outcomeNames[outcome]:'Завершение · '+outcomeNames[outcome].toLocaleLowerCase('ru');
- return {tone,label};
+ return {tone,label,outcome,conditional:!!node.completion_condition};
+}
+function stageOutcomes(members){
+ const outcomes=new Map();
+ for(const node of members){const end=terminalPresentation(node);if(!end)continue;const key=end.outcome+':'+end.conditional;
+  if(!outcomes.has(key))outcomes.set(key,{...end,count:0});outcomes.get(key).count++;}
+ return [...outcomes.values()];
+}
+function stageSemantics(members,edges){
+ const incoming=new Map(),outgoing=new Map(),rows=[];
+ for(const edge of edges){if(edge.kind==='data')continue;const source=String(edge.source),target=String(edge.target);outgoing.set(source,(outgoing.get(source)||0)+1);incoming.set(target,(incoming.get(target)||0)+1);}
+ for(const node of members){const id=String(node.id);
+  if((outgoing.get(id)||0)>1){const mode=node.continuation_mode||'sequence';
+   const labels={choice:['Выбор продолжения','Выполняется операция, условие которой выполнено.'],all:['Совместный запуск','Запускаются все указанные продолжения при выполнении их условий.'],sequence:['Порядок продолжений','Порядок продолжения указан в условиях переходов.']};
+   const [short,label]=labels[mode]||['Продолжение не установлено','Способ выбора продолжения не установлен.'];rows.push({node,dimension:'continuation',mode,short,label});}
+  if((incoming.get(id)||0)>1){const mode=node.join_mode||'any',all=mode==='all';
+   rows.push({node,dimension:'join',mode,short:all?'Ожидание всех ветвей':'Вход по любой ветви',label:all?'Операция ожидает завершения всех предусмотренных входящих ветвей.':'Операция может начаться по любой входящей ветви; ожидание всех ветвей не требуется.'});}
+ }
+ return rows;
 }
 const nodeKindLabel=node=>!legacy?'Атомарная операция':node.kind==='end'&&node.outcome?(outcomeNames[node.outcome]||outcomeNames.unknown):node.kind==='action'?(operationKinds[operationsByNode.get(text(node.id))?.[0]?.operation.kind]||kindNames.action):(kindNames[node.kind]||'Шаг сценария');
 function notationIcon(kind){
@@ -521,7 +539,7 @@ const badge = value => el('span','badge '+evidenceStatus(value),evidenceNames[ev
 const systemName = node => (systemById.get(text(node.system_id)) || {}).name || 'АС не установлена';
 const validEdges=edges.filter(e => byId.has(text(e.source)) && byId.has(text(e.target)));
 const positions=new Map(), nodeButtons=new Map(), edgeGroups=new Map();
-let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null;
+let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null, inspectorView={type:'overview'};
 
 $('page-title').textContent=scenario.title || 'Карта сценария';
 const fullDescription=text(scenario.description).trim();
@@ -596,6 +614,7 @@ for(const [kind,label] of (legacy?[['start','Начало сценария'],['a
 if(stageRecords.length){const row=el('div','notation-item');row.append(notationIcon('stage'),el('span','','Бизнес-этап с одним входом'));$('notation-items').append(row,el('p','','Вид «Бизнес-этапы» — предложение модели поверх карты операций. Этап с одним входом показан блоком; нажатие раскрывает его операции внутри рамки этапа. Этап с несколькими входами показан своими операциями с подписью этапа, чтобы не рисовать путей, которых нет в коде. Связь между блоками объединяет переходы карты.'));}
 $('notation-items').append(el('p','', 'Свечение отмечает итог конечной операции: зелёное — успешное завершение, красное — отказ, сбой или отмена. Подпись уточняет исход. Неизвестный итог, перенос срока и отсутствие решения остаются нейтральными. Условное завершение отмечено словами «При завершении»; другие продолжения сохраняются.'));
 function showGroup(group){
+ inspectorView={type:'group',id:text(group.id)};
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',group.kind==='stage'?'ЭТАП':'БИЗНЕС-ОПЕРАЦИЯ'),el('h2','',group.name));
  field(panel,'Бизнес-смысл',group.description);field(panel,group.kind==='stage'?'Промежуточная цель':'Отделимый результат',group.result);
  const parent=groupById.get(text(group.parent_id));if(parent)relatedButton(panel,'Этап: '+parent.name,()=>selectGroup(parent));
@@ -636,6 +655,7 @@ $('stage-select').addEventListener('change',()=>{
 });
 $('clear-selection').addEventListener('click',()=>closeInspector());
 function showOverview(){
+ inspectorView={type:'overview'};
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
  panel.append(el('p','muted',model.summary || 'Выберите операцию, чтобы увидеть её смысл, вход, результат, условия продолжения и подтверждения в коде.'));
  field(panel,'Описание варианта сценария',fullDescription);
@@ -674,6 +694,7 @@ function continuations(container,node){
  }container.append(section);
 }
 function showNode(node){
+ inspectorView={type:'node',id:text(node.id)};
  const panel=$('inspector-content');panel.replaceChildren();
  const meta=el('div','operation-meta');meta.append(el('div','inspector-kicker',nodeKindLabel(node)));
  const ancestry=nodeGroups(node),stage=nodeStage(node);if(ancestry.length||stage){const links=el('div','group-links');if(stage)relatedButton(links,'Этап: '+stage.name,()=>selectStage(stage));for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Группа: ')+group.name,()=>selectGroup(group));meta.append(links);}
@@ -690,6 +711,7 @@ function showNode(node){
  const nodeGaps=gaps.filter(g=>array(g.node_ids).map(text).includes(text(node.id)));for(const gap of nodeGaps)field(panel,'Не установлено',gap.description);
 }
 function showEdge(edge){
+ inspectorView={type:'edge',id:text(edge.id)};
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',legacy?'ПЕРЕХОД · '+(edgeNames[edge.kind] || 'Связь'):'ПРОДОЛЖЕНИЕ ИСПОЛНЕНИЯ'),badge(edge.evidence_status));
  const from=byId.get(text(edge.source)), to=byId.get(text(edge.target));panel.append(el('h2','',(from.name || from.id)+' → '+(to.name || to.id)));
  field(panel,'Что происходит',edge.description);codeExplanations(panel,edge);field(panel,'Обоснование перехода',edge.basis);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
@@ -706,16 +728,24 @@ function scenarioNodeScope(nodeId,edges){
  for(const edge of edges){const source=String(edge.source),target=String(edge.target);if((ancestors.has(source)&&ancestors.has(target))||(descendants.has(source)&&descendants.has(target)))scopeEdges.add(String(edge.id));}
  return {nodes:new Set([...ancestors,...descendants]),edges:scopeEdges};
 }
+function projectScenarioScope(canonical,view){
+ const nodes=new Set([...canonical.nodes].map(id=>view.represent(id))),edges=new Set();
+ for(const link of view.links)if((link.transitions||[link]).some(edge=>canonical.edges.has(String(edge.id))))edges.add(String(link.id));
+ return {nodes,edges};
+}
 function updateHighlight(){
  // The selection stays a map element; the current view resolves it. An operation
  // inside a collapsed stage is represented by that stage's block.
  const scope=new Set(),related=new Set();let focus=null,focusLink=null;
  const stage=selected?.type==='stage'?businessStageById.get(text(selected.id)):null,group=selected?.type==='group'?groupById.get(text(selected.id)):null;
- const members=list=>{for(const node of list)scope.add(display.represent(node.id));for(const link of display.links)if(scope.has(link.source)&&scope.has(link.target))related.add(text(link.id));};
+ const project=canonical=>{const paths=projectScenarioScope(canonical,display);for(const id of paths.nodes)scope.add(id);for(const id of paths.edges)related.add(id);};
+ const members=list=>{const ids=new Set(list.map(node=>text(node.id)));project({nodes:ids,edges:new Set(validEdges.filter(edge=>ids.has(text(edge.source))&&ids.has(text(edge.target))).map(edge=>text(edge.id)))});};
  const block=stage?display.items.get('stage:'+text(stage.id)):null;
  if(selected?.type==='node')focus=display.represent(selected.id);
  else if(block&&!block.open)focus=block.id;
- if(focus!==null){const paths=scenarioNodeScope(focus,display.links);for(const id of paths.nodes)scope.add(id);for(const id of paths.edges)related.add(id);}
+ // Reachability belongs to the atomic graph. Traversing the collapsed graph would
+ // incorrectly include another member's exits when only one operation is selected.
+ if(selected?.type==='node')project(scenarioNodeScope(selected.id,validEdges));
  else if(stage)members(stageMembers(stage));
  else if(group)members(groupMembers(group));
  else if(selected?.type==='edge'||selected?.type==='link'){const link=selected.type==='edge'?display.linkOf.get(text(selected.id)):display.linkById.get(text(selected.id));if(link){focusLink=text(link.id);scope.add(link.source);scope.add(link.target);}}
@@ -732,8 +762,27 @@ function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
 // Set by the report tabs: the operation panel is shown only over a visible map.
 let mapTabHook=null;
-function openInspector(){if($('panel-map').inert&&mapTabHook)mapTabHook();if($('inspector').hidden)restoreFocus=document.activeElement;$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
-function closeInspector(restore=true){selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore&&restoreFocus&&document.contains(restoreFocus))restoreFocus.focus({preventScroll:true});restoreFocus=null;}
+function focusReference(element=document.activeElement){
+ const owner=element?.closest?.('[data-node-id],[data-stage-id],[data-edge-id]');
+ const transition=owner?.dataset.transitionIds?JSON.parse(owner.dataset.transitionIds)[0]:null;
+ const selectedTransition=selected?.type==='link'?display.linkById.get(text(selected.id))?.transitions?.[0]?.id:null;
+ const reference=owner?.dataset.nodeId?{type:'node',id:owner.dataset.nodeId}:owner?.dataset.stageId?{type:'stage',id:owner.dataset.stageId}:transition?{type:'edge',id:transition}:selectedTransition?{type:'edge',id:text(selectedTransition)}:selected;
+ return {element,reference:reference?{...reference}:null};
+}
+function restoreMapFocus(target){
+ if($('panel-map').inert)return;
+ const ref=target?.reference;let element=target?.element;
+ if(!element?.isConnected||element===document.body||element.closest('[hidden],[inert]')){
+  const id=ref?.type==='node'?display.represent(ref.id):ref?.type==='stage'?'stage:'+text(ref.id):null;
+  element=id?(nodeButtons.get(id)||frameElements.get(id)?.head.querySelector('.stage-frame-title')):
+   ref?.type==='edge'?edgeGroups.get(text(display.linkOf.get(text(ref.id))?.id)):ref?.type==='link'?edgeGroups.get(text(ref.id)):null;
+  if(!element&&ref?.type==='stage'){const stage=businessStageById.get(text(ref.id));element=stage&&nodeButtons.get(text(stage.entry_operation_id));}
+ }
+ const fallback=[$('view-mode').querySelector('[aria-pressed=true]'),$('stage-button'),$('viewport')].find(node=>node&&!node.closest('[hidden],[inert]')&&!node.disabled);
+ (element||fallback).focus({preventScroll:true});
+}
+function openInspector(){if($('panel-map').inert&&mapTabHook)mapTabHook();if($('inspector').hidden)restoreFocus=focusReference();$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
+function closeInspector(restore=true){const target=restoreFocus||focusReference();selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore)restoreMapFocus(target);restoreFocus=null;}
 // On the stage view an operation inside a closed block is shown by opening that block.
 function revealNode(id){
  if(viewMode!=='stages'||display.represent(id)===text(id))return;
@@ -776,6 +825,7 @@ function selectStage(stage){
  requestAnimationFrame(()=>frameStage(stage));announce('Выбран бизнес-этап: '+(stage.name||stage.id));
 }
 function showStage(stage){
+ inspectorView={type:'stage',id:text(stage.id)};
  const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
  panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
  field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
@@ -789,6 +839,10 @@ function showStage(stage){
   panel.append(section);};
  transitions('Входы в этап',validEdges.filter(e=>inside.has(text(e.target))&&!inside.has(text(e.source))),'source',starts);
  transitions('Продолжения после этапа',validEdges.filter(e=>inside.has(text(e.source))&&!inside.has(text(e.target))),'target',[]);
+ const semantics=stageSemantics(members,validEdges);
+ if(semantics.length){const section=el('section','details stage-semantics');section.append(el('h3','','Порядок выполнения операций'));
+  for(const item of semantics){const row=el('article','continuation');row.dataset.operationId=text(item.node.id);row.dataset[item.dimension+'Mode']=item.mode;
+   relatedButton(row,item.node.name||item.node.id,()=>selectNode(item.node,true)).classList.add('continuation-target');row.append(el('p','continuation-condition',item.label));section.append(row);}panel.append(section);}
  const ends=members.map(node=>({node,terminal:terminalPresentation(node)})).filter(item=>item.terminal);
  if(ends.length){const section=el('section','details continuations');section.append(el('h3','','Завершения сценария в этапе'));
   for(const {node,terminal} of ends){const row=el('article','continuation stage-end '+terminal.tone);relatedButton(row,node.name||node.id,()=>selectNode(node,true)).classList.add('continuation-target');row.append(el('p','continuation-condition',terminal.label+(node.completion_condition?'. '+node.completion_condition:'')));section.append(row);}
@@ -811,6 +865,7 @@ function showStage(stage){
 }
 function selectLink(link){closePopovers();selected={type:'link',id:link.id};showLink(link);openInspector();updateHighlight();announce('Выбран переход: '+itemName(link.source)+' → '+itemName(link.target));}
 function showLink(link){
+ inspectorView={type:'link',id:text(link.id)};
  const panel=$('inspector-content');panel.replaceChildren();
  panel.append(el('div','inspector-kicker','ПЕРЕХОД НА КАРТЕ ЭТАПОВ'),badge(link.evidence_status),el('h2','',itemName(link.source)+' → '+itemName(link.target)));
  panel.append(el('p','muted','Связь объединяет переходы карты операций: '+link.transitions.length+'. Условия и основания указаны у каждого перехода.'));
@@ -839,12 +894,26 @@ function setMode(mode){
  announce(mode==='stages'?'Показаны бизнес-этапы':'Показаны атомарные операции');
 }
 function syncModeButtons(){for(const button of $('view-mode').querySelectorAll('button'))button.setAttribute('aria-pressed',String(button.dataset.mode===viewMode));}
+function captureMapState(){
+ const view=$('viewport');return {mode:viewMode,expanded:[...expandedStages],zoom,left:view.scrollLeft,top:view.scrollTop,selected:selected?{...selected}:null,
+  inspectorHidden:$('inspector').hidden,inspectorView:{...inspectorView},inspectorScroll:$('inspector-content').scrollTop,restoreFocus};
+}
+function restoreMapState(state){
+ if(!state)return;viewMode=state.mode;expandedStages.clear();for(const id of state.expanded)expandedStages.add(id);
+ display=buildDisplay();selected=state.selected;restoreFocus=state.restoreFocus;syncModeButtons();$('inspector').hidden=state.inspectorHidden;
+ const view=state.inspectorView,value=view.type==='node'?byId.get(view.id):view.type==='edge'?validEdges.find(edge=>text(edge.id)===view.id):
+  view.type==='stage'?businessStageById.get(view.id):view.type==='group'?groupById.get(view.id):view.type==='link'?display.linkById.get(view.id):null;
+ if(value)({node:showNode,edge:showEdge,stage:showStage,group:showGroup,link:showLink}[view.type])(value);
+ else if(view.type==='findings'){showFindings();$('inspector').hidden=state.inspectorHidden;}else showOverview();
+ draw();applyZoom(state.zoom);$('viewport').scrollTo({left:state.left,top:state.top});$('inspector-content').scrollTop=state.inspectorScroll;
+}
 $('view-mode').hidden=!stageRecords.length;
 for(const button of $('view-mode').querySelectorAll('button'))button.addEventListener('click',()=>setMode(button.dataset.mode));
 display=buildDisplay();syncModeButtons();
 document.addEventListener('keydown',event=>{if(event.defaultPrevented||$('panel-map').inert)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
 
 function showFindings(){
+ inspectorView={type:'findings'};
  closePopovers();selected=null;const panel=$('inspector-content');panel.replaceChildren();
  panel.append(el('h2','','Что осталось установить'));
  field(panel,'Результат исследования',stateNames[runState]||'Статус исследования не установлен');
@@ -925,13 +994,14 @@ function drawLinks(list,layout,parent,vertical,inner=false,frames=new Map()){
     targetEdge:entry?(vertical?entry.y:entry.x):undefined};
    path=routeScenarioEdge({...link,source,target},layout,vertical,routing,exit?0:port,bend,anchors).path;
    if(exit)path=exit.path+' L '+path.replace(/^M\s*/,'');}
-  const group=svg('g',{'class':'edge edge-'+evidenceStatus(link.evidence_status),tabindex:0,role:'button','data-edge-id':text(link.id),'aria-label':'Переход: '+itemName(text(link.source))+' → '+itemName(text(link.target))});
+  const group=svg('g',{'class':'edge edge-'+evidenceStatus(link.evidence_status),tabindex:0,role:'button','data-edge-id':text(link.id),'data-transition-ids':JSON.stringify((link.transitions||[link]).map(edge=>text(edge.id))),'aria-label':'Переход: '+itemName(text(link.source))+' → '+itemName(text(link.target))});
   group.append(svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
   group.addEventListener('click',()=>selectDisplayLink(link));group.addEventListener('keydown',event=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();selectDisplayLink(link);}});
   parent.append(group);edgeGroups.set(text(link.id),group);
  }
 }
 function draw(){
+ const focus=document.activeElement?.closest?.('#nodes,#connections')?focusReference():null;
  const nodeContainer=$('nodes');nodeContainer.replaceChildren();$('connections').replaceChildren();positions.clear();nodeButtons.clear();edgeGroups.clear();frameElements.clear();
  if(!nodes.length){$('empty-map').hidden=false;$('canvas-size').hidden=true;return;}else{$('empty-map').hidden=true;$('canvas-size').hidden=false;}
  const vertical=$('viewport').clientWidth<740,sizes=new Map(),measured=[],frames=[];
@@ -976,21 +1046,20 @@ function draw(){
  drawLinks(display.links.filter(link=>!link.inner),layout,drawing,vertical,false,inside);
  for(const [id,box] of inside){const group=svg('g',{transform:`translate(${box.ox} ${box.oy})`});drawing.append(group);
   drawLinks(display.links.filter(link=>link.inner===id),box.local,group,vertical,true);}
- applyZoom(zoom);updateHighlight();
+ applyZoom(zoom);updateHighlight();if(focus)restoreMapFocus(focus);
 }
 function stageCard(item){
  const stage=item.stage,members=item.members.map(id=>byId.get(id)).filter(Boolean),button=el('button','node kind-stage');button.type='button';button.dataset.stageId=text(stage.id);
- const ends=members.map(terminalPresentation).filter(Boolean),success=ends.filter(end=>end.tone==='success').length,negative=ends.filter(end=>end.tone==='negative').length,other=ends.length-success-negative;
+ const ends=stageOutcomes(members),semantics=stageSemantics(members,validEdges);
  const findings=gaps.filter(g=>array(g.node_ids).some(id=>item.members.includes(text(id)))).length,content=el('span','node-content');
  content.append(el('span','node-stage-kicker','Бизнес-этап · '+members.length+' '+plural(members.length,['операция','операции','операций'])),el('span','node-name',stage.name||stage.id));
  if(stage.result)content.append(el('span','node-stage-result',stage.result));
  if(ends.length){const row=el('span','stage-outcomes'),count=value=>value>1?' · '+value:'';
-  if(success)row.append(el('span','stage-outcome success','Успешное завершение'+count(success)));
-  if(negative)row.append(el('span','stage-outcome negative','Отказ или сбой'+count(negative)));
-  if(other)row.append(el('span','stage-outcome','Завершение · исход не уточнён'+count(other)));content.append(row);}
+  for(const end of ends){const badge=el('span','stage-outcome '+end.tone,end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
+ if(semantics.length){const row=el('span','stage-outcomes stage-semantics');for(const label of new Set(semantics.map(item=>item.short)))row.append(el('span','stage-outcome',label));content.append(row);}
  if(findings)content.append(el('span','node-gap','Не установлено: '+findings));
  button.append(content);button.setAttribute('aria-pressed','false');button.setAttribute('aria-expanded','false');
- button.setAttribute('aria-label','Бизнес-этап: '+(stage.name||stage.id)+'. Операций: '+members.length+(ends.length?'. Завершений сценария: '+ends.length:'')+'. Нажмите, чтобы раскрыть операции этапа');
+ button.setAttribute('aria-label','Бизнес-этап: '+(stage.name||stage.id)+'. Операций: '+members.length+(ends.length?'. '+ends.map(end=>end.label+(end.count>1?' · '+end.count:'')).join('. '):'')+(semantics.length?'. '+[...new Set(semantics.map(item=>item.short))].join('. '):'')+'. Нажмите, чтобы раскрыть операции этапа');
  button.addEventListener('click',()=>expandStage(stage));return button;
 }
 function minimumZoom(){return Math.max(.001,Math.min(.16,(availableWidth()-24)/graphWidth,($('viewport').clientHeight-24)/graphHeight));}

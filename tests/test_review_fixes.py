@@ -133,6 +133,7 @@ class ReadinessTests(unittest.TestCase):
         self.assertIn("раньше", line)
 
 
+@patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True)
 class TraceStatusTests(unittest.TestCase):
     def test_failed_and_blocked_stages_end_with_their_status_and_calls_join_the_tree(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}):
@@ -236,6 +237,7 @@ class JvmFieldTests(unittest.TestCase):
         self.assertEqual((site["context_fields"], site["fields_status"]), (["case_id"], "partial"))
 
 
+@patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True)
 class AnswerReuseTests(unittest.TestCase):
     def test_rerun_reuses_revalidated_answers_and_asks_again_when_inputs_change(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}):

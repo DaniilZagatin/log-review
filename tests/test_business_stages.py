@@ -21,6 +21,7 @@ from pko.render.scenario_map import _STAGE_PROJECTION_JS, render_scenario_map
 from pko.scenario_map.runner import HIERARCHY_FILE, rebuild_from_map, run_scenario
 from pko.stages import grouping
 from pko.stages.contracts import HierarchyError, validate_hierarchy
+from pko.stages.inputs import input_fingerprint
 from pko.stages.regions import collapse_check, immediate_dominators, operation_graph
 from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
@@ -120,7 +121,9 @@ class HierarchyTests(unittest.TestCase):
         self.assertEqual((hierarchy["provenance"], hierarchy["authority_status"]), ("model_proposal", "proposed"))
         payload = client.requests[0][1]
         self.assertEqual({row["id"]: row["dominator"] for row in payload["operations"]}["step-4"], "step-3")
-        self.assertNotIn("evidence", json.dumps(payload, ensure_ascii=False))
+        self.assertNotIn('"evidence":', json.dumps(payload, ensure_ascii=False), "no source quotations in the packet")
+        self.assertEqual(hierarchy["input_mode"], "full")
+        self.assertEqual(hierarchy["input_sha256"], input_fingerprint(payment_map(), "full"))
 
     def test_overlap_and_unknown_operations_get_one_addressed_repair(self):
         broken = copy.deepcopy(STAGES)
@@ -143,6 +146,58 @@ class HierarchyTests(unittest.TestCase):
         self.assertEqual(hierarchy["status"]["result"], "complete")
         self.assertEqual(hierarchy["unassigned"][0]["reason"], "Ручной разбор вне сценария")
 
+    def test_malformed_membership_and_unassigned_get_one_addressed_repair(self):
+        malformed_members = [None, "step-4", 4, {"id": "step-4"}, [{"id": "step-4"}, "step-5"], [None]]
+        malformed_unassigned = [None, "step-6", {"operation_id": "step-6"},
+                                [None], [{"operation_id": ["step-6"], "reason": "Причина"}]]
+        for field, values in (("operation_ids", malformed_members), ("unassigned", malformed_unassigned)):
+            for value in values:
+                with self.subTest(field=field, value=value):
+                    malformed = copy.deepcopy(STAGES)
+                    target = malformed["stages"][1] if field == "operation_ids" else malformed
+                    target[field] = value
+                    hierarchy, client = self.ask(malformed, STAGES)
+                    self.assertEqual(len(client.requests), 2)
+                    self.assertEqual(hierarchy["status"]["result"], "complete")
+                    self.assertEqual(len(hierarchy["membership"]), 6)
+
+    def test_repair_cannot_take_members_from_an_accepted_stage(self):
+        first = copy.deepcopy(STAGES)
+        first["stages"][1]["operation_ids"] = ["step-4", "step-99"]
+        repair = {"stages": [copy.deepcopy(STAGES["stages"][1])], "unassigned": []}
+        repair["stages"][0]["operation_ids"] = ["step-3", "step-4", "step-5"]
+        hierarchy, client = self.ask(first, repair)
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual({node for node, stage in hierarchy["membership"].items() if stage == "stage-1"},
+                         {"step-1", "step-2", "step-3"})
+        self.assertNotIn("stage-2", {stage["id"] for stage in hierarchy["stages"]})
+        self.assertEqual(hierarchy["status"]["result"], "partial")
+        self.assertTrue(any("stage-2" in reason and "уже приняты" in reason for reason in hierarchy["status"]["reasons"]))
+        self.assertEqual({row["operation_id"] for row in hierarchy["unassigned"]}, {"step-4", "step-5"})
+
+    def test_repair_cannot_change_the_membership_of_an_accepted_stage_id(self):
+        first = copy.deepcopy(STAGES)
+        first["stages"][1]["operation_ids"] = ["step-99"]
+        repair = copy.deepcopy(STAGES)
+        repair["stages"][0]["operation_ids"] = ["step-1", "step-2"]
+        repair["stages"][1]["operation_ids"] = ["step-3", "step-4", "step-5"]
+        hierarchy, _ = self.ask(first, repair)
+        self.assertEqual(hierarchy["membership"]["step-3"], "stage-1")
+        self.assertEqual(hierarchy["status"]["result"], "partial")
+        self.assertTrue(any("состав ранее принятого" in reason for reason in hierarchy["status"]["reasons"]))
+
+    def test_disjoint_repair_keeps_accepted_stages_and_unassigned_reasons(self):
+        first = copy.deepcopy(STAGES)
+        first["stages"].pop()
+        first["stages"][1]["operation_ids"] = ["step-99"]
+        first["unassigned"] = [{"operation_id": "step-6", "reason": "Выполнение специалистом вне границ карты"}]
+        repair = {"stages": [copy.deepcopy(STAGES["stages"][1])], "unassigned": []}
+        hierarchy, client = self.ask(first, repair)
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(hierarchy["status"]["result"], "complete")
+        self.assertEqual(hierarchy["membership"]["step-3"], "stage-1")
+        self.assertEqual(hierarchy["unassigned"], first["unassigned"])
+
     def test_technical_stage_names_are_rejected(self):
         technical = copy.deepcopy(STAGES)
         technical["stages"][0]["name"] = "match_contract()"
@@ -160,10 +215,81 @@ class HierarchyTests(unittest.TestCase):
         self.assertLess(compact, full)
         client = ScriptedReportClient({"submit_business_stages": [lambda payload, messages: STAGES]})
         model_stage = stage_model(client)
-        with patch.object(StageModel, "_limits", lambda self, schema: ((compact + full) // 2, 4000)):
+        messages = [{"role": "system", "content": grouping.methodology(grouping.STAGE, grouping.METHODOLOGY)["text"]},
+                    {"role": "user", "content": json.dumps(grouping.build_payload(model, compact=True), ensure_ascii=False,
+                                                             separators=(",", ":"))}]
+        compact_budget = sum(len(json.dumps(message, ensure_ascii=False)) for message in messages) + 100
+        with patch.object(StageModel, "_limits", lambda self, schema: (compact_budget, 4000)):
             hierarchy = grouping.build_hierarchy(model, model_stage)
         self.assertEqual(hierarchy["status"]["result"], "complete")
         self.assertNotIn("process_description", client.requests[0][1])
+        self.assertEqual(hierarchy["input_mode"], "compact")
+        self.assertEqual(hierarchy["input_sha256"], input_fingerprint(model, "compact"))
+        validate_hierarchy(hierarchy, model)
+        altered = copy.deepcopy(hierarchy)
+        altered["input_mode"] = "full"
+        with self.assertRaisesRegex(HierarchyError, "another grouping input"):
+            validate_hierarchy(altered, model)
+
+    def test_both_packet_modes_keep_execution_semantics_and_late_conditions(self):
+        model = payment_map()
+        node = model["nodes"][2]
+        node.update(input="Данные договора", description="Проверяет условия перевода платежа",
+                    condition="Предусловие. " * 100 + "Только после подтверждения получателя.",
+                    effect_kind="command", continuation_mode="choice", join_mode="all",
+                    output="Проверка. " * 100 + "Погашение кредита не подтверждено.",
+                    completion_condition="Завершение. " * 100 + "Только если платёж отклонён.",
+                    external_interactions=[{"name": "ЕКП", "direction": "send", "contract": "performReprocess",
+                                            "purpose": "Запросить повторную обработку", "evidence": [{"quote": "source code"}]}])
+        model["edges"][2]["condition"] = "Условия. " * 100 + "Кроме платежей на закрытый договор."
+        model["gaps"] = [{"id": "gap-1", "node_ids": ["step-3"], "edge_ids": [],
+                          "description": "Ответ получателя команды неизвестен"}]
+        original = copy.deepcopy(model)
+        full, compact = grouping.build_payload(model), grouping.build_payload(model, compact=True)
+        for key in ("operations", "transitions", "gaps"):
+            self.assertEqual(full[key], compact[key])
+        row = next(row for row in compact["operations"] if row["id"] == "step-3")
+        for field in ("input", "description", "condition", "effect_kind", "continuation_mode", "join_mode", "completion_condition"):
+            self.assertEqual(row[field], node[field])
+        self.assertEqual(row["result"], node["output"])
+        self.assertEqual(row["external_interactions"][0]["contract"], "performReprocess")
+        self.assertNotIn("evidence", row["external_interactions"][0])
+        self.assertEqual(compact["transitions"][2]["condition"], model["edges"][2]["condition"])
+        self.assertEqual(compact["gaps"], model["gaps"])
+        for field, value in (("effect_kind", "result"), ("continuation_mode", "all"), ("join_mode", "any"),
+                             ("condition", "Подтверждение получателя ещё не получено")):
+            different = copy.deepcopy(model)
+            different["nodes"][2][field] = value
+            self.assertNotEqual(compact, grouping.build_payload(different, compact=True))
+        self.assertEqual(model, original)
+
+    def test_context_and_methodology_changes_invalidate_saved_hierarchy(self):
+        model = payment_map()
+        model["research_brief"] = {"project_overview": "Погашение кредита", "scenario_alignment": "Платёж клиента"}
+        model["groups"] = [{"id": "group-1", "name": "Разбор платежа"}]
+        model["nodes"][0]["group_id"] = "group-1"
+        hierarchy, _ = self.ask(STAGES, model=model)
+        for change in (lambda m: m["research_brief"].update(project_overview="Оплата страхования"),
+                       lambda m: m["groups"][0].update(name="Оформление страхования"),
+                       lambda m: m.update(gaps=[{"id": "gap-1", "description": "Результат неизвестен", "node_ids": ["step-4"]}])):
+            different = copy.deepcopy(model)
+            change(different)
+            self.assertEqual(map_revision(different), map_revision(model))
+            with self.assertRaisesRegex(HierarchyError, "another grouping input"):
+                validate_hierarchy(hierarchy, different)
+        for field, value in (("methodology_sha256", "0" * 64), ("input_mode", "unknown"), ("input_sha256", None)):
+            different = copy.deepcopy(hierarchy)
+            different[field] = value
+            with self.assertRaises(HierarchyError):
+                validate_hierarchy(different, model)
+
+    def test_unavailable_hierarchy_has_a_valid_input_identity(self):
+        model = payment_map()
+        hierarchy = grouping.unavailable_hierarchy(model, "Ответ недоступен")
+        validate_hierarchy(hierarchy, model)
+        self.assertEqual(hierarchy["input_mode"], "full")
+        self.assertEqual(hierarchy["input_sha256"], input_fingerprint(model, "full"))
+        self.assertEqual(hierarchy["status"]["result"], "none")
 
     def test_contract_rejects_foreign_or_incomplete_hierarchies(self):
         hierarchy, _ = self.ask(STAGES)
@@ -245,6 +371,7 @@ class StagePublicationTests(unittest.TestCase):
         self.assertFalse((output / HIERARCHY_FILE).exists())
         self.assertNotIn('id="map-hierarchy"', (output / "scenario_map.html").read_text(encoding="utf-8"))
 
+    @patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True, create=True)
     def test_rebuilding_stages_keeps_the_map_report_and_handoff_intact(self):
         output = self.root / "full"
         run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True,
@@ -273,6 +400,7 @@ class StagePublicationTests(unittest.TestCase):
         audit = (output / "audit" / f"run_{second['run_id']}.txt").read_text(encoding="utf-8")
         self.assertIn("scenario_rebuild_run", audit)
 
+    @patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True, create=True)
     def test_report_rebuild_without_stages_reuses_the_saved_ones(self):
         output = self.root / "reuse"
         run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient())

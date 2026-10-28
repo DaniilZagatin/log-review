@@ -9,8 +9,10 @@ from __future__ import annotations
 import re
 
 from pko.observability.contracts import map_revision
+from pko.observability.model_stage import methodology
+from pko.stages.inputs import INPUT_MODES, METHODOLOGY, STAGE, input_fingerprint
 
-HIERARCHY_VERSION = "1.0"
+HIERARCHY_VERSION = "1.1"
 _STAGE_ID = re.compile(r"stage-[1-9]\d{0,2}")
 
 
@@ -24,6 +26,12 @@ def validate_hierarchy(hierarchy: dict, model: dict) -> None:
         raise HierarchyError("unsupported hierarchy version")
     if hierarchy.get("map_revision") != map_revision(model):
         raise HierarchyError("hierarchy belongs to another map revision")
+    if hierarchy.get("input_mode") not in INPUT_MODES:
+        raise HierarchyError("unknown business-stage input mode")
+    if hierarchy.get("input_sha256") != input_fingerprint(model, hierarchy["input_mode"]):
+        raise HierarchyError("hierarchy belongs to another grouping input")
+    if hierarchy.get("methodology_sha256") != methodology(STAGE, METHODOLOGY)["sha256"]:
+        raise HierarchyError("hierarchy uses another grouping methodology")
     if hierarchy.get("authority_status") != "proposed":
         raise HierarchyError("business stages stay a proposal")
     operations = {node["id"] for node in model.get("nodes") or []}

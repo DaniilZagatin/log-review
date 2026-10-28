@@ -78,12 +78,13 @@ const report=JSON.parse($('process-report').textContent);
 const logging=report.logging||{},sites=array(logging.sites),tabs=[...document.querySelectorAll('#report-tabs [role=tab]')];
 const panels={map:$('panel-map')};for(const tab of tabs)if(tab.dataset.tab!=='map')panels[tab.dataset.tab]=$('panel-'+tab.dataset.tab);
 const tabTitles=Object.fromEntries(tabs.map(tab=>[tab.dataset.tab,tab.textContent]));
-let activeTab='map',returnTo=null;const panelScroll={};
+let activeTab='map',returnTo=null,suspendedMapState=null;const panelScroll={};
 $('panel-map').setAttribute('role','tabpanel');$('panel-map').setAttribute('aria-labelledby','tab-map');
 function notice(message){$('report-notice').textContent=message||'';$('report-notice').hidden=!message;if(message)announce(message);}
-function writeHash(value){try{history.replaceState(null,'','#'+value);}catch(error){}}
+function writeHash(value){try{const params=new URLSearchParams(value);if(viewMode==='stages')params.set('view','stages');history.replaceState(null,'','#'+params);}catch(error){}}
 function setTab(name,focus=false){
  if(!panels[name])name='map';
+ if(activeTab==='map'&&name!=='map')suspendedMapState=captureMapState();
  if(activeTab!=='map')panelScroll[activeTab]=panels[activeTab].scrollTop;
  activeTab=name;const onMap=name==='map';
  for(const tab of tabs){const on=tab.dataset.tab===name;tab.setAttribute('aria-selected',String(on));tab.tabIndex=on?0:-1;if(on&&focus)tab.focus();}
@@ -103,11 +104,11 @@ for(const tab of tabs){
 function showOnMap(operationId,rowId){
  const node=byId.get(text(operationId));
  if(!node){notice('Операция «'+text(operationId)+'» не найдена на карте.');return;}
- returnTo={tab:activeTab,rowId};notice('');setTab('map');writeHash('tab=map&node='+encodeURIComponent(text(operationId)));
+ returnTo={tab:activeTab,rowId,mapState:captureMapState()};notice('');setTab('map');writeHash('tab=map&node='+encodeURIComponent(text(operationId)));
  $('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];setMode('atomic');selectNode(node,true);
 }
 $('report-return').addEventListener('click',()=>{
- const target=returnTo;returnTo=null;if(!target)return;setTab(target.tab);writeHash('tab='+target.tab);
+ const target=returnTo;returnTo=null;if(!target)return;restoreMapState(target.mapState);setTab(target.tab);writeHash('tab='+target.tab);
  const row=target.rowId&&document.getElementById(target.rowId),button=row?.querySelector('button');
  if(row)row.scrollIntoView({block:'nearest'});(button||tabs.find(tab=>tab.dataset.tab===target.tab)).focus({preventScroll:true});
 });
@@ -118,7 +119,7 @@ function applyHash(){
  if(nodeId){const node=byId.get(nodeId);if(node){setTab('map');setMode('atomic');selectNode(node,true);}else notice('Операция «'+nodeId+'» не найдена на карте.');}
 }
 window.addEventListener('hashchange',applyHash);
-mapTabHook=()=>{returnTo={tab:activeTab,rowId:null};notice('');setTab('map');writeHash('tab=map');$('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];};
+mapTabHook=()=>{returnTo={tab:activeTab,rowId:null,mapState:suspendedMapState||captureMapState()};notice('');setTab('map');writeHash('tab=map');$('report-return').textContent='← Вернуться: '+tabTitles[returnTo.tab];};
 
 const L=(names,value)=>names[value]||text(value)||'—';
 const stageById=new Map(array(report.stages).map(row=>[row.id,row]));

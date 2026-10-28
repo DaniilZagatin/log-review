@@ -13,6 +13,88 @@ async function chooseStage(page, id) {
   await page.locator(`#stage-menu .stage-option[data-value=${JSON.stringify(id)}]`).click();
 }
 
+const settleMap=page=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+async function mapSnapshot(page) {
+  return page.evaluate(()=>({
+    mode:document.querySelector('#view-mode [aria-pressed=true]')?.dataset.mode,
+    expanded:[...document.querySelectorAll('.stage-frame-head')].map(n=>n.dataset.stageId).sort(),
+    zoom:getComputedStyle(document.getElementById('stage')).transform,
+    left:document.getElementById('viewport').scrollLeft,top:document.getElementById('viewport').scrollTop,
+    selected:[...document.querySelectorAll('#nodes .selected,#connections .edge.selected')].map(n=>n.dataset.nodeId||n.dataset.stageId||n.dataset.edgeId).sort(),
+    inspectorHidden:document.getElementById('inspector').hidden,
+    title:document.querySelector('#inspector-content h2')?.textContent
+  }));
+}
+
+async function checkBusinessStages(page, model) {
+  if(!await page.locator('#map-hierarchy').count())return;
+  const hierarchy=JSON.parse(await page.locator('#map-hierarchy').textContent());
+  if(!hierarchy.stages?.length)return;
+  if(await page.locator('#inspector').isVisible())await page.locator('#close-inspector').click();
+  const setMode=async mode=>{await page.locator('#view-mode [data-mode="'+mode+'"]').focus();await page.keyboard.press('Enter');await settleMap(page);};
+  const terminalIds=new Set(model.scenario?.terminal_operation_ids||[]);
+  const names={success:'Успешное завершение',refusal:'Бизнес-отказ',failure:'Технический сбой',cancelled:'Отмена',deferred:'Отложенная обработка',no_decision:'Решение не принято',unknown:'Завершение · исход не уточнён'};
+  await setMode('stages');
+  for(const stage of hierarchy.stages.filter(stage=>stage.collapsible)){
+    const card=page.locator('.kind-stage[data-stage-id="'+stage.id+'"]');
+    assert.equal(await card.count(),1,'Every closed collapsible stage is a block');
+    const members=model.nodes.filter(n=>hierarchy.membership[n.id]===stage.id),ends=members.filter(n=>terminalIds.has(n.id));
+    const badges=await card.locator('[data-outcome]').evaluateAll(items=>items.map(n=>({outcome:n.dataset.outcome,conditional:n.dataset.conditional,text:n.textContent})));
+    assert.equal(badges.length,new Set(ends.map(n=>(names[n.outcome]?n.outcome:'unknown')+':'+!!n.completion_condition)).size,'Each distinct outcome and conditional status has its own label');
+    for(const node of ends){const outcome=names[node.outcome]?node.outcome:'unknown';
+      const badge=badges.find(b=>b.outcome===outcome&&b.conditional===String(!!node.completion_condition));
+      assert(badge,'A collapsed stage retains each terminal outcome');
+      assert(badge.text.toLocaleLowerCase('ru').includes(names[outcome].toLocaleLowerCase('ru')),'Exact outcome label survives collapsing');
+      assert.equal(badge.text.startsWith('При завершении:'),!!node.completion_condition,'Conditional completion remains conditional');}
+  }
+  const stage=hierarchy.stages.find(stage=>stage.collapsible);
+  if(stage){
+    // Start with a member, then change views without changing the selected operation.
+    const member=model.nodes.find(n=>hierarchy.membership[n.id]===stage.id&&n.id!==stage.entry_operation_id)||model.nodes.find(n=>hierarchy.membership[n.id]===stage.id);
+    await setMode('atomic');
+    await page.locator('[data-node-id="'+member.id+'"]').focus();await page.keyboard.press('Enter');
+    await setMode('stages');
+    const incoming=new Map(),outgoing=new Map();
+    for(const edge of model.edges){if(!outgoing.has(edge.source))outgoing.set(edge.source,[]);outgoing.get(edge.source).push(edge.target);if(!incoming.has(edge.target))incoming.set(edge.target,[]);incoming.get(edge.target).push(edge.source);}
+    const reach=adj=>{const found=new Set([member.id]),queue=[member.id];while(queue.length)for(const next of adj.get(queue.pop())||[])if(!found.has(next)){found.add(next);queue.push(next);}return found;};
+    const before=reach(incoming),after=reach(outgoing),scope=new Set([...before,...after]);
+    const edges=new Set(model.edges.filter(e=>(before.has(e.source)&&before.has(e.target))||(after.has(e.source)&&after.has(e.target))).map(e=>e.id));
+    const assertPaths=async()=>{
+      for(const item of await page.locator('.node').evaluateAll(items=>items.map(n=>({id:n.dataset.nodeId,stage:n.dataset.stageId,lit:n.classList.contains('in-scope')})))){
+        const expected=item.id?scope.has(item.id):model.nodes.some(n=>hierarchy.membership[n.id]===item.stage&&scope.has(n.id));
+        assert.equal(item.lit,expected,'Changing view preserves canonical operation paths');}
+      for(const link of await page.locator('.edge').evaluateAll(items=>items.map(n=>({ids:JSON.parse(n.dataset.transitionIds),lit:n.classList.contains('in-scope')}))))
+        assert.equal(link.lit,link.ids.some(id=>edges.has(id)),'A collapsed stage must not introduce bypass edges into the selected path');
+    };
+    await assertPaths();await setMode('atomic');await assertPaths();await setMode('stages');
+    await page.locator('#close-inspector').click();
+    const exit=model.edges.find(e=>hierarchy.membership[e.source]===stage.id&&hierarchy.membership[e.target]!==stage.id);
+    let focusTransition=null;
+    if(exit){
+      const linkId=await page.locator('.edge').evaluateAll((links,id)=>links.find(link=>JSON.parse(link.dataset.transitionIds).includes(id))?.dataset.edgeId,exit.id);
+      if(linkId){const edge=page.locator('.edge[data-edge-id="'+linkId+'"]');focusTransition=JSON.parse(await edge.getAttribute('data-transition-ids'))[0];await edge.focus();await page.keyboard.press('Enter');}
+    }
+    await page.locator('.kind-stage[data-stage-id="'+stage.id+'"]').focus();await page.keyboard.press('Enter');await settleMap(page);
+    const head=page.locator('.stage-frame-head[data-stage-id="'+stage.id+'"]');
+    assert.equal(await head.count(),1,'The stage expands on the same canvas');
+    for(const member of model.nodes.filter(n=>hierarchy.membership[n.id]===stage.id))assert.equal(await page.locator('[data-node-id="'+member.id+'"]').count(),1,'Expansion exposes every atomic operation');
+    if(focusTransition){await page.locator('#close-inspector').click();
+      assert((await page.evaluate(()=>JSON.parse(document.activeElement.dataset.transitionIds||'[]'))).includes(focusTransition),'Focus after a redraw follows a canonical transition rather than a reused projection link id');}
+    await head.locator('.stage-frame-title').focus();await page.keyboard.press('Enter');
+    assert.equal(await page.locator('#inspector-content h2').innerText(),stage.name);
+    const members=model.nodes.filter(n=>hierarchy.membership[n.id]===stage.id);
+    for(const node of members){
+      const outgoing=model.edges.filter(e=>e.source===node.id&&e.kind!=='data'),incoming=model.edges.filter(e=>e.target===node.id&&e.kind!=='data');
+      if(outgoing.length>1)assert.equal(await page.locator('.stage-semantics [data-operation-id="'+node.id+'"][data-continuation-mode="'+(node.continuation_mode||'sequence')+'"]').count(),1);
+      if(incoming.length>1)assert.equal(await page.locator('.stage-semantics [data-operation-id="'+node.id+'"][data-join-mode="'+(node.join_mode||'any')+'"]').count(),1);
+    }
+    await page.getByRole('button',{name:'Свернуть этап на карте',exact:true}).click();await settleMap(page);
+    await page.locator('#close-inspector').click();
+    assert.equal(await page.locator('.kind-stage[data-stage-id="'+stage.id+'"]').evaluate(node=>document.activeElement===node),true,'Closing the panel returns focus to the replacement collapsed block');
+  }
+  await setMode('atomic');await page.locator('#reset').click();
+}
+
 async function checkTerminalOutcomes(page, model, legacy) {
   const ends = new Set(model.scenario?.terminal_operation_ids || []);
   const styles = await page.locator('.node').evaluateAll(nodes => nodes.map(node => {
@@ -74,11 +156,29 @@ async function checkReportTabs(page, width, height, model) {
   }
   const operation=page.locator('#logging-content button[title="Показать на карте"]').first();
   if(await operation.count()){
+    await page.locator('#tab-map').click();
+    // Keep a real selection and a non-default camera while making a temporary report jump.
+    const hasStages=await page.locator('.kind-stage').count()||await page.locator('#map-hierarchy').count();
+    if(hasStages&&await page.locator('#view-mode').isVisible()){
+      await page.locator('#view-mode [data-mode=stages]').click();
+      const block=page.locator('.kind-stage').first();
+      if(await block.count()){await block.focus();await page.keyboard.press('Enter');await settleMap(page);}
+    }
+    const node=page.locator('.node[data-node-id]').first();
+    if(await node.count()){await node.focus();await page.keyboard.press('Enter');await settleMap(page);}
+    await page.locator('#zoom-in').focus();await page.keyboard.press('Enter');
+    await page.locator('#viewport').evaluate(node=>{node.scrollLeft+=17;node.scrollTop+=23;});
+    const beforeJump=await mapSnapshot(page);
+    await page.locator('#tab-logging').click();
     await operation.click();
+    await settleMap(page);
     assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
     assert.equal(await page.locator('#inspector').isVisible(),true);
+    assert.equal(await page.locator('#view-mode [aria-pressed=true]').getAttribute('data-mode'),'atomic','Report links open the requested atomic operation');
     await page.locator('#report-return').click();
     assert.equal(await page.locator('#tab-logging').getAttribute('aria-selected'),'true');
+    await page.locator('#tab-map').click();await settleMap(page);
+    assert.deepEqual(await mapSnapshot(page),beforeJump,'Return restores the previous mode, expansion, selection, panel and camera');
   }
   await page.locator('#tab-map').focus();await page.keyboard.press('End');
   assert.equal(await page.locator('#tab-basis').getAttribute('aria-selected'),'true');
@@ -87,6 +187,7 @@ async function checkReportTabs(page, width, height, model) {
   await page.setViewportSize({width,height});
   await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
   if(await page.locator('#inspector').isVisible())await page.locator('#close-inspector').click();
+  if(await page.locator('#view-mode').isVisible())await page.locator('#view-mode [data-mode=atomic]').click();
   await page.locator('#reset').click();
 }
 
@@ -332,7 +433,7 @@ async function main() {
       }, model.edges);
       assert.deepEqual(edgeGeometry, [], 'Curves must avoid unrelated node boxes');
       await page.locator('#notation-toggle').click();
-      assert.equal(await page.locator('#notation-items .notation-item').count(), legacy?8:1);
+      assert.equal(await page.locator('#notation-items .notation-item').count(), (legacy?8:1)+(await page.locator('#view-mode').isVisible()?1:0));
       assert.match(await page.locator('#notation-panel').innerText(), /Условия выбора следующих операций указаны в карточке исходной операции/);
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('#notation-toggle').getAttribute('aria-expanded'), 'false');
@@ -365,6 +466,8 @@ async function main() {
       const reviewedBranch=[...model.nodes].reverse().find(n=>n.code_explanations?.length&&model.edges.filter(e=>e.source===n.id).length>1);
       const member=reviewedBranch||model.nodes.find(n=>n.basis&&n.code_explanations?.length)||model.nodes.find(n=>n.basis)||model.nodes[0];
       const memberGroup=groups.find(g=>g.id===member.group_id);
+      const businessHierarchy=await page.locator('#map-hierarchy').count()?JSON.parse(await page.locator('#map-hierarchy').textContent()):null;
+      const memberStage=businessHierarchy?.stages?.find(stage=>stage.id===businessHierarchy.membership?.[member.id]);
       if(memberGroup)await chooseStage(page,memberGroup.kind==='stage'?memberGroup.id:memberGroup.parent_id);
       await page.locator('[data-node-id="'+member.id+'"]').focus();
       await page.keyboard.press('Enter');
@@ -395,9 +498,9 @@ async function main() {
       assert.equal(await card.locator('dl').filter({has:page.locator('dt',{hasText:/^Обоснование$/})}).count(),0,'Basis belongs only to the unified source explanation section');
       assert.equal(await card.locator(':scope > details').filter({has:page.locator(':scope > summary',{hasText:/^Основания в исходниках/})}).count(),0,'No duplicate general evidence block');
       const stageLinks=card.locator('.operation-meta .group-links');
-      if(memberGroup){
+      if(memberGroup||memberStage){
         assert.equal(await stageLinks.count(),1);
-        assert((await stageLinks.innerText()).includes(memberGroup.name));
+        for(const group of [memberStage,memberGroup].filter(Boolean))assert((await stageLinks.innerText()).includes(group.name));
         const placement=await stageLinks.evaluate(group=>{
           const meta=group.closest('.operation-meta'),title=document.querySelector('#inspector-content h2');
           const box=group.getBoundingClientRect(),frame=meta.getBoundingClientRect(),heading=title.getBoundingClientRect();
@@ -532,6 +635,7 @@ async function main() {
       assert.equal(await page.locator('#zoom-value').innerText(), '100%');
       assert.equal(await page.locator('.node.dimmed').count(), 0);
       await checkTerminalOutcomes(page,model,legacy);
+      await checkBusinessStages(page,model);
       await checkReportTabs(page,width,height,model);
       if (output) {
         await page.locator('#reset').click();
@@ -545,5 +649,5 @@ async function main() {
     await browser.close();
   }
 }
-module.exports = {checkTerminalOutcomes, checkReportTabs};
+module.exports = {checkTerminalOutcomes, checkReportTabs, checkBusinessStages};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

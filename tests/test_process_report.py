@@ -225,6 +225,7 @@ class ReportRenderTests(unittest.TestCase):
             render_scenario_map({**data, "edges": []}, report)
 
 
+@patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True)
 class RunnerReportTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
