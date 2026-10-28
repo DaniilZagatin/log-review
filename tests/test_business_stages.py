@@ -296,10 +296,11 @@ class StageProjectionTests(unittest.TestCase):
     def project(self, cases):
         runner = _STAGE_PROJECTION_JS + """
 const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
-console.log(JSON.stringify(input.map(c=>{const view=projectScenarioStages(c.nodes,c.edges,c.stages,c.membership);
- return {items:view.items.map(item=>({id:item.id,type:item.type,members:item.members})),
+console.log(JSON.stringify(input.map(c=>{const view=projectScenarioStages(c.nodes,c.edges,c.stages,c.membership,c.open||[]);
+ return {items:view.items.map(item=>({id:item.id,type:item.type,members:item.members,open:item.open})),
   links:view.links.map(link=>({source:link.source,target:link.target,kind:link.kind,evidence_status:link.evidence_status,
-   transitions:link.transitions.map(edge=>edge.id)})),represent:c.nodes.map(n=>view.represent(n.id))};})));
+   outer:[link.outerSource,link.outerTarget],inner:link.inner,transitions:link.transitions.map(edge=>edge.id)})),
+  represent:c.nodes.map(n=>view.represent(n.id)),outer:c.nodes.map(n=>view.outer(n.id))};})));
 """
         result = subprocess.run([shutil.which("node"), "-e", runner], input=json.dumps(cases),
                                 capture_output=True, text=True, encoding="utf-8", timeout=30)
@@ -329,6 +330,23 @@ console.log(JSON.stringify(input.map(c=>{const view=projectScenarioStages(c.node
         self.assertEqual(first["represent"], ["a", "stage:stage-1", "stage:stage-1", "d"])
         self.assertEqual([item["type"] for item in second["items"]], ["node"] * 4)
         self.assertEqual(len(second["links"]), 2)
+
+    def test_an_open_stage_shows_its_operations_inside_its_frame(self):
+        pairs = [("a", "b"), ("b", "c"), ("b", "e"), ("c", "d"), ("e", "f"), ("c", "b")]
+        case = {**self.case(pairs, [{"id": "stage-1", "collapsible": True}], {"b": "stage-1", "c": "stage-1", "e": "stage-1"}),
+                "open": ["stage-1"]}
+        view, = self.project([case])
+        self.assertEqual([(item["id"], item.get("open")) for item in view["items"]],
+                         [("a", None), ("stage:stage-1", True), ("d", None), ("f", None)])
+        self.assertEqual(view["represent"], ["a", "b", "c", "d", "e", "f"], "the frame shows each operation")
+        self.assertEqual(view["outer"], ["a", "stage:stage-1", "stage:stage-1", "d", "stage:stage-1", "f"])
+        links = {(link["source"], link["target"]): link for link in view["links"]}
+        self.assertEqual({pair for pair, link in links.items() if link["inner"]}, {("b", "c"), ("c", "b"), ("b", "e")})
+        # Each way out keeps its own operation, so two exits never merge at the frame border.
+        self.assertEqual(links[("c", "d")]["outer"], ["stage:stage-1", "d"])
+        self.assertEqual(links[("e", "f")]["outer"], ["stage:stage-1", "f"])
+        self.assertEqual(links[("a", "b")]["outer"], ["a", "stage:stage-1"])
+        self.assertEqual(links[("b", "e")]["inner"], "stage:stage-1")
 
     def test_projection_draws_no_path_the_map_does_not_have(self):
         # Random graphs and partitions; stages are collapsed only when the region check allows it.
