@@ -20,7 +20,7 @@ from pko.code_tools.tools import MAX_READ_LINES, _is_blocked, _mask_secrets
 from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
 from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
-from pko.scenario_map.code_references import code_only, symbols
+from pko.scenario_map.code_references import code_only
 
 SCHEMA_VERSION = "2.0"
 STEP_KINDS = ("operation",)
@@ -87,8 +87,6 @@ class MapState(ResearchQuality):
         self._files = set(workspace.tree.files)
         self._reads: dict[str, dict[int, str]] = {}
         self.research_memory = ResearchMemory()
-        # Shared-executor hints already given; a repeated hint only adds noise.
-        self._executor_hints: set[tuple] = set()
         self._counters = { "group": 0, "step": 0, "edge": 0, "gap": 0, "review": 0, "op": 0, "note": 0, "task": 0}
         sources = [asdict(s) if is_dataclass(s) else deepcopy(s) for s in workspace.sources]
         source_ids = [s.get("id") for s in sources]
@@ -101,7 +99,7 @@ class MapState(ResearchQuality):
             "schema_version": SCHEMA_VERSION,
             # The process description is bounded by the model window, checked before research.
             "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=None),
-                         "title": "", "process_name": "", "coverage": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
+                         "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
             "sources": sources, "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,
             "research_tasks": [], "semantic_review": None,
@@ -300,7 +298,7 @@ class MapState(ResearchQuality):
             return {"ok": False, "error": "Аргументы должны быть объектом JSON"}
         args = args or {}
         allowed = {
-            "set_scope": {"title", "process_name", "coverage", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
+            "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
             "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "outcome", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
             "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis", "code_explanations"},
             "add_gap": {"description", "node_ids", "edge_ids", "task_ids", "category", "evidence"},
@@ -332,15 +330,13 @@ class MapState(ResearchQuality):
             result = getattr(self, f"_{name}")(args)
             if created:
                 self._require_new_fields(name, result["id"])
-            # Before the reference check: a removed operation withdraws automatic closures that cited it.
-            mapped = self.auto_map_tasks() if name in self.MAP_CHANGES else []
             errors = self._reference_errors()
             if errors:
                 raise MapValidationError("; ".join(errors))
             if name != "finish":
                 self.model["run"].update(status="running", reason="")
             hints = self._hints(name, result)
-            return {"ok": True, **result, **({"tasks_mapped": mapped} if mapped else {}), **({"hints": hints} if hints else {})}
+            return {"ok": True, **result, **({"hints": hints} if hints else {})}
         except (MapValidationError, TypeError, KeyError, ValueError) as exc:
             self.model = original
             self._counters = counters
@@ -365,29 +361,21 @@ class MapState(ResearchQuality):
             raise MapValidationError(f"{name}: для нового объекта заполните {', '.join(missing)}; "
                                      "при последующей правке по id передаются только изменяемые поля", "missing_fields")
 
-    BRANCH = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\b|^\s*(?:switch|when|match)\b|^\s*case\b|^\s*elif\b|^\s*default\s*:")
-    # Too common to identify one executor across operations.
-    GENERIC_SYMBOLS = frozenset({"execute", "run", "process", "handle", "call", "apply", "invoke", "main", "send",
-                                 "get", "post", "put", "build", "create", "close", "update", "save", "init"})
-    # A called name in quoted code: a constructor, function or method.
-    CALLEE = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
-    CONTROL = frozenset({"if", "for", "while", "switch", "catch", "return", "elif", "match", "when", "function", "def"})
-    MAP_CHANGES = frozenset({"upsert_step", "upsert_transition", "remove_element", "save_research_task", "add_gap"})
-    CODE_WORDS = re.compile(r"(?<![а-яё])(?:обработчик\w*|стратеги\w*|метод\w*|класс\w*|фасад\w*)", re.IGNORECASE)
+    BRANCH = re.compile(r"^\s*(?:\}\s*)?(?:else\s+)?if\b|^\s*(?:switch|when)\b|^\s*case\b|^\s*elif\b|^\s*default\s*:")
 
-    def _own_lines(self, node: dict[str, Any]) -> tuple[set, int]:
-        """Lines of the node's evidence that no other operation cites, and how many of them branch."""
+    def _atomicity_hint(self, node: dict[str, Any]) -> str:
+        """Advisory: a node resting on several branches or executor calls that no
+        other operation shows is likely to merge several process steps."""
         others = [ref for row in self.model["nodes"] if row["id"] != node["id"] for ref in row.get("evidence", [])]
         lines = {(ref["path"], line) for ref in node.get("evidence", [])
                  for line in range(ref["line_start"], ref["line_end"] + 1)}
         own = {(path, line) for path, line in lines
                if not any(o["path"] == path and o["line_start"] <= line <= o["line_end"] for o in others)}
-        return own, sum(1 for path, line in own if self.BRANCH.search(code_only(self._reads.get(path, {}).get(line, ""))))
-
-    def _atomicity_hint(self, node: dict[str, Any]) -> str:
-        """Advisory: a node resting on several branches or executor calls that no
-        other operation shows is likely to merge several process steps."""
-        own, branches = self._own_lines(node)
+        branches = 0
+        for path, line in own:
+            text = self._reads.get(path, {}).get(line, "")
+            if self.BRANCH.search(code_only(text)):
+                branches += 1
         calls = sum(1 for task in self.model["research_tasks"] if task.get("automatic")
                     for ref in task["evidence"][:1] if (ref["path"], ref["line_start"]) in own)
         long_range = len(own) >= 60
@@ -399,49 +387,6 @@ class MapState(ResearchQuality):
                 "Каждый шаг процесса должен быть отдельной операцией: если здесь несколько проверок, вызовов, расчётов "
                 "или результатов, раздели эту операцию и свяжи части переходами.")
 
-    def _shared_executor_hints(self, node: dict[str, Any]) -> list[str]:
-        """Advisory: the node's own code calls an executor through which another
-        operation performs an external action. If this node performs it too,
-        that action is a separate step; one implementation may serve several."""
-        own = node.get("evidence", [])
-        source = code_only("\n".join(self._reads.get(ref["path"], {}).get(line, "") for ref in own
-                                     for line in range(ref["line_start"], ref["line_end"] + 1)))
-        declared = symbols(source)
-        systems = {row.get("name", "").casefold() for row in node.get("external_interactions", [])}
-        # Calling into the operation that follows is a hand-over, not the same action performed twice.
-        followers = {edge["target"] for edge in self.model["edges"] if edge["source"] == node["id"]}
-        hints = []
-        for other in self.model["nodes"]:
-            rows = other.get("external_interactions") or []
-            if (other["id"] == node["id"] or other["id"] in followers or not rows
-                    or systems & {row.get("name", "").casefold() for row in rows}):
-                continue
-            refs = [ref for row in rows for ref in row["evidence"]]
-            if any(self._overlap(a, b) for a in refs for b in own):
-                continue
-            names = {ref["path"].rsplit("/", 1)[-1].rsplit(".", 1)[0] for ref in refs}
-            names = {name for name in names if name[:1].isupper()}
-            names |= {row["symbol"] for row in other.get("code_explanations", [])
-                      if row.get("kind") == "function" and len(row.get("symbol", "")) >= 4}
-            # The executor class constructed or called at the line where the other operation's
-            # external contract is invoked, e.g. `new CloseTaskCommand(...)` for closeTask.
-            for row in rows:
-                contract = str(row.get("contract") or "").casefold()
-                names |= {name for ref in row["evidence"] for line in code_only(ref.get("quote", "")).splitlines()
-                          if not contract or contract in line.casefold()
-                          for name in self.CALLEE.findall(line) if name[:1].isupper() and name not in self.CONTROL}
-            called = sorted(name for name in names - self.GENERIC_SYMBOLS - declared
-                            if re.search(r"\b" + re.escape(name) + r"\s*[.(]", source))
-            seen = (node["id"], other["id"], tuple(called))
-            if called and seen not in self._executor_hints:
-                self._executor_hints.add(seen)
-                system = next((row.get("name") for row in rows if row.get("name")), "внешняя система")
-                hints.append(f"{node['id']}: основания вызывают {', '.join(called[:3])}; через это {other['id']} "
-                             f"«{other['name']}» обращается к внешней системе ({system}). Если {node['id']} тоже выполняет "
-                             "это действие, покажи его отдельной операцией в фактическом порядке вызовов; одна реализация "
-                             "может участвовать в нескольких операциях карты.")
-        return hints[:3]
-
     def _hints(self, name: str, result: dict[str, Any]) -> list[str]:
         """Immediate, non-blocking feedback; finish still enforces the hard rules."""
         hints = []
@@ -452,11 +397,6 @@ class MapState(ResearchQuality):
             hint = self._atomicity_hint(node)
             if hint:
                 hints.append(hint)
-            hints.extend(self._shared_executor_hints(node))
-            words = self.CODE_WORDS.search(node.get("name", ""))
-            if words:
-                hints.append(f"{node['id']}: название описывает устройство кода («{words.group(0)}»), а не шаг процесса; "
-                             "назови действие и его предмет, а имена реализаций оставь в основаниях.")
             if re.search(r"\s(?:и|или|а также)\s", node.get("name", "")):
                 hints.append(f"{node['id']}: в названии несколько действий через «и»/«или»; если это отдельные шаги процесса, "
                              "сделай из них отдельные операции.")
@@ -472,11 +412,6 @@ class MapState(ResearchQuality):
                              + ". Если он не установлен, сохраните outcome=unknown и адресный пробел; название не доказывает исход.")
         if name == "upsert_transition" and result.get("id"):
             edge = next((row for row in self.model["edges"] if row["id"] == result["id"]), None)
-            entries = set(self.model["scenario"].get("entry_operation_ids", []))
-            if edge and edge["target"] in entries and edge["kind"] != "retry":
-                hints.append(f"{edge['id']}: переход возвращает ко входу {edge['target']}. Карта показывает путь одного экземпляра: "
-                             "получение следующего экземпляра, пакетный цикл и остановка обработчика в маршрут не входят; "
-                             "повтор того же действия для того же экземпляра оформи как retry.")
             if edge and edge["source"] in terminals and not nodes.get(edge["source"], {}).get("completion_condition"):
                 hints.append(f"{edge['source']}: операция объявлена конечной, но получила продолжение; задай completion_condition "
                              "или убери её из terminal_operation_ids.")
@@ -487,7 +422,6 @@ class MapState(ResearchQuality):
                     hint = self._atomicity_hint(nodes[operation["node_id"]])
                     if hint:
                         hints.append(hint)
-                    hints.extend(self._shared_executor_hints(nodes[operation["node_id"]]))
         return hints[:12]
 
     def _inspect_map(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -689,7 +623,6 @@ class MapState(ResearchQuality):
             "title": _text(args.get("title"), "title", required=True, limit=300),
             "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
             # The header and overview show these to the process owner, so they are business text.
-            "coverage": self.business_text(args["coverage"], "coverage", 1000) if args.get("coverage") else "",
             "start": self.business_text(args.get("start"), "start", MAX_TEXT),
             "end": self.business_text(args.get("end"), "end", MAX_TEXT),
             "exclusions": [self.business_text(value, "exclusions", 1000)
@@ -1076,12 +1009,6 @@ class MapState(ResearchQuality):
                 errors.append(f"{identifier}: completion_condition требует включения в terminal_operation_ids")
             if node["evidence_status"] == "unknown" and identifier not in gap_nodes:
                 errors.append(f"{identifier}: неизвестное поведение требует адресный gap")
-            # Branch lines that neither another operation cites nor this one's
-            # own transitions show are checks the map does not show.
-            hidden = self._own_lines(node)[1] - max(0, len(outgoing[identifier]) - 1)
-            if hidden >= 3 and identifier not in gap_nodes:
-                errors.append(f"{identifier}: в основаниях {hidden} проверок, которые не показаны ни отдельными операциями, "
-                              "ни переходами этой операции; раздели её по проверкам или добавь адресный gap с этой операцией")
         for edge in self.model["edges"]:
             if edge["evidence_status"] == "unknown" and not any(
                 edge["id"] in g.get("edge_ids", []) or {edge["source"], edge["target"]}.issubset(g["node_ids"])
@@ -1153,7 +1080,6 @@ class MapState(ResearchQuality):
         if errors:
             raise MapValidationError("Исправьте карту перед завершением: " + "; ".join(errors[:30]), "finish_blocked")
         partial = bool(self.model["gaps"] or self.model["source_omissions"] or self.model["scenario"]["assumptions"]
-                       or self.model["scenario"].get("coverage")
                        or any(r["disposition"] == "unavailable" for r in self.model["source_reviews"])
                        or any(r["disposition"] == "out_of_scope" and not r.get("inspected", False)
                               for r in self.model["source_reviews"])

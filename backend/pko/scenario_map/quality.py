@@ -14,9 +14,6 @@ from pko.scenario_map.code_references import dependencies, symbol_valid
 
 SEMANTIC_CHECKS = ("outcomes", "order", "routing", "atomicity", "dependencies")
 EFFECT_KINDS = ("decision", "recommendation", "command", "result", "unknown")
-# Words that describe code rather than the process; names of systems and products stay legitimate.
-JARGON = re.compile(r"(?<![а-яё])(?:парс\w*|распарс\w*|невалидн\w*|валидн\w*|резолв\w*|хендлер\w*|"
-                    r"эндпоинт\w*|инстанс\w*|дебаг\w*)|\b(?:null|true|false|payload)\b", re.IGNORECASE)
 
 
 class QualityError(ValueError):
@@ -48,8 +45,6 @@ class ResearchQuality:
         if re.search(r"`|\b\w+\.\w+\(|\b\w+\(\)|\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z]*\b|[<>]|[=!]=|&&|\|\||\b[A-Za-z_]\w*\s*[<>]=?\s*\d|"
                      r"\.(?:java|kt|kts|scala|groovy|py|ts|tsx|js|jsx|go|cs|rb|php|rs|swift|cpp|sql)(?:\b|:)", value):
             raise QualityError(f"{field}: напишите смысл бизнес-языком; код, имена функций и технические идентификаторы оставьте в основаниях")
-        if JARGON.search(value):
-            raise QualityError(f"{field}: замените программистский жаргон («{JARGON.search(value).group(0)}») предметным действием или результатом")
         return value
 
     @staticmethod
@@ -108,46 +103,6 @@ class ResearchQuality:
             return []
         return [ref for ref in evidence if ref['path'] == files[0] and
                 symbol_valid(symbol, 'field' if task['kind']=='prompt' else 'function', ref['quote'])]
-
-    def auto_map_tasks(self):
-        """Mark an automatic dependency mapped once map operations cite the read
-        declaration of its implementation and every dependency found inside it
-        is closed. The test is the one a manual mapped status passes; a task
-        closed this way reopens when the map stops satisfying it."""
-        existing = {node['id'] for node in self.model['nodes']}
-        for task in self.model['research_tasks']:
-            if task.get('auto_mapped') and (set(task['node_ids']) - existing or self._task_mapping_error(task)):
-                task.update(status='open', resolution='', node_ids=[], child_task_ids=[], auto_mapped=False)
-        cited = [ref for node in self.model['nodes'] for ref in node['evidence']]
-        closed = []
-        for _ in range(8):
-            index = {t['id']: t for t in self.model['research_tasks']}
-            before = len(closed)
-            for task in self.model['research_tasks']:
-                if not task.get('automatic') or task['status'] not in ('open', 'read', 'analyzed'):
-                    continue
-                files = self._dependency_files(task)
-                evidence = task['evidence'] + [ref for ref in cited if ref['path'] in files and ref not in task['evidence']]
-                implementation = self._dependency_implementation(task, evidence)
-                if not implementation:
-                    continue
-                nodes = [n['id'] for n in self.model['nodes']
-                         if any(self._overlap(a, b) for a in n['evidence'] for b in implementation)]
-                children = [t for t in index.values() if t.get('automatic') and t['id'] != task['id'] and
-                            any(self._overlap(ref, scope) for ref in t['evidence'][:1] for scope in implementation)]
-                if not nodes or any(child['status'] not in ('mapped', 'out_of_scope') for child in children):
-                    continue
-                kept = [child for child in children if child['status'] == 'mapped']
-                candidate = {**task, 'status': 'mapped', 'evidence': evidence, 'child_task_ids': [child['id'] for child in kept],
-                             'node_ids': list(dict.fromkeys(nodes + [n for child in kept for n in child['node_ids']]))}
-                if self._task_mapping_error(candidate):
-                    continue
-                task.update(candidate, auto_mapped=True,
-                            resolution='Реализация показана операциями карты: ' + ', '.join(candidate['node_ids'][:12]) + '.')
-                closed.append(task['id'])
-            if len(closed) == before:
-                break
-        return closed
 
     def _nodes_cover_dependency(self, node_ids, implementation):
         return any(any(a['path']==b['path'] and a['line_start']<=b['line_end'] and b['line_start']<=a['line_end']

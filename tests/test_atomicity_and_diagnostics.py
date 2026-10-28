@@ -151,25 +151,19 @@ class InlineRoleTests(unittest.TestCase):
         tasks = {t["target"]: t for t in self.state.model["research_tasks"]}
         role, child = tasks["checkRole (Role.builder)"], tasks["PprbAgent.createAgent"]
         node = self.state.dispatch("upsert_step", explain_args({"name": "Запрос сведений об операции", "evidence_status": "observed",
-            "evidence": [{"path": "source-1/Roles.java", "line_start": 4, "line_end": 4}]}))
+            "evidence": [{"path": "source-1/Roles.java", "line_start": 4, "line_end": 4},
+                         {"path": "source-1/PprbAgent.java", "line_start": 1, "line_end": 3}]}))
         self.assertTrue(node["ok"], node)
-        self.assertNotIn("tasks_mapped", node)
         blocked = self.state.dispatch("save_research_task", {"id": role["id"], "status": "mapped", "node_ids": [node["id"]],
             "resolution": "Роль раскрыта операцией запроса", "child_task_ids": [child["id"]]})
         self.assertFalse(blocked["ok"])
         self.assertIn(child["id"], blocked["error"])
-        # An operation citing the handler's declaration closes the child, then the
-        # role, by the rule a manual mapped status passes.
-        handler = self.state.dispatch("upsert_step", explain_args({"name": "Получение сведений из системы", "evidence_status": "observed",
-            "evidence": [{"path": "source-1/PprbAgent.java", "line_start": 1, "line_end": 3}]}))
-        self.assertEqual(handler["tasks_mapped"], [child["id"], role["id"]])
-        closed = {t["id"]: t for t in self.state.model["research_tasks"]}
-        self.assertEqual(closed[role["id"]]["child_task_ids"], [child["id"]])
-        self.assertEqual(set(closed[role["id"]]["node_ids"]), {node["id"], handler["id"]})
-        # Once the map stops citing the implementation, the automatic closure is withdrawn.
-        removed = self.state.dispatch("remove_element", {"kind": "step", "id": handler["id"]})
-        self.assertTrue(removed["ok"], removed)
-        self.assertEqual({closed[role["id"]]["status"], closed[child["id"]]["status"]}, {"open"})
+        child_done = self.state.dispatch("save_research_task", {"id": child["id"], "status": "mapped", "node_ids": [node["id"]],
+            "resolution": "Запрос показан операцией", "evidence": [{"path": "source-1/PprbAgent.java", "line_start": 1, "line_end": 3}]})
+        self.assertTrue(child_done["ok"], child_done)
+        done = self.state.dispatch("save_research_task", {"id": role["id"], "status": "mapped", "node_ids": [node["id"]],
+            "resolution": "Роль раскрыта операцией запроса", "child_task_ids": [child["id"]]})
+        self.assertTrue(done["ok"], done)
 
     def test_calls_of_one_resolved_implementation_share_a_task(self):
         w = self.state.workspace
