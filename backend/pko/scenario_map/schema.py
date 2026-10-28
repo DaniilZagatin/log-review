@@ -305,7 +305,7 @@ class MapState(ResearchQuality):
             "add_gap": {"description", "node_ids", "edge_ids", "task_ids", "category", "evidence"},
             "review_source": {"source_id", "disposition", "reason"},
             "review_execution": {"id", "name", "evidence", "operations", "checks"},
-            "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids", "child_task_ids"},
+            "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids", "child_task_ids", "exclusion"},
             "review_semantics": {"checks", "route_cases"},
             "save_research_note": {"id", "kind", "status", "finding", "next_action", "evidence"},
             "save_research_brief": {"project_overview", "scenario_alignment", "confirmed_facts", "flow_hypothesis", "open_questions", "next_actions", "evidence"},
@@ -623,9 +623,11 @@ class MapState(ResearchQuality):
         self.model["scenario"].update({
             "title": _text(args.get("title"), "title", required=True, limit=300),
             "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
-            "start": _text(args.get("start"), "start", required=True),
-            "end": _text(args.get("end"), "end", required=True),
-            "exclusions": _strings(args.get("exclusions", []), "exclusions"),
+            # The header and overview show these to the process owner, so they are business text.
+            "start": self.business_text(args.get("start"), "start", MAX_TEXT),
+            "end": self.business_text(args.get("end"), "end", MAX_TEXT),
+            "exclusions": [self.business_text(value, "exclusions", 1000)
+                           for value in _strings(args.get("exclusions", []), "exclusions")],
             "assumptions": _strings(args.get("assumptions", []), "assumptions"),
             **{key: _strings(args.get(key, self.model["scenario"][key]), key, limit=MAX_NODES) for key in ("entry_operation_ids", "terminal_operation_ids")},
         })
@@ -638,9 +640,9 @@ class MapState(ResearchQuality):
             raise MapValidationError("Группировка требует оснований из прочитанных материалов")
         item = {"id": self._id("groups", "group", args.get("id"), MAX_NODES),
                 "kind": _choice(args.get("kind", "stage"), "kind", GROUP_KINDS),
-                "name": _text(args.get("name"), "name", required=True, limit=300),
+                "name": self.business_text(args.get("name"), "name", 300),
                 "description": _text(args.get("description", ""), "description"),
-                "result": _text(args.get("result"), "result", required=True),
+                "result": self.business_text(args.get("result"), "result", MAX_TEXT),
                 "parent_id": _text(args.get("parent_id") or "", "parent_id") or None,
                 "evidence": evidence}
         return self._put("groups", item)
@@ -657,11 +659,17 @@ class MapState(ResearchQuality):
                 "continuation_mode": _choice(args.get("continuation_mode", "sequence"), "continuation_mode", ("sequence", "choice", "all")),
                 "join_mode": _choice(args.get("join_mode", "any"), "join_mode", ("any", "all"))}
         for field in ("description", "input", "output", "condition"):
-            item[field] = _text(args.get(field, ""), field)
+            value = _text(args.get(field, ""), field)
+            # Names of variables, methods and statuses belong to basis and code_explanations.
+            item[field] = self.business_text(value, field, MAX_TEXT) if value else value
         item["basis"] = _text(sanitize(args.get("basis", "")), "basis", limit=3000)
         item["code_explanations"] = self.code_explanations(args.get("code_explanations", []), evidence)
         item["completion_condition"] = self.business_text(args["completion_condition"], "completion_condition") if args.get("completion_condition") else ""
         item["external_interactions"] = self.external_interactions(args.get("external_interactions", []), evidence)
+        systems = {row["name"].casefold() for row in item["external_interactions"]}
+        if len(systems) > 1:
+            raise MapValidationError("Одна операция — вызов одной внешней системы: вызовы разных систем и их частичный успех "
+                                     "покажите отдельными операциями", "several_systems")
         return self._put("nodes", item)
 
     def _upsert_transition(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -689,7 +697,7 @@ class MapState(ResearchQuality):
     def _add_gap(self, args: dict[str, Any]) -> dict[str, Any]:
         item = {"description": _text(args.get("description"), "description", required=True),
                 "category": _choice(args.get("category", "unresolved_behavior"), "category",
-                                    ("missing_source", "unresolved_behavior", "unresolved_transition")),
+                                    ("missing_source", "unresolved_behavior", "unresolved_transition", "unexplored")),
                 "evidence": self._evidence(args.get("evidence", []))}
         for key in ("node_ids", "edge_ids", "task_ids"):
             item[key] = _strings(args.get(key, []), key, limit=MAX_EDGES)
@@ -1030,12 +1038,68 @@ class MapState(ResearchQuality):
                 edge["id"] in g.get("edge_ids", []) or {edge["source"], edge["target"]}.issubset(g["node_ids"])
                 for g in self.model["gaps"]):
                 errors.append(f"{edge['id']}: неизвестный переход требует gap с обеими операциями или edge_ids")
+        errors.extend(self._loop_exit_errors(nodes, outgoing))
         for group in self.model["groups"]:
             used = any(n.get("group_id") == group["id"] for n in nodes.values())
             if not used:
                 errors.append(f"{group['id']}: пустая группа; свяжите с действиями или удалите")
         errors.extend(self._detail_errors())
         errors.extend(self.quality_errors())
+        return errors
+
+    @staticmethod
+    def _loop_exit_errors(nodes: dict[str, dict], outgoing: dict[str, set[str]]) -> list[str]:
+        """A cycle without an exit edge or conditional completion is an endless loop on the map.
+
+        Loops in code end on an empty result, a break, a limit or a stop request;
+        that end is a transition out of the loop. A gap cannot replace it: an exit
+        whose behaviour is unknown is drawn with evidence_status unknown.
+        """
+        index, low, stack, on_stack, counter, cycles = {}, {}, [], set(), [0], []
+        for root in nodes:
+            if root in index:
+                continue
+            work = [(root, iter(sorted(outgoing[root])))]
+            index[root] = low[root] = counter[0]
+            counter[0] += 1
+            stack.append(root)
+            on_stack.add(root)
+            while work:
+                node, successors = work[-1]
+                advanced = False
+                for successor in successors:
+                    if successor not in index:
+                        index[successor] = low[successor] = counter[0]
+                        counter[0] += 1
+                        stack.append(successor)
+                        on_stack.add(successor)
+                        work.append((successor, iter(sorted(outgoing[successor]))))
+                        advanced = True
+                        break
+                    if successor in on_stack:
+                        low[node] = min(low[node], index[successor])
+                if advanced:
+                    continue
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[node])
+                if low[node] == index[node]:
+                    component = set()
+                    while True:
+                        member = stack.pop()
+                        on_stack.discard(member)
+                        component.add(member)
+                        if member == node:
+                            break
+                    if len(component) > 1 or node in outgoing[node]:
+                        cycles.append(component)
+        errors = []
+        for component in cycles:
+            exits = any(target not in component for member in component for target in outgoing[member])
+            if not exits and not any(nodes[member].get("completion_condition") for member in component):
+                members = ", ".join(sorted(component, key=lambda value: (len(value), value)))
+                errors.append(f"Цикл без выхода ({members}): покажите переход, по которому исполнение выходит из цикла "
+                              "(пустой результат, break, лимит, остановка), либо условное завершение completion_condition")
         return errors
 
     def _finish(self, args: dict[str, Any]) -> dict[str, Any]:

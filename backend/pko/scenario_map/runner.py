@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from pko.audit import AuditedClient, audit_run, current_audit, record, sanitize
+from pko.build import build_identity
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
 from pko.observability.export import build_handoff
@@ -87,7 +88,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                                       model_timeout=model_timeout, summary_max_tokens=summary_max_tokens,
                                       summary_mode=summary_mode, checkpoint=checkpoint, on_event=on_event)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
-                                        generated_at=datetime.now(timezone.utc).isoformat())
+                                        generated_at=datetime.now(timezone.utc).isoformat(), build=build_identity())
                     if demo:
                         model["run"]["demo"] = True
                     journal.outcome = model['run']['status']
@@ -331,7 +332,7 @@ def run_report_from_map(map_path, sources: list, out_dir: Path, *, spec=None, th
                         on_event("sources_ready", {"sources": len(workspace.sources), "files": len(workspace.tree.files)})
                     model["run"]["report_runs"] = [*model["run"].get("report_runs", []),
                                                    {"id": run_id, "trace_id": run_span.trace_id or None,
-                                                    "generated_at": datetime.now(timezone.utc).isoformat()}]
+                                                    "generated_at": datetime.now(timezone.utc).isoformat(), "build": build_identity()}]
                     map_json = json.dumps(model, ensure_ascii=False, indent=2)
                     write_outputs(out_dir, {"scenario-model": ("scenario_map.json", map_json)})
                     _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
@@ -418,6 +419,11 @@ def command_main(args) -> int:
     # Inputs are checked before research so a bad file does not waste the research budget.
     runtime = (profile_runtime_log(args.runtime_log, parse_field_map(args.runtime_fields))
                if args.runtime_log else None)
+
+    if not args.quiet:
+        build = build_identity()
+        print(f"Белка {build['version']} · код {build['code_sha256'][:12]}"
+              + (f" · git {build['git_head'][:10]}{' с изменениями' if build['git_dirty'] else ''}" if build['git_head'] else ""))
 
     def event(name, data):
         if args.quiet:

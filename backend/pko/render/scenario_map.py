@@ -298,7 +298,9 @@ function layoutScenarioGraph(nodes, edges, sizes, vertical=false, entryIds=[]) {
  const backward=valid.filter(e=>key(e.source)!==key(e.target)&&rank.get(key(e.target))<=rank.get(key(e.source))).length;
  const outerSpace=backward?80+backward*24:0,positions=new Map();
  if(!nodes.length)return {rank,positions,outerEdges,width:600,height:400};
- const secondaryMin=Math.min(...nodes.map(n=>centers.get(key(n.id))-secondarySize(key(n.id))/2)),secondaryMax=Math.max(...nodes.map(n=>centers.get(key(n.id))+secondarySize(key(n.id))/2));let primary=32;
+ const secondaryMin=Math.min(...nodes.map(n=>centers.get(key(n.id))-secondarySize(key(n.id))/2)),secondaryMax=Math.max(...nodes.map(n=>centers.get(key(n.id))+secondarySize(key(n.id))/2));
+ // A backward edge approaches its target from before the first rank; reserve that lead so curves stay on the canvas.
+ let primary=32+(backward?24:0);
  for(const level of levels){const group=groups.get(level),primarySize=Math.max(...group.map(id=>vertical?sizes.get(id).h:sizes.get(id).w));for(const id of group){const size=sizes.get(id),secondary=32+centers.get(id)-secondarySize(id)/2-secondaryMin+(vertical?0:outerSpace);positions.set(id,{x:vertical?secondary:primary,y:vertical?primary:secondary,w:size.w,h:size.h});}primary+=primarySize+(vertical?58:82);}
  const crossSize=secondaryMax-secondaryMin+64+outerSpace;let width=vertical?crossSize:primary-82+32,height=vertical?primary-58+32:crossSize;
  if(valid.some(e=>key(e.source)===key(e.target))){if(vertical)height+=70;else width+=70;}
@@ -435,7 +437,9 @@ let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null;
 
 $('page-title').textContent=scenario.title || 'Карта сценария';
 const fullDescription=text(scenario.description).trim();
-$('scenario-description').textContent=fullDescription?(fullDescription.length>260?fullDescription.slice(0,257)+'…':fullDescription):'Описание выбранного варианта сценария не задано.';
+// The header names the variant briefly; the submitted description, possibly structured text, stays in the overview.
+const briefDescription=scenario.start&&scenario.end?text(scenario.start)+' → '+text(scenario.end):/^[\[{]/.test(fullDescription)?'':fullDescription.split('\n')[0];
+$('scenario-description').textContent=briefDescription?(briefDescription.length>260?briefDescription.slice(0,257)+'…':briefDescription):'Описание выбранного варианта сценария не задано.';
 for(const [count,label,inspect] of [[nodes.length,plural(nodes.length,legacy?['узел','узла','узлов']:['операция','операции','операций'])],[validEdges.length,plural(validEdges.length,['переход','перехода','переходов'])],[gaps.length,plural(gaps.length,['пробел','пробела','пробелов']),gaps.length>0]]){
  const entry=el(inspect?'button':'span',inspect?'findings-toggle':'');if(inspect){entry.type='button';entry.setAttribute('aria-label','Посмотреть пробелы исследования');entry.addEventListener('click',showFindings);}entry.append(el('b','',count),document.createTextNode(label)); $('overview').append(entry);
 }
@@ -541,7 +545,12 @@ $('clear-selection').addEventListener('click',()=>closeInspector());
 function showOverview(){
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
  panel.append(el('p','muted',model.summary || 'Выберите операцию, чтобы увидеть её смысл, вход, результат, условия продолжения и подтверждения в коде.'));
- field(panel,'Описание варианта сценария',fullDescription);field(panel,'Начало',scenario.start);field(panel,'Завершение',scenario.end);
+ field(panel,'Описание варианта сценария',fullDescription);
+ const exclusions=array(scenario.exclusions),excludedTasks=array(model.research_tasks).filter(task=>task.status==='out_of_scope');
+ if(exclusions.length){const block=el('div','field');block.append(el('dt','','Вне исследования'));
+  for(const item of exclusions){const count=excludedTasks.filter(task=>text(task.exclusion)===text(item)).length;block.append(el('dd','',text(item)+(count?' · исключено участков кода: '+count:'')));}
+  panel.append(block);}
+ if(array(scenario.assumptions).length)field(panel,'Допущения',array(scenario.assumptions).join('; '));field(panel,'Начало',scenario.start);field(panel,'Завершение',scenario.end);
  panel.append(el('p','muted',legacy?'Архивный граф сохраняет исходные узлы. Соответствие новой методологии атомарных операций не проверено.':'Граф показывает операции выбранного сценария. Условия продолжения находятся в карточке операции. Наличие цитат не доказывает полноту карты.'));
  if(openFindings)relatedButton(panel,'Посмотреть пробелы и проверки ('+openFindings+')',showFindings);
  const details=el('details','details');details.append(el('summary','','Что проверено'));

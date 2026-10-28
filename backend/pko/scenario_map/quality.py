@@ -211,6 +211,23 @@ class ResearchQuality:
             return 'mapped требует действия карты в node_ids; чтение файла не означает раскрытие исполнения'
         return None
 
+    def _task_exclusion_error(self, task):
+        """An exclusion is a visible scope decision, not a way to close mapped work."""
+        exclusions = [value for value in self.model['scenario'].get('exclusions', [])]
+        if not exclusions:
+            return ('out_of_scope требует исключения границы: сначала зафиксируйте в set_scope(exclusions), '
+                    'какой соседний вариант или часть процесса не исследуется и почему')
+        if task.get('exclusion') not in exclusions:
+            return 'exclusion — одно из исключений set_scope: ' + ' | '.join(exclusions[:12])
+        if task['node_ids']:
+            return f"задача отражена операциями {', '.join(task['node_ids'])}: закройте её как mapped"
+        implementation = self._dependency_implementation(task, task['evidence']) if task.get('automatic') else []
+        covering = sorted({node['id'] for node in self.model['nodes'] for ref in node['evidence']
+                           for scope in implementation if self._overlap(ref, scope)})
+        if covering:
+            return f"реализация зависимости уже отражена операциями {', '.join(covering[:12])}: закройте задачу как mapped"
+        return None
+
     def _task_gap_error(self, task):
         gaps = {g['id']: g for g in self.model['gaps']}
         if not task['gap_ids']:
@@ -224,7 +241,8 @@ class ResearchQuality:
             if self._dependency_files(task):
                 if gap['category'] == 'missing_source':
                     return 'реализация зависимости есть в переданных файлах; нельзя закрыть её отсутствием внешнего кода'
-                if not self._dependency_implementation(task, task['evidence']):
+                # An unexplored dependency is honest unfinished work inside the variant, read or not.
+                if gap['category'] != 'unexplored' and not self._dependency_implementation(task, task['evidence']):
                     return 'локальная зависимость ещё не прочитана; прочитайте объявление перед фиксацией неизвестного поведения'
         return None
 
@@ -253,6 +271,8 @@ class ResearchQuality:
                 "resolution": text(args.get('resolution'), 'resolution') if status != 'open' else '',
                 "evidence": evidence, "node_ids": node_ids, "gap_ids": gap_ids,
                 "child_task_ids": child_ids, "automatic": bool(old and old.get('automatic'))}
+        if status == 'out_of_scope':
+            item['exclusion'] = args.get('exclusion') if isinstance(args.get('exclusion'), str) else None
         if old and old.get('implementation'):
             # A discovered local definition keeps its location across updates.
             item['implementation'] = old['implementation']
@@ -260,7 +280,8 @@ class ResearchQuality:
             raise QualityError("Нельзя менять цель или вид автоматически обнаруженной зависимости")
         if status in ('read', 'analyzed') and item['automatic'] and not self._dependency_implementation(item, evidence):
             raise QualityError('Для read/analyzed прочитайте объявление зависимости', target=item['target'])
-        reason = self._task_mapping_error(item) if status == 'mapped' else self._task_gap_error(item) if status == 'gap' else None
+        reason = (self._task_mapping_error(item) if status == 'mapped' else self._task_gap_error(item) if status == 'gap'
+                  else self._task_exclusion_error(item) if status == 'out_of_scope' else None)
         if reason:
             raise QualityError(reason, target=item['target'])
         return self._put('research_tasks', item)
@@ -442,6 +463,7 @@ class ResearchQuality:
                     and node.get('outcome', 'unknown') == 'unknown'
                     and not any(node['id'] in gap['node_ids'] for gap in self.model['gaps'])):
                 errors.append(f"{node['id']}: бизнес-исход конечной операции не установлен; уточните outcome по основаниям либо добавьте адресный gap")
+        errors.extend(self._reviewed_kind_errors())
         for task in self.model['research_tasks']:
             if task['status'] in ('open','read','analyzed'):
                 errors.append(f"{task['id']}: не раскрыт {task['target']}; исследуйте либо сохраните адресный gap")
@@ -450,6 +472,9 @@ class ResearchQuality:
             reason = self._task_mapping_error(task) if task['status']=='mapped' else self._task_gap_error(task) if task['status']=='gap' else None
             if reason:
                 errors.append(f"{task['id']}: действия больше не покрывают реализацию или пробел не соответствует задаче: {reason}")
+            reason = self._task_exclusion_error(task) if task['status'] == 'out_of_scope' else None
+            if reason:
+                errors.append(f"{task['id']}: исключение задачи не соответствует границе или карте: {reason}")
         if self.model['run'].get('research_tasks_overflow'):
             errors.append('Перечень зависимостей превысил лимит; сохранённый результат остаётся частичным')
         brief = self.model.get('research_brief')
@@ -458,6 +483,33 @@ class ResearchQuality:
         review = self.model.get('semantic_review')
         if not review or review.get('signature') != self.quality_signature():
             errors.append('Выполните актуальный review_semantics: после прошлой проверки изменились операции, переходы, задачи, обзоры исполнения или источники')
+        return errors
+
+    def _reviewed_kind_errors(self):
+        """What the execution review says an operation is must be visible on the graph.
+
+        A check has more than one continuation (or ends the scenario conditionally,
+        or its other outcome is an addressed gap); a call to another system names
+        that system in external_interactions.
+        """
+        errors, nodes = [], {n['id']: n for n in self.model['nodes']}
+        gap_nodes = {n for gap in self.model['gaps'] for n in gap['node_ids']}
+        outgoing = {}
+        for edge in self.model['edges']:
+            if edge['kind'] != 'data':
+                outgoing.setdefault(edge['source'], set()).add(edge['target'])
+        for review in self.model['execution_reviews']:
+            for operation in review['operations']:
+                node = nodes.get(operation['node_id'])
+                if node is None:
+                    continue
+                if (operation['kind'] == 'validation' and len(outgoing.get(node['id'], ())) < 2
+                        and not node.get('completion_condition') and node['id'] not in gap_nodes):
+                    errors.append(f"{node['id']}: обзор называет операцию проверкой, но у неё одно продолжение; покажите переход для "
+                                  "другого исхода, условное завершение completion_condition или адресный gap")
+                if operation['kind'] in ('integration', 'publish') and not node.get('external_interactions'):
+                    errors.append(f"{node['id']}: обзор называет операцию вызовом системы; заполните external_interactions — "
+                                  "адресат, назначение, направление, endpoint или contract и строки вызова")
         return errors
 
     def read_signature(self):

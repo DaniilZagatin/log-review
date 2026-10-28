@@ -1,0 +1,57 @@
+# Прогоны на рабочем ноутбуке
+
+Инструкция для проверки доработок по итогам прогонов П1679 и П3283. Реальные прогоны выполняются на ноутбуке с доступом к модели; на машине разработки они не запускались.
+
+## 1. Убедиться, что работает нужная сборка
+
+```powershell
+git fetch
+git checkout integration/rashid-observability
+git pull
+.\.venv\Scripts\python.exe -B -c "import sys; sys.path.insert(0, 'backend'); from pko.build import build_identity; print(build_identity())"
+```
+
+`code_sha256` должен совпасть со значением в сообщении о поставке, `git_head` — с последним коммитом ветки, `git_dirty` — быть `False`. Тот же отпечаток печатается в начале каждого запуска («Белка … · код …») и записывается в `scenario_map.json` → `run.build`.
+
+## 2. Подключение модели
+
+Как в прежних прогонах — через `.env` или переменные окружения: `PKO_SCENARIO_BASE_URL`, `PKO_SCENARIO_MODEL` (deepseek-v4-flash), `PKO_SCENARIO_API_KEY`, при mTLS — `PKO_SCENARIO_CLIENT_CERT` и `PKO_SCENARIO_CLIENT_KEY`. Окно по умолчанию — 524 288 токенов; `PKO_CONTEXT_WINDOW` задавать не нужно. Ключи и сертификаты в результаты не копируйте.
+
+## 3. Команды
+
+Замените пути в угловых скобках. Бюджеты одинаковы для обоих проектов.
+
+```powershell
+.\.venv\Scripts\python.exe -m pko.cli map-scenario `
+  --process-file "<путь к описанию П1679>" `
+  --source "<архив 1 П1679>.zip" "<архив 2 П1679>.zip" `
+  --out "runs\P1679" `
+  --max-steps 180 --max-seconds 7200 --model-timeout 900 `
+  --observability --observability-max-requests 24 --observability-max-seconds 1800
+```
+
+```powershell
+.\.venv\Scripts\python.exe -m pko.cli map-scenario `
+  --process-file "<путь к описанию П3283>" `
+  --source "<архив П3283>.zip" `
+  --out "runs\P3283" `
+  --max-steps 180 --max-seconds 7200 --model-timeout 900 `
+  --observability --observability-max-requests 24 --observability-max-seconds 1800
+```
+
+Если отчёт наблюдаемости нужно перестроить без нового исследования: та же команда с `--from-map "runs\P3283\scenario_map.json"` вместо `--process-file` (источники те же).
+
+## 4. Что вернуть на анализ
+
+Папку вывода целиком: `scenario_map.json`, `scenario_map.html`, `process_report.json`, `handoff\`, `audit\run_*.txt`, `report_cache.json`. Если этап отчёта завершился частично — сообщение консоли в конце запуска.
+
+## 5. Что проверить глазами
+
+- Отказы и успешные исходы — отдельные конечные операции; цвет и подпись исхода совпадают.
+- У цикла получения задач есть выход («задач больше нет» ведёт дальше, а не назад).
+- Проверки показывают обе ветви: продолжение и ранний исход («Нет решения», отказ, перенос срока).
+- Обход получения документов и повторный вызов того же исполнителя сохранены.
+- Карточки вызовов ЕКП, РМ.ОЦ, СУПЗ, GigaChat, MCP показывают внешнее взаимодействие.
+- В названиях, описаниях, входах и результатах нет имён переменных и методов.
+- В обзоре сценария («Вне исследования») перечислены исключения и сколько участков кода по ним закрыто.
+- Стрелки не выходят за края карты; вкладки отчёта открываются.

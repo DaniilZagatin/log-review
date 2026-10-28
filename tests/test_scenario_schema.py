@@ -455,7 +455,9 @@ class ScenarioMapTests(unittest.TestCase):
         payload = self.review_payload(system)
         payload["checks"]["failures"] = {"status": "unknown", "explanation": "Реализация обработчика исключений отсутствует", "evidence": []}
         self.assertFalse(self.state.dispatch("review_execution", payload)["ok"])
-        task=self.good('save_research_task',kind='question',target='Другой участок',status='out_of_scope',resolution='За границами фикстуры',evidence=self.cite())['id']
+        self.state.model["scenario"]["exclusions"] = ["Другие участки фикстуры"]
+        task=self.good('save_research_task',kind='question',target='Другой участок',status='out_of_scope',resolution='За границами фикстуры',
+                       exclusion='Другие участки фикстуры',evidence=self.cite())['id']
         unrelated = self.good("add_gap", description="Неясный бизнес-термин", task_ids=[task])["id"]
         payload["checks"]["failures"]["gap_ids"] = [unrelated]
         self.assertFalse(self.state.dispatch("review_execution", payload)["ok"])

@@ -109,12 +109,14 @@ ROUTE_CASES = {"type": "array", "maxItems": 500, "items": {
 TOOLS = [
     _tool("save_research_task", "Зарегистрировать или обновить единицу работы: функцию, ветвь, вложенный исполнитель или промпт. "
           "Задачи, найденные автоматически, видны в inspect_map(section='research_tasks'). open/read/analyzed — работа не закончена; "
-          "mapped — участок раскрыт операциями карты или дочерними задачами; gap — нужен пробел именно по этой задаче; "
-          "out_of_scope — нужна найденная причина.",
+          "mapped — участок раскрыт операциями карты или дочерними задачами; gap — пробел именно по этой задаче, "
+          "в том числе unexplored для локального кода варианта, который не исследован; out_of_scope — участок относится "
+          "к исключению из set_scope(exclusions), указанному в exclusion, и не отражён операциями карты.",
           {"id": EDIT_ID, "kind": _string("function, branch, prompt или executor; для новой задачи обязательно"),
            "target": _string("Имя исследуемого элемента; для новой задачи обязательно"),
            "status": {"type": "string", "enum": ["open", "read", "analyzed", "mapped", "out_of_scope", "gap"]},
            "resolution": _string("Что раскрыто, почему вне варианта или чего не хватает; обязательно для любого статуса, кроме open"),
+           "exclusion": _string("Для out_of_scope: дословно одно из исключений set_scope(exclusions)"),
            "evidence": EVIDENCE,
            "node_ids": _list(), "gap_ids": _list(),
            "child_task_ids": _list("Дочерние задачи из реализации родителя; mapped родителя требует их покрытия")}, ["status"]),
@@ -188,9 +190,11 @@ TOOLS = [
            "evidence_status": EVIDENCE_STATUS, "evidence": EVIDENCE, "code_explanations": CODE_EXPLANATIONS},
           []),
     _tool("add_gap", "Зафиксировать адресный пробел: какие задачи, операции или переходы он касается и каких сведений не хватает. "
-          "missing_source — нужного кода нет в источниках; непрочитанный локальный код пробелом не закрывается.",
+          "missing_source — нужного кода нет в источниках; unexplored — локальный код внутри варианта не исследован, результат "
+          "частичный; unresolved_behavior и unresolved_transition — код прочитан, но поведение или продолжение не установлено.",
           {"description": _string(), "node_ids": _list(), "edge_ids": _list(), "task_ids": _list(), "evidence": EVIDENCE,
-           "category": {"type": "string", "enum": ["missing_source", "unresolved_behavior", "unresolved_transition"]}}, ["description", "category"]),
+           "category": {"type": "string", "enum": ["missing_source", "unresolved_behavior", "unresolved_transition", "unexplored"]}},
+          ["description", "category"]),
     _tool("review_source", "Отметить источник: reviewed — его код прочитан (это не доказательство полного покрытия); out_of_scope или unavailable — с причиной. "
           "Исключение без чтения делает результат частичным; источник с кодом на карте исключить нельзя.",
           {"source_id": _string(), "disposition": {"type": "string", "enum": ["reviewed", "out_of_scope", "unavailable"]},
