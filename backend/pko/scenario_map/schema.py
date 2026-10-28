@@ -170,7 +170,7 @@ class MapState(ResearchQuality):
             if incomplete:
                 open_exits.append(identifier)
         return {
-            "nodes": [{key: deepcopy(n.get(key)) for key in ("id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition")} for n in nodes],
+            "nodes": [{key: deepcopy(n.get(key)) for key in ("id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition", "outcome", "effect_kind")} for n in nodes],
             "starts": list(self.model["scenario"]["entry_operation_ids"]),
             "ends": list(terminals),
             "unlinked": [n["id"] for n in nodes if not outgoing[n["id"]] and not incoming[n["id"]]],
@@ -401,9 +401,16 @@ class MapState(ResearchQuality):
             if re.search(r"\s(?:и|или|а также)\s", node.get("name", "")):
                 hints.append(f"{node['id']}: в названии несколько действий через «и»/«или»; если это отдельные шаги процесса, "
                              "сделай из них отдельные операции.")
-            if node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown":
+            if (node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown"
+                    and not (node['id'] in terminals and node.get('completion_condition'))):
                 hints.append(f"{node['id']}: у операции с выбором продолжения нет единственного исхода; outcome не указывай, "
                              "исходы выражаются переходами к операциям, формирующим результат.")
+        if name in ("set_scope", "upsert_step"):
+            unresolved = [identifier for identifier in sorted(terminals) if identifier in nodes
+                          and nodes[identifier].get('outcome', 'unknown') == 'unknown']
+            if unresolved:
+                hints.append("Уточните бизнес-исход конечных операций по их основаниям: " + ", ".join(unresolved)
+                             + ". Если он не установлен, сохраните outcome=unknown и адресный пробел; название не доказывает исход.")
         if name == "upsert_transition" and result.get("id"):
             edge = next((row for row in self.model["edges"] if row["id"] == result["id"]), None)
             if edge and edge["source"] in terminals and not nodes.get(edge["source"], {}).get("completion_condition"):

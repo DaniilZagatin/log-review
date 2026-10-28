@@ -171,7 +171,7 @@ TOOLS = [
            "group_id": _string("Этап для навигации, необязательно"),
            "continuation_mode": {"type": "string", "enum": ["sequence", "choice", "all"], "description": "sequence — одно продолжение; choice — выбирается одна ветвь; all — выполняются все подходящие продолжения"},
            "join_mode": {"type": "string", "enum": ["any", "all"], "description": "any — достаточно одного входящего результата; all — код ждёт все"},
-           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Только для операции, которая сама формирует итог процесса: deferred — перенос срока, no_decision — нет решения, это не refusal и не cancelled. У проверок и операций с выбором продолжения не указывай"},
+           "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Бизнес-итог операции согласно методологии; при условном завершении относится к completion_condition"},
            "effect_kind": {"type": "string", "enum": list(EFFECT_KINDS),
                            "description": "decision — решение, recommendation — рекомендация, command — отправленная команда, result — подтверждённый эффект"},
            "external_interactions": EXTERNAL_INTERACTIONS,

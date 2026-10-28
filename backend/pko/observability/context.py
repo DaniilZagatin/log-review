@@ -111,8 +111,10 @@ def build_context(model: dict, report: dict, stage_model: StageModel,
         "event_bindings": confirmed_bindings(report),
         "domain_profile_questions": [row["question"] for row in profile["measurement_questions"]] if profile else []}
     names = _code_names(model, report)
+    omitted_questions = 0
 
     def validate(arguments):
+        nonlocal omitted_questions
         errors = []
         goal = text(arguments.get("goal"))
         if not goal:
@@ -137,7 +139,14 @@ def build_context(model: dict, report: dict, stage_model: StageModel,
             else:
                 identifiers.append({"name": name, "source": item["source"], "where": text(item.get("where"), 300)})
         questions, seen = [], set()
-        for item in (arguments.get("measurement_questions") or [])[:MAX_QUESTIONS]:
+        proposed = arguments.get("measurement_questions") or []
+        if not isinstance(proposed, list):
+            errors.append("measurement_questions: ожидается список")
+            proposed = []
+        omitted_questions = max(omitted_questions, max(0, len(proposed) - MAX_QUESTIONS))
+        if omitted_questions:
+            errors.append(f"measurement_questions: лимит {MAX_QUESTIONS}; не рассмотрено вопросов: {omitted_questions}.")
+        for item in proposed[:MAX_QUESTIONS]:
             if (not isinstance(item, dict) or not _QUESTION_ID.fullmatch(str(item.get("id"))) or item["id"] in seen
                     or item.get("family") not in FAMILIES or item.get("source") not in QUESTION_SOURCES
                     or not text(item.get("question"))):

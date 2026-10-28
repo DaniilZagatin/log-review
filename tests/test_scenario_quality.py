@@ -352,6 +352,18 @@ class OperationMethodologyQualityTests(unittest.TestCase):
         self.assertNotIn(first,self.state.graph_frontier()['open_exits'])
         self.assertEqual(len(self.state.model['nodes']),2)
 
+    def test_conditional_business_refusal_preserves_the_success_continuation(self):
+        first, last = self.conditional_terminal()
+        current = next(node for node in self.state.model['nodes'] if node['id'] == first)
+        result = self.state.dispatch('upsert_step', {**current, 'continuation_mode': 'choice',
+            'completion_condition': 'Оформление отклонено по результату проверки', 'outcome': 'refusal'})
+        self.assertTrue(result['ok'], result)
+        self.assertFalse(any('outcome не указывай' in hint for hint in result.get('hints', [])))
+        self.assertTrue(self.state.dispatch('review_semantics', review_payload(self.state))['ok'])
+        self.assertNotIn(first, self.state.graph_frontier()['open_exits'])
+        self.assertFalse(any('конечная операция имеет' in error for error in self.state._finish_errors()))
+        self.assertEqual(self.state.model['edges'][0]['target'], last)
+
     def test_conditional_terminal_requires_both_stop_and_continue_cases(self):
         self.conditional_terminal()
         payload=review_payload(self.state)

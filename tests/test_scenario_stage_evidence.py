@@ -255,7 +255,8 @@ class GraphFrontierTests(unittest.TestCase):
         frontier = self.state.graph_frontier()
         self.assertEqual({node["id"] for node in frontier["nodes"]}, set(node_ids))
         for node in frontier["nodes"]:
-            self.assertEqual(set(node), {"id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition"})
+            self.assertEqual(set(node), {"id", "name", "kind", "group_id", "continuation_mode", "join_mode", "completion_condition", "outcome", "effect_kind"})
+            self.assertEqual(node['outcome'], 'unknown')
         self.assertEqual(set(frontier["unlinked"]), set(node_ids))
         self.assertNotIn("quote", json.dumps(frontier))
         frontier["nodes"][0]["name"] = "Changed by caller"

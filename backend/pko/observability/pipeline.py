@@ -7,9 +7,10 @@ only with a configured report model and share one request and time budget.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any
 
-from pko.audit import record
+from pko.audit import record, sanitize
 from pko.llm.tracing import trace_span
 from pko.observability.binding import review_bindings
 from pko.observability.context import build_context
@@ -39,7 +40,7 @@ def _completed(report: dict, stage_id: str) -> bool:
 
 
 def _run_stage(report: dict, stage_id: str, requires: tuple[str, ...], body, *, model_stage: bool = False,
-               stage_model: StageModel | None = None) -> bool:
+               stage_model: StageModel | None = None, checkpoint=None) -> bool:
     """Run ``body() -> (result_status, reasons, counts)`` with an isolated outcome."""
     blocked = [name for name in requires if not _completed(report, name)]
     with trace_span(stage_id) as span:
@@ -54,12 +55,21 @@ def _run_stage(report: dict, stage_id: str, requires: tuple[str, ...], body, *, 
                 span.set_output(counts)
             except BudgetExhausted as exc:
                 row = stage_result(stage_id, "interrupted", reasons=[str(exc)])
+            except KeyboardInterrupt:
+                report["interrupted"] = True
+                report["stages"].append(stage_result(stage_id, "interrupted", "partial",
+                    ["Этап прерван пользователем; сохранены уже полученные части отчёта."]))
+                if checkpoint:
+                    checkpoint(report)
+                raise
             except Exception as exc:  # A later stage must not cost the saved map or earlier results.
                 span.record_error(exc)
-                row = stage_result(stage_id, "failed", reasons=[f"{type(exc).__name__}: {exc}"[:500]])
+                row = stage_result(stage_id, "failed", reasons=[str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]])
         if row["execution_status"] not in ("completed", "failed"):
             span.set_status(row["execution_status"], " ".join(row["reasons"])[:500])
     report["stages"].append(row)
+    if checkpoint:
+        checkpoint(report)
     return row["execution_status"] == "completed"
 
 
@@ -113,8 +123,14 @@ def _accepted(result, errors: list[str]):
     return result
 
 
+def _errors(errors: list[str]) -> list[str]:
+    """Keep bounded, actionable diagnostics in the report rather than only their count."""
+    return [str(sanitize(error))[:500] for error in errors[:20]] + (
+        [f"Ещё замечаний: {len(errors) - 20}; подробности в журнале запуска."] if len(errors) > 20 else [])
+
+
 def run_observability(model: dict, tree, *, stage_model: StageModel | None = None,
-                      options: ReportOptions | None = None, run_id: str | None = None) -> dict:
+                      options: ReportOptions | None = None, run_id: str | None = None, checkpoint=None) -> dict:
     """Build the process report for ``model`` while its source snapshot is alive."""
     options = options or ReportOptions()
     revision = map_revision(model)
@@ -127,6 +143,17 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
               "map_revision": revision,
               "map_status": run.get("status"), "stages": [], "logging": {}, "methodology": {}}
     state: dict = {}
+
+    def save(current):
+        if checkpoint is not None:
+            snapshot = deepcopy(current)
+            if stage_model is not None:
+                snapshot["budget"] = {**stage_model.budget.snapshot(), "cache_hits": stage_model.cache_hits}
+            _validated(snapshot, model)
+            checkpoint(snapshot)
+
+    def run_stage(*args, **kwargs):
+        return _run_stage(*args, **kwargs, checkpoint=save)
 
     def inventory():
         paths = researched_paths(model)
@@ -161,17 +188,17 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         counts = reviewed["counts"]
         reasons = list(partial_map)
         if reviewed["deferred"]:
-            reasons.append(f"Не рассмотрено из-за лимитов: {len(reviewed['deferred'])}.")
+            reasons.append(f"Места логирования без рассмотренной интерпретации: {len(reviewed['deferred'])}.")
         if counts["rejected"]:
             reasons.append(f"Ответ модели отклонён проверками для мест: {counts['rejected']}.")
         if counts["conflict"]:
             reasons.append(f"Противоречивые интерпретации: {counts['conflict']}.")
-        reasons += [error for error in reviewed["errors"] if error.startswith("Исчерпан")]
+        reasons += _errors(reviewed["errors"])
         return ("partial" if reasons else "complete"), reasons, counts
 
-    _run_stage(report, "logging_inventory", (), inventory)
-    _run_stage(report, "event_operation_mapping", ("logging_inventory",), mapping)
-    _run_stage(report, "event_binding_review", ("event_operation_mapping",), binding_review,
+    run_stage(report, "logging_inventory", (), inventory)
+    run_stage(report, "event_operation_mapping", ("logging_inventory",), mapping)
+    run_stage(report, "event_binding_review", ("event_operation_mapping",), binding_review,
                model_stage=True, stage_model=stage_model)
     bindings_partial = [] if any(row["id"] == "event_binding_review" and row["result_status"] == "complete"
                                  for row in report["stages"]) else [
@@ -185,7 +212,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         report["methodology"]["process_context"] = methodology("process_context")["sha256"]
         context, errors = build_context(model, report, stage_model, options.profile)
         report["process_context"] = _accepted(context, errors)
-        reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else [])
+        reasons = partial_map + _errors(errors)
         return ("partial" if reasons else "complete"), reasons, {
             "questions": len(context["measurement_questions"]), "outcomes": len(context["outcomes"])}
 
@@ -193,7 +220,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         report["methodology"]["fact_requirements"] = methodology("fact_requirements")["sha256"]
         facts, errors = build_facts(model, report, stage_model, options.profile)
         report["facts"] = _accepted(facts, errors)
-        reasons = partial_map + bindings_partial + ([f"Отклонено проверками: {len(errors)}."] if errors else [])
+        reasons = partial_map + bindings_partial + _errors(errors)
         return ("partial" if reasons else "complete"), reasons, {
             "facts": len(facts), "observed": sum(bool(fact["observed_by"]) for fact in facts)}
 
@@ -209,8 +236,8 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
         changes, errors, pending = build_changes(model, report, stage_model, registry, options.profile,
                                                  reserve=min(2, stage_model.budget.max_requests // 4))
         report["instrumentation"] = changes
-        reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
-            ([f"Факты без рассмотренных доработок из-за лимитов: {', '.join(pending)}."] if pending else [])
+        reasons = partial_map + _errors(errors) + \
+            ([f"Факты без рассмотренных доработок: {', '.join(pending)}."] if pending else [])
         return ("partial" if reasons else "complete"), reasons, {
             "changes": len(changes), "unresolved_locations": sum(c["location"]["status"] == "unresolved" for c in changes)}
 
@@ -225,7 +252,7 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
                                             {fact["id"]: fact for fact in report["facts"]})
         report["metrics"] = metrics
         report["requested_facts"] = register_missing_facts(report)
-        reasons = partial_map + ([f"Отклонено проверками: {len(errors)}."] if errors else []) + \
+        reasons = partial_map + _errors(errors) + \
             ([] if _completed(report, "instrumentation_plan") else
              ["Доработки не построены: зависимости метрик от них не указаны."]) + \
             ([f"Направления профиля без определения модели: {', '.join(m['name'] for m in uncovered)}."] if uncovered else [])
@@ -253,27 +280,30 @@ def run_observability(model: dict, tree, *, stage_model: StageModel | None = Non
             metric["fact_ids"] += [by_request[need] for need, _ in needs
                                    if need in by_request and by_request[need] not in metric["fact_ids"]]
             metric["missing_facts"] = [fact for need, fact in needs if need not in by_request]
+            related = set(metric["fact_ids"])
+            metric["change_ids"] = list(dict.fromkeys([*metric["change_ids"],
+                *(change["id"] for change in changes if related.intersection(change["fact_ids"]))]))
             metric["readiness"] = readiness(metric, coverage_rows, options.runtime, fact_index)
         for row in requested:
             row["status"], row["fact_id"] = (("assessed", by_request[row["id"]]) if row["id"] in by_request
                                              else ("unassessed", None))
         report["reconciled_facts"] = sorted(new_ids)
         open_requests = [row["id"] for row in requested if row["status"] == "unassessed"]
-        reasons = ([f"Отклонено проверками: {len(errors) + len(change_errors)}."] if errors or change_errors else []) + \
+        reasons = _errors(errors + change_errors) + \
             ([f"Остались неоформленными: {', '.join(open_requests)}."] if open_requests else []) + \
             ([f"Факты без рассмотренных доработок: {', '.join(pending)}."] if pending else [])
         return ("partial" if reasons else "complete"), reasons, {
             "requested": len(requested), "facts": len(facts), "changes": len(changes)}
 
-    _run_stage(report, "process_context", (), process_context, model_stage=True, stage_model=stage_model)
-    _run_stage(report, "fact_requirements", ("process_context",), fact_requirements,
+    run_stage(report, "process_context", (), process_context, model_stage=True, stage_model=stage_model)
+    run_stage(report, "fact_requirements", ("process_context",), fact_requirements,
                model_stage=True, stage_model=stage_model)
-    _run_stage(report, "logging_coverage", ("fact_requirements",), coverage)
-    _run_stage(report, "instrumentation_plan", ("logging_coverage",), instrumentation,
+    run_stage(report, "logging_coverage", ("fact_requirements",), coverage)
+    run_stage(report, "instrumentation_plan", ("logging_coverage",), instrumentation,
                model_stage=True, stage_model=stage_model)
-    _run_stage(report, "metric_catalog", ("logging_coverage",), metric_catalog,
+    run_stage(report, "metric_catalog", ("logging_coverage",), metric_catalog,
                model_stage=True, stage_model=stage_model)
-    _run_stage(report, "requirement_reconciliation", ("metric_catalog",), reconciliation,
+    run_stage(report, "requirement_reconciliation", ("metric_catalog",), reconciliation,
                model_stage=True, stage_model=stage_model)
     if stage_model is not None:
         report["budget"] = {**stage_model.budget.snapshot(), "cache_hits": stage_model.cache_hits}

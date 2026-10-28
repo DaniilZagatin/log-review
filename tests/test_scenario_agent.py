@@ -38,6 +38,16 @@ class ScenarioAgentTests(unittest.TestCase):
         self.assertEqual(sum(node["continuation_mode"] == "choice" for node in model["nodes"]), 2)
         self.assertEqual(model["scenario"]["entry_operation_ids"], ["step-1"])
         self.assertEqual(model["scenario"]["terminal_operation_ids"], ["step-5", "step-10", "step-18"])
+        terminals = {node['id']: node for node in model['nodes']
+                     if node['id'] in model['scenario']['terminal_operation_ids']}
+        self.assertEqual({key: node['outcome'] for key, node in terminals.items()},
+                         {'step-5': 'refusal', 'step-10': 'refusal', 'step-18': 'success'})
+        for identifier, node in terminals.items():
+            self.assertEqual(node['kind'], 'operation')
+            self.assertTrue(node['evidence'], 'A business refusal must be grounded like a successful outcome')
+            self.assertTrue(any(edge['target'] == identifier for edge in model['edges']))
+            self.assertFalse(any(edge['source'] == identifier for edge in model['edges']),
+                             'A refusal is allowed to finish its branch without a wrapper end node')
         self.assertEqual(sum(edge["kind"] == "branch" for edge in model["edges"]), 4)
         self.assertEqual(sum(edge["kind"] in ("call", "event") for edge in model["edges"]), 2)
         self.assertIn("Учебный детерминированный", model["summary"])

@@ -12,7 +12,7 @@ import re
 from pko.observability.context import confirmed_bindings, text
 from pko.observability.evidence import EvidenceRegistry
 from pko.observability.facts import LIFECYCLES
-from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel
+from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel, request_failure
 
 STAGE = "instrumentation"
 ACTIONS = ("map_existing", "join", "enrich", "add_field", "add_event", "move_emit", "fix_delivery")
@@ -157,6 +157,9 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
                 if change is not None:
                     seen.add(change["id"])
                     result.append(change)
+            if len(items) > MAX_CHANGES:
+                problems.append(f"changes: получено {len(items)} изменений при лимите {MAX_CHANGES}; "
+                                f"не рассмотрено {len(items) - MAX_CHANGES}. Разбей или сократи предложения.")
             result, dependency_problems = settle_dependencies(result, accepted)
             return result, problems + dependency_problems
 
@@ -173,6 +176,9 @@ def build_changes(model: dict, report: dict, stage_model: StageModel, registry: 
             continue
         except BudgetExhausted as exc:
             errors.append(str(exc))
+            return accepted[earlier:], errors, pending + [fact["id"] for rest in [packet, *queue] for fact in rest]
+        except Exception as exc:
+            errors.append(request_failure(exc))
             return accepted[earlier:], errors, pending + [fact["id"] for rest in [packet, *queue] for fact in rest]
         # Items kept across a repair are settled again against everything accepted so far.
         settled, dependency_problems = settle_dependencies(result or [], accepted)

@@ -19,7 +19,7 @@ MAX_METRICS = 15
 _METRIC_ID = re.compile(r"m-[1-9]\d{0,2}")
 _STRINGS = {"type": "array", "items": {"type": "string"}}
 RULES = ("open_cases", "late_events", "retries", "duplicates")
-READINESS = ("methodology", "facts", "semantics", "correlation", "data", "calculator")
+READINESS = ("methodology", "definition", "facts", "semantics", "correlation", "data", "calculator")
 
 TOOL = {
     "name": "submit_metric_definitions",
@@ -66,6 +66,7 @@ GAP_TEXT = {
     ("runtime", "no_records"): "в переданных логах нет записей с этим ключом",
     ("runtime", "key_unknown"): "ключ записи не установлен, наличие в логах не проверено",
     ("quality", "issues"): "в переданных логах есть нарушения качества",
+    ("quality", "unknown"): "качество записей этого события не установлено",
 }
 _AXIS_COMPONENTS = {"semantics": ("semantics",), "correlation": ("correlation",), "timing": ("timing", "time_source"),
                     "fields": ("fields",)}
@@ -89,6 +90,20 @@ def readiness(metric: dict, coverage: dict, runtime: dict | None, facts: dict | 
             (axis, row["axes"].get(axis)) in GAP_TEXT for row in rows for axis in axes) or not rows else "established"
     components.update(data="not_provided" if runtime is None else "sample_only", calculator="not_implemented")
     blockers = ["Методика не согласована уполномоченным специалистом."]
+    definition_gaps = []
+    rule_names = {"open_cases": "незавершённых экземпляров", "late_events": "поздних записей",
+                  "retries": "повторных попыток", "duplicates": "повторных доставок"}
+    for rule, label in rule_names.items():
+        if not text((metric.get("rules") or {}).get(rule)):
+            definition_gaps.append(f"Не задано правило учёта {label}; требуется решение владельца методики.")
+    if metric.get("requires_interval"):
+        for key, label in (("start_fact_id", "начала"), ("finish_fact_id", "окончания")):
+            if not metric.get(key):
+                definition_gaps.append(f"Для длительности не определён факт {label} интервала.")
+        if metric.get("start_fact_id") and metric.get("start_fact_id") == metric.get("finish_fact_id"):
+            definition_gaps.append("Границы длительности ссылаются на один факт; различение начала и окончания не определено.")
+    components["definition"] = "incomplete" if definition_gaps else "specified"
+    blockers.extend(definition_gaps)
     if undefined:
         blockers.append("Факты для этого направления не определены.")
     if missing:
@@ -122,6 +137,8 @@ def profile_gaps(metrics: list[dict], report: dict, profile: dict | None) -> lis
                       "counting_unit": "other", "measure_unit": "", "definition": direction["known"],
                       "population": "", "window": "", "start_fact_id": None, "finish_fact_id": None,
                       "rules": dict.fromkeys(RULES, ""), "fact_ids": [], "change_ids": [],
+                      "requires_interval": any(q.get("profile_question_id") == direction["question_id"]
+                                               and q.get("family") == "duration" for q in report["process_context"]["measurement_questions"]),
                       "missing_facts": [], "open_questions": list(direction["open_points"]),
                       "profile_direction": direction["id"], "source": "profile",
                       "value": None, "value_reason": "Значения метрик в этой версии не вычисляются.",
@@ -142,12 +159,18 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel, profile: d
                             "change": change["change"]} for change in report.get("instrumentation") or []],
                "domain_metric_directions": profile["metric_directions"] if profile else []}
     directions = {row["id"] for row in profile["metric_directions"]} if profile else set()
+    duration_questions = {row["id"] for row in context["measurement_questions"] if row.get("family") == "duration"}
+    omitted = 0
 
     def validate(arguments):
+        nonlocal omitted
         items = arguments.get("metrics")
         if not isinstance(items, list):
             return None, ["metrics: ожидается список"]
         accepted, errors, seen = [], [], set()
+        omitted = max(omitted, max(0, len(items) - MAX_METRICS))
+        if omitted:
+            errors.append(f"metrics: лимит {MAX_METRICS}; не рассмотрено определений: {omitted}.")
         for item in items[:MAX_METRICS]:
             if not isinstance(item, dict) or not _METRIC_ID.fullmatch(str(item.get("id"))) or item["id"] in seen:
                 errors.append("metrics: у каждой метрики уникальный id вида m-N")
@@ -189,6 +212,8 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel, profile: d
                 "population": text(item["population"], 1000), "window": text(item["window"], 500),
                 "start_fact_id": item.get("start_fact_id") or None, "finish_fact_id": item.get("finish_fact_id") or None,
                 "rules": {name: text(rules.get(name), 500) for name in RULES},
+                "requires_interval": bool(duration_questions.intersection(item["question_ids"]) or
+                                          item.get("start_fact_id") or item.get("finish_fact_id")),
                 "fact_ids": list(dict.fromkeys(fact_ids)), "change_ids": list(dict.fromkeys(item.get("change_ids") or [])),
                 "missing_facts": [{"meaning": text(fact["meaning"], 500), "lifecycle": fact["lifecycle"],
                                    "operation_ids": list(dict.fromkeys(fact.get("operation_ids") or []))} for fact in missing],
@@ -198,7 +223,13 @@ def build_metrics(model: dict, report: dict, stage_model: StageModel, profile: d
                 "provenance": "model_proposal", "authority_status": "proposed"})
         return accepted, errors
 
-    return stage_model.ask(STAGE, payload, TOOL, validate, key=lambda metric: metric["id"])
+    result, errors = stage_model.ask(STAGE, payload, TOOL, validate, key=lambda metric: metric["id"])
+    if result and len(result) > MAX_METRICS:
+        omitted = max(omitted, len(result) - MAX_METRICS)
+        result = result[:MAX_METRICS]
+    if omitted:
+        errors = [*errors, f"Каталог ограничен {MAX_METRICS} определениями; не рассмотрено из ответа: {omitted}."]
+    return result, errors
 
 
 def register_missing_facts(report: dict) -> list[dict]:

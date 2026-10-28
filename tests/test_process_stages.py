@@ -129,7 +129,7 @@ class CoverageTests(unittest.TestCase):
         runtime = {"event_counts": {"application.accepted": 3}, "fields_by_event": {"application.accepted": ["request_id"]},
                    "missing_case_count": 0, "invalid_time_count": 0}
         row = assess_fact(self.fact(), self.binding(), self.sites, runtime)
-        self.assertEqual((row["axes"]["runtime"], row["axes"]["quality"]), ("records_present", "no_issues_found"))
+        self.assertEqual((row["axes"]["runtime"], row["axes"]["quality"]), ("records_present", "unknown"))
         absent = assess_fact(self.fact(), self.binding(), self.sites, {**runtime, "event_counts": {}})
         self.assertEqual(absent["axes"]["runtime"], "no_records")
 

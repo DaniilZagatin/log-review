@@ -139,9 +139,9 @@ const actionNames={map_existing:'Закрепить существующую з�
 const keyStatusNames={proposed:'предложен, не согласован',existing:'существующий',not_set:'не задан'};
 const timingNames={before_commit:'до сохранения',after_commit:'после сохранения',after_response:'после ответа',on_failure:'при сбое',unknown:'не установлен'};
 const unitNames={case:'экземпляр процесса',operation_execution:'выполнение операции',attempt:'попытка',event:'запись',other:'другое'};
-const readinessNames={proposed:'Предложена, не согласована',available:'Все факты наблюдаются в коде',incomplete:'Не все факты наблюдаются',established:'Установлено для всех фактов',gaps:'Есть пробелы',
+const readinessNames={proposed:'Предложена, не согласована',available:'Все факты наблюдаются в коде',incomplete:'Есть неопределённые требования',specified:'Правила и границы указаны',established:'Установлено для всех фактов',gaps:'Есть пробелы',
  not_provided:'Данные не переданы',sample_only:'Только выборка',not_implemented:'Не реализовано'};
-const componentTitles={methodology:'Методика',facts:'Факты',semantics:'Смысл записей',correlation:'Связь с экземпляром',timing:'Момент и время',fields:'Поля',data:'Данные',calculator:'Вычисление'};
+const componentTitles={methodology:'Методика',definition:'Правила и границы определения',facts:'Факты',semantics:'Смысл записей',correlation:'Связь с экземпляром',timing:'Момент и время',fields:'Поля',data:'Данные',calculator:'Вычисление'};
 const familyNames={volume:'объём',duration:'длительность',outcome:'исходы',quality:'качество',cost:'стоимость',other:'другое'};
 const sourceNames={scenario:'описание процесса',code:'код',proposal:'предложение',hypothesis:'гипотеза',map:'карта'};
 const executionNames={not_run:'Не запускался',running:'Выполняется',completed:'Выполнен',failed:'Ошибка',blocked:'Заблокирован зависимостью',interrupted:'Прерван лимитом'};
@@ -180,7 +180,7 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
    const name=block(el('div','',fact.id+' · '+fact.meaning));if(fact.applicability!=='applicable')name.append(el('div','muted',fact.applicability==='conditional'?'При условии: '+fact.condition:'Применимость не установлена'));
    const ops=el('td');if(fact.outside_application)ops.append(el('div','muted','Вне приложения'));opButtons(ops,fact.operation_ids,tr.id);
    tr.append(cell(name),ops,cell(L(roleNames,fact.lifecycle)),...Object.keys(axisTitles).map(axis=>axisCell(row,axis)));body.append(tr);}
-  const requested=array(report.requested_facts);if(requested.length){root.append(el('h4','','Факты, которые запросили определения метрик'));list(root,requested.map(fact=>fact.meaning+' — '+L(roleNames,fact.lifecycle)+' (метрика '+fact.requested_by+', не оценивался)'));}}
+  const requested=array(report.requested_facts);if(requested.length){root.append(el('h4','','Факты, которые запросили определения метрик'));list(root,requested.map(fact=>fact.meaning+' — '+L(roleNames,fact.lifecycle)+' (метрика '+fact.requested_by+', '+(fact.status==='assessed'?'оценён: '+fact.fact_id:'не оценивался')+')'));}}
  root.append(el('h3','','Места логирования'));
  const controls=el('div','report-controls'),statusLabel=el('label','','Смысл записи '),statusSelect=el('select'),searchLabel=el('label','','Поиск '),search=el('input');
  for(const [value,label] of [['all','Все места'],...Object.entries(reviewNames)]){const option=el('option','',label);option.value=value;statusSelect.append(option);}
@@ -263,9 +263,14 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
 
 // Basis: context, provenance, stage states and limits of this report.
 (()=>{const root=$('basis-content'),context=report.process_context,runNames={completed:'Исследование завершено',partial:'Частичная карта',failed:'Исследование не выполнено'};
+ const delivery=report.delivery||{},handoff=delivery.handoff||{},deliveryNames={completed:'Сохранён',partial:'Сохранены готовые части',failed:'Не сохранён',not_run:'Не строился'},traceNames={disabled:'Не включён',complete:'Доступные спаны отправлены',partial:'Часть спанов не отправлена',failed:'Не удалось отправить',pending:'Отправка не подтверждена'};
+ const handoffText=handoff.status==='completed'?'Папка handoff рядом с этим файлом: описание процесса, onboarding.json, CSV событий, доработок и метрик, manifest с контрольными суммами.':(deliveryNames[handoff.status]||'Сохранение комплекта не подтверждено')+(handoff.reason?' — '+handoff.reason:'');
  fields(root,[['Карта',L(runNames,report.map_status)],['Ревизия карты',report.map_revision],['Запуск',report.run_id],['Версия отчёта',report.report_version],
   ['Запросы к модели',report.budget?report.budget.used_requests+' из '+report.budget.max_requests+(report.budget.cache_hits?'; повторно использовано проверенных ответов: '+report.budget.cache_hits:''):'Этапы с моделью не выполнялись'],
-  ['Комплект передачи','Папка handoff рядом с этим файлом: описание процесса, onboarding.json, CSV событий, доработок и метрик, manifest с контрольными суммами.']]);
+  ['Сохранение отчёта',deliveryNames[delivery.report?.status]||'Не подтверждено'],['Комплект передачи',handoffText],
+  ['Локальный журнал',delivery.audit?.status==='complete'?'Записан до публикации результата':delivery.audit?.status==='partial'?'Есть ошибки записи до публикации результата':'Состояние не передано'],
+  ['Экспорт трассы',delivery.trace_export?L(traceNames,delivery.trace_export.status)+' (до публикации результата)':'Состояние не передано']]);
+ if(delivery.report?.reason)root.append(el('p','report-notice',delivery.report.reason));
  root.append(el('h3','','Контекст процесса'));
  if(!context)root.append(el('p','report-empty','Контекст процесса не построен.'));
  else{fields(root,[['Цель',context.goal],['Начало',context.start],['Завершение',context.finish],['Экземпляр процесса',context.case?.subject],
@@ -281,7 +286,7 @@ function axisCell(row,axis){const value=row?.axes?.[axis];return cell(L(axisName
  for(const stage of array(report.stages)){const reasons=block();for(const reason of array(stage.reasons))reasons.append(el('div','',reason));if(!array(stage.reasons).length)reasons.append(el('span','muted','—'));
   const tr=el('tr');tr.append(cell(stage.title||stage.id),cell(L(executionNames,stage.execution_status)),cell(L(resultNames,stage.result_status)),cell(reasons));body.append(tr);}
  root.append(el('h3','','Происхождение выводов'));
- list(root,['Операции и связи карты подтверждены прочитанным кодом. Отметка «Подтверждено кодом» не означает, что исполнение наблюдалось в работающей системе.',
+ list(root,['Основания операций и связей различаются: подтверждение кодом, вывод или неизвестность указаны у каждого элемента карты. Отметка «Подтверждено кодом» не означает, что исполнение наблюдалось в работающей системе.',
   'Места логирования — статические кандидаты детектора: включённость логирования, достижимость вызова и доставка записи не установлены.',
   'Смысл записи предложен моделью по выданным строкам кода и проверен программно: ссылки на строки, операции-кандидаты, поля и непротиворечивость. Бизнес-смысл не согласован специалистом.',
   'Контекст, необходимые факты, доработки и определения метрик — предложения. Покрытие рассчитано программно по каждой оси отдельно.']);

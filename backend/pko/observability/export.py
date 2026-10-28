@@ -136,8 +136,8 @@ def _markdown(model: dict, report: dict) -> str:
 def build_handoff(model: dict, report: dict, published: dict[str, str], trace: dict) -> dict[str, tuple[str, str]]:
     """Return ``{kind: (file name, content)}`` including the manifest.
 
-    ``published`` maps already written neighbour files (map, report) to their
-    content so the manifest can fingerprint them.
+    ``published`` contains the exact final neighbour-file payloads (map, report).
+    The caller publishes those same bytes after this package is written.
     """
     validate_report(report, model)
     if report["map_revision"] != map_revision(model):
@@ -145,6 +145,7 @@ def build_handoff(model: dict, report: dict, published: dict[str, str], trace: d
     events, changes, metrics = _events(model, report), _changes(report), _metrics(report)
     onboarding = {"format": FORMAT, "run_id": report.get("run_id"), "map_revision": report["map_revision"],
                   "report_version": report["report_version"], "domain_profile": report.get("domain_profile"),
+                  "delivery": report.get("delivery"),
                   "process_context": report.get("process_context"),
                   "operations": [{"operation_id": node["id"], "name": node.get("name")}
                                  for node in model.get("nodes") or [] if node.get("kind") == "operation"],
@@ -166,6 +167,7 @@ def build_handoff(model: dict, report: dict, published: dict[str, str], trace: d
     manifest = {"format": FORMAT, "generated_at": datetime.now(timezone.utc).isoformat(),
                 "run_id": report.get("run_id"), "map_revision": report["map_revision"],
                 "report_version": report["report_version"], "files": checksums,
+                "delivery": report.get("delivery"),
                 "stages": {row["id"]: row["execution_status"] for row in report["stages"]},
                 "trace": trace,
                 "limitations": ["Все факты, доработки и определения — предложения; методика не согласована.",

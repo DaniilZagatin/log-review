@@ -203,6 +203,48 @@ def tracing_enabled() -> bool:
     return _tracer is not None
 
 
+def tracing_health() -> dict:
+    """Health of this run's optional exporter, independent of analysis success."""
+    journal = current_audit()
+    state = journal.trace_export_state if journal is not None else {"status": "disabled", "failures": []}
+    if state["status"] == "disabled":
+        if _tracer is not None:
+            state["status"] = "pending"
+        elif os.environ.get("PKO_PHOENIX_ENABLED", "").lower() in ("1", "true", "yes", "on"):
+            state["status"] = "failed"
+    return sanitize({**state, "failures": list(state["failures"])})
+
+
+def _trace_failure(operation: str, exc: Exception | str) -> None:
+    failure = {"operation": operation, "reason": str(sanitize(str(exc)))[:500]}
+    journal = current_audit()
+    if journal is not None:
+        state = journal.trace_export_state
+        state["status"] = "partial" if _tracer is not None else "failed"
+        if len(state["failures"]) < 20:
+            state["failures"].append(failure)
+        else:
+            state["omitted_failures"] = state.get("omitted_failures", 0) + 1
+    record("trace_export_failure", **failure)
+
+
+def _start_span(name: str):
+    """Exporter admission cannot prevent a model, tool or pipeline operation."""
+    try:
+        span = _tracer.start_span(name)
+    except Exception as exc:
+        _trace_failure("start_span", exc)
+        return None
+    try:
+        context = span.get_span_context()
+        # span_id is the local correlation ID supplied by RunAudit.emit.
+        record("phoenix_span", name=name, trace_id=f"{context.trace_id:032x}",
+               otel_span_id=f"{context.span_id:016x}")
+    except Exception as exc:
+        _trace_failure("span_context", exc)
+    return span
+
+
 def init_phoenix_tracing() -> Optional[object]:
     """Включить экспорт трейсов в Phoenix, если задан `PKO_PHOENIX_ENABLED`.
 
@@ -262,16 +304,23 @@ def span_limits() -> Any:
     return SpanLimits(max_span_attributes=_MAX_SPAN_ATTRIBUTES)
 
 
-def flush_tracing() -> None:
+def flush_tracing() -> dict:
     """Дождаться отправки спанов: CLI-процесс завершается сразу после прогона."""
     if _provider is None:
-        return
+        return tracing_health()
     try:
         if not _provider.force_flush(_FLUSH_TIMEOUT_MS):
+            _trace_failure("flush", "Не все спаны отправлены за отведённое время.")
             print("Phoenix: не все спаны успели уйти за "
                   f"{_FLUSH_TIMEOUT_MS // 1000} с — трейс может быть неполным", file=sys.stderr)
+        else:
+            journal = current_audit()
+            if journal is not None and not journal.trace_export_state["failures"]:
+                journal.trace_export_state["status"] = "complete"
     except Exception as exc:
+        _trace_failure("flush", exc)
         print(f"Phoenix: ошибка отправки спанов ({sanitize(str(exc))})", file=sys.stderr)
+    return tracing_health()
 
 
 @contextmanager
@@ -295,11 +344,13 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
             yield _AuditedSpan(_NoopSpan(), local)
             return
 
-        from opentelemetry import trace as otel_trace
-
         is_session = name in SESSION_PASSES
         step = attributes.get("step") if name in STEP_PASSES else None
-        span = _tracer.start_span(_display_name(name, step))
+        span = _start_span(_display_name(name, step))
+        if span is None:
+            yield _AuditedSpan(_NoopSpan(), local)
+            return
+        from opentelemetry import trace as otel_trace
         handle = _SpanHandle(span, session=is_session, step=step)
         handle._raw(_KIND, "AGENT" if is_session else "CHAIN")
         handle._raw("pko.span", name)
@@ -308,11 +359,6 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
         if journal is not None:
             handle._raw("pko.run_id", journal.run_id)
             handle._raw("session.id", journal.run_id)
-        try:
-            context = span.get_span_context()
-            record("phoenix_span", name=name, trace_id=f"{context.trace_id:032x}", span_id=f"{context.span_id:016x}")
-        except Exception:
-            pass
         observed = _AuditedSpan(handle, local)
         for key, value in attributes.items():
             observed.set_attribute(key, value)
@@ -337,6 +383,27 @@ def trace_span(name: str, **attributes: Any) -> Iterator[Any]:
 
 
 def trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict) -> dict:
+    """A local tool span and matching call/result exist even without Phoenix."""
+    function = call.get("function") or {}
+    name, call_id = str(function.get("name") or "tool"), str(call.get("id") or "")
+    with audit_span(name, {"kind": "tool", "tool_call_id": call_id}) as local:
+        record("tool_started", tool_call_id=call_id, name=name,
+               arguments=_bounded(_arguments(function.get("arguments"))))
+        try:
+            reply = _trace_tool_call(answer, state, call)
+        except BaseException as exc:
+            record("tool_failed", tool_call_id=call_id, name=name,
+                   error_type=type(exc).__name__, error_message=str(exc))
+            raise
+        content = reply.get("content") if isinstance(reply, dict) else reply
+        payload = _parsed(content)
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            local.set_status("rejected", str(payload.get("error", ""))[:500])
+        record("tool_result", tool_call_id=call_id, name=name, result=_bounded(payload))
+        return reply
+
+
+def _trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict) -> dict:
     """Выполнить вызов инструмента агента в TOOL-спане текущего шага.
 
     `answer` — `_answer_call` прохода: протокол или инструмент репозитория.
@@ -346,11 +413,12 @@ def trace_tool_call(answer: Callable[[Any, dict], dict], state: Any, call: dict)
     if _tracer is None:
         return answer(state, call)
 
-    from opentelemetry import trace as otel_trace
-
     function = call.get("function") or {}
     name = str(function.get("name") or "tool")
-    span = _tracer.start_span(name)
+    span = _start_span(name)
+    if span is None:
+        return answer(state, call)
+    from opentelemetry import trace as otel_trace
     handle = _SpanHandle(span)
     handle._raw(_KIND, "TOOL")
     handle._raw("tool.name", name)
@@ -413,8 +481,6 @@ class TracedClient:
         if _tracer is None:
             return self.delegate.chat(messages, **kwargs)
 
-        from opentelemetry import trace as otel_trace
-
         session = _SESSION.get()
         if session is not None:
             new, first = session.fresh(messages)
@@ -426,7 +492,10 @@ class TracedClient:
         spec = getattr(self.delegate, "spec", None)
         model = str(getattr(spec, "model", "") or "")
 
-        span = _tracer.start_span(f"llm · {model}" if model else "llm")
+        span = _start_span(f"llm · {model}" if model else "llm")
+        if span is None:
+            return self.delegate.chat(messages, **kwargs)
+        from opentelemetry import trace as otel_trace
         handle = _SpanHandle(span)
         attributes: dict[str, Any] = {
             _KIND: "LLM",

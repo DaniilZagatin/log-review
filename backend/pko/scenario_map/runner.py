@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from pko.audit import AuditedClient, audit_run, record
+from pko.audit import AuditedClient, audit_run, current_audit, record, sanitize
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
 from pko.observability.export import build_handoff
@@ -29,7 +29,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  model_timeout: float = DEFAULT_MODEL_TIMEOUT,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
                  observability: bool = False, report_options: ReportOptions | None = None,
-                 on_event=None) -> dict:
+                 on_event=None, demo: bool = False) -> dict:
     scenario = scenario.strip()
     if not scenario:
         raise PkoError("Нужно описание процесса: вариант сценария, который требуется восстановить по коду.",
@@ -88,9 +88,11 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                                       summary_mode=summary_mode, checkpoint=checkpoint, on_event=on_event)
                     model["run"].update(id=run_id, trace_id=run_span.trace_id,
                                         generated_at=datetime.now(timezone.utc).isoformat())
+                    if demo:
+                        model["run"]["demo"] = True
                     journal.outcome = model['run']['status']
                     # A failed local journal must be visible in the result, not only on stderr.
-                    model["run"]["audit_status"] = "partial" if journal.failed else "complete"
+                    _refresh_audit_status(model)
                     run_span.set_attribute("pko.run.status", model["run"]["status"])
                     run_span.set_attribute("pko.model.mode", model['run'].get('model_mode', 'provider_default'))
                     with trace_span("render_map"):
@@ -104,7 +106,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         output_span.set_output({"files": ["scenario_map.json", "scenario_map.html"]})
                     if observability:
                         _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
-                                        map_json=map_json, options=report_options or ReportOptions(),
+                                        options=report_options or ReportOptions(),
                                         client=client, spec=spec, model_timeout=model_timeout)
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
@@ -120,45 +122,149 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
             flush_tracing()
 
 
-def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace_id, map_json: str,
+def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace_id,
                     options: ReportOptions, client, spec, model_timeout: float) -> dict | None:
     """Report stages, tabbed HTML and handoff after the map is published.
 
     A report failure leaves the published map; a handoff failure leaves both.
     Outcomes are recorded in ``model["run"]``.
     """
+    stage_model = None
+    latest = None
+    interrupted = False
+    # A rerun must not inherit an earlier delivery outcome.
+    for key in ("process_report", "process_report_error", "handoff", "handoff_error", "delivery"):
+        model["run"].pop(key, None)
+
+    def checkpoint(report):
+        nonlocal latest
+        latest = report
+        with trace_span("save_report_checkpoint"):
+            write_outputs(out_dir, {
+                "report-checkpoint": ("process_report.checkpoint.json", json.dumps(report, ensure_ascii=False, indent=2)),
+                "report-cache": (CACHE_FILE, json.dumps(stage_model.cache, ensure_ascii=False)),
+            })
+
     try:
         with trace_span("process_observability") as report_span:
             stage_model = _report_model(options, client, spec, model_timeout, _load_cache(out_dir))
-            report = run_observability(model, workspace.tree, options=options, run_id=run_id, stage_model=stage_model)
+            report = run_observability(model, workspace.tree, options=options, run_id=run_id,
+                                       stage_model=stage_model, checkpoint=checkpoint)
             report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
-        with trace_span("render_report"):
-            html = render_scenario_map(model, report)
-        with trace_span("publish_report") as output_span:
-            report_json = json.dumps(report, ensure_ascii=False, indent=2)
-            write_outputs(out_dir, {
-                "process-report": ("process_report.json", report_json),
-                "scenario-map": ("scenario_map.html", html),
-                "report-cache": (CACHE_FILE, json.dumps(stage_model.cache, ensure_ascii=False)),
-            })
-            output_span.set_output({"files": ["process_report.json", "scenario_map.html"]})
-        model["run"]["process_report"] = "process_report.json"
+    except KeyboardInterrupt:
+        interrupted = True
+        report = latest
+        if report is not None:
+            report["interrupted"] = True
+        model["run"]["process_report_error"] = "Отчёт прерван пользователем; сохранены готовые части."
     except Exception as exc:
-        record("process_report_failed", error_type=type(exc).__name__, error=str(exc)[:500])
-        model["run"]["process_report_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
+        record("process_report_failed", error_type=type(exc).__name__, error=message)
+        model["run"]["process_report_error"] = message
+        report = latest
+    if report is None:
+        journal = current_audit()
+        if journal is not None:
+            journal.outcome = "interrupted" if interrupted else "partial"
+        _refresh_audit_status(model)
+        model["run"]["delivery"] = {"report": {"status": "failed", "reason": model["run"]["process_report_error"]},
+                                    "handoff": {"status": "not_run"},
+                                    "audit": {"status": model["run"]["audit_status"], "scope": "до публикации результата"},
+                                    "trace_export": model["run"]["trace_export"]}
+        write_outputs(out_dir, {"scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+                               "scenario-map": ("scenario_map.html", render_scenario_map(model))})
+        if interrupted:
+            raise KeyboardInterrupt
         return None
-    try:
-        with trace_span("export_handoff") as export_span:
-            files = build_handoff(model, report, {"scenario_map.json": map_json, "process_report.json": report_json},
-                                  {"run_id": run_id, "trace_id": trace_id or None,
-                                   "local_audit": f"audit/run_{run_id}.txt"})
-            write_outputs(out_dir / "handoff", files)
-            export_span.set_output({"files": [name for name, _ in files.values()]})
-        model["run"]["handoff"] = "handoff/manifest.json"
-    except Exception as exc:
-        record("handoff_failed", error_type=type(exc).__name__, error=str(exc)[:500])
-        model["run"]["handoff_error"] = f"{type(exc).__name__}: {exc}"[:500]
+
+    incomplete = interrupted or bool(model["run"].get("process_report_error")) or any(
+        row["execution_status"] != "completed" or row["result_status"] != "complete" for row in report["stages"])
+    report["delivery"] = {"report": {"status": "partial" if incomplete else "completed"},
+                          "handoff": {"status": "not_run"}, "audit": {"status": "complete"}}
+    if model["run"].get("process_report_error"):
+        report["delivery"]["report"]["reason"] = model["run"]["process_report_error"]
+    journal = current_audit()
+    if journal is not None:
+        journal.outcome = "interrupted" if interrupted else "partial" if incomplete else model["run"]["status"]
+    trace = {"run_id": run_id, "trace_id": trace_id or None, "local_audit": f"audit/run_{run_id}.txt"}
+    cache = stage_model.cache if stage_model is not None else {}
+
+    # At most two publication attempts. The map saved before research of the report
+    # survives either failure. Never publish a successful handoff claim before its write.
+    for attempt in range(2):
+        try:
+            with trace_span("publish_report", attempt=attempt + 1):
+                report["delivery"]["handoff"] = {"status": "completed", "path": "handoff/manifest.json"}
+                _refresh_audit_status(model)
+                saved = _report_files(model, report, cache)
+                try:
+                    with trace_span("export_handoff"):
+                        files = build_handoff(model, report, _published_json(saved), trace)
+                        write_outputs(out_dir / "handoff", files)
+                    # Export diagnostics can change audit health. Rebuild the manifest
+                    # against the exact final JSON bytes if that happened.
+                    _refresh_audit_status(model)
+                    final = _report_files(model, report, cache)
+                    if _published_json(final) != _published_json(saved):
+                        write_outputs(out_dir / "handoff", build_handoff(model, report, _published_json(final), trace))
+                    saved = final
+                except Exception as exc:
+                    message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
+                    record("handoff_failed", error_type=type(exc).__name__, error=message)
+                    report["delivery"]["handoff"] = {"status": "failed", "reason": message}
+                    model["run"]["handoff_error"] = message
+                    if journal is not None:
+                        journal.outcome = "interrupted" if interrupted else "partial"
+                    _refresh_audit_status(model)
+                    saved = _report_files(model, report, cache)
+                write_outputs(out_dir, saved)
+            break
+        except Exception as exc:
+            message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
+            record("report_publication_failed", attempt=attempt + 1, error=message)
+            report["delivery"]["report"] = {"status": "partial", "reason": "Повторная публикация после ошибки: " + message}
+            model["run"]["process_report_error"] = message
+            if journal is not None:
+                journal.outcome = "interrupted" if interrupted else "partial"
+            if attempt:
+                raise
+    if interrupted:
+        raise KeyboardInterrupt
     return report
+
+
+def _refresh_audit_status(model: dict) -> None:
+    """Health known immediately before publication, not a claim about future I/O."""
+    journal = current_audit()
+    model["run"]["trace_export"] = {**flush_tracing(), "scope": "до публикации результата"}
+    if journal is not None:
+        journal.flush()
+    status = "partial" if journal is not None and journal.failed else "complete"
+    model["run"]["audit_status"] = status
+    if model["run"].get("report_runs"):
+        model["run"]["report_runs"][-1]["audit_status"] = status
+
+
+def _published_json(files: dict) -> dict[str, str]:
+    return {name: content for name, content in files.values() if name in ("scenario_map.json", "process_report.json")}
+
+
+def _report_files(model: dict, report: dict, cache: dict) -> dict:
+    report["delivery"]["audit"] = {"status": model["run"]["audit_status"], "scope": "до публикации результата"}
+    report["delivery"]["trace_export"] = model["run"]["trace_export"]
+    model["run"]["process_report"] = "process_report.json"
+    model["run"]["delivery"] = report["delivery"]
+    if report["delivery"]["handoff"]["status"] == "completed":
+        model["run"]["handoff"] = "handoff/manifest.json"
+        model["run"].pop("handoff_error", None)
+    else:
+        model["run"].pop("handoff", None)
+    with trace_span("render_report"):
+        html = render_scenario_map(model, report)
+    return {"scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+            "process-report": ("process_report.json", json.dumps(report, ensure_ascii=False, indent=2)),
+            "scenario-map": ("scenario_map.html", html),
+            "report-cache": (CACHE_FILE, json.dumps(cache, ensure_ascii=False))}
 
 
 def _check_report_options(options: ReportOptions | None) -> None:
@@ -229,10 +335,8 @@ def run_report_from_map(map_path, sources: list, out_dir: Path, *, spec=None, th
                     map_json = json.dumps(model, ensure_ascii=False, indent=2)
                     write_outputs(out_dir, {"scenario-model": ("scenario_map.json", map_json)})
                     _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
-                                    map_json=map_json, options=report_options or ReportOptions(),
+                                    options=report_options or ReportOptions(),
                                     client=None, spec=spec, model_timeout=model_timeout)
-                    journal.outcome = "completed" if model["run"].get("process_report") else "failed"
-                    model["run"]["report_runs"][-1]["audit_status"] = "partial" if journal.failed else "complete"
                     run_span.set_output({"process_report": model["run"].get("process_report"),
                                          "error": model["run"].get("process_report_error")})
                     return model

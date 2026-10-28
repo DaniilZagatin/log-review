@@ -22,23 +22,29 @@ _PRIVATE = re.compile(r"reasoning|chain.of.thought|thinking|api.?key|password|se
 
 def sanitize(value: Any) -> Any:
     """Best-effort credential masking; never export provider private reasoning."""
+    # A message tree can have thousands of string leaves. Read the environment
+    # once for this value, but never reuse secrets across independent calls.
+    secrets = tuple(secret for key, secret in os.environ.items() if _PRIVATE.search(key) and len(secret) >= 8)
+    return _sanitize(value, secrets)
+
+
+def _sanitize(value: Any, secrets: tuple[str, ...]) -> Any:
     if isinstance(value, dict):
         if str(value.get("type", "")).lower() in ("reasoning", "thinking", "redacted_thinking"):
             return {"type": "omitted_private_reasoning"}
-        return {str(k): sanitize(v) for k, v in value.items() if not _PRIVATE.search(str(k))}
+        return {str(k): _sanitize(v, secrets) for k, v in value.items() if not _PRIVATE.search(str(k))}
     if isinstance(value, (list, tuple)):
-        return [sanitize(v) for v in value]
+        return [_sanitize(v, secrets) for v in value]
     if not isinstance(value, str):
         return value if value is None or isinstance(value, (bool, int, float)) else str(value)
     # Tool arguments and OpenInference messages can contain nested JSON strings.
     if value.lstrip().startswith(("{", "[")):
         try:
-            return json.dumps(sanitize(json.loads(value)), ensure_ascii=False)
+            return json.dumps(_sanitize(json.loads(value), secrets), ensure_ascii=False)
         except (ValueError, TypeError, RecursionError):
             pass
-    for key, secret in os.environ.items():
-        if _PRIVATE.search(key) and len(secret) >= 8:
-            value = value.replace(secret, "[REDACTED]")
+    for secret in secrets:
+        value = value.replace(secret, "[REDACTED]")
     value = re.sub(r"<(think|thinking|reasoning)>.*?</\1>", "[OMITTED]", value, flags=re.S | re.I)
     value = re.sub(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", "[REDACTED]", value, flags=re.S)
     value = re.sub(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+", r"\1[REDACTED]", value)
@@ -53,6 +59,7 @@ class RunAudit:
         self.sequence = 0
         self.spans = 0
         self.failed = False
+        self.trace_export_state: dict[str, Any] = {"status": "disabled", "failures": []}
         self.clients: list[AuditedClient] = []
 
     def emit(self, event: str, **fields: Any) -> None:

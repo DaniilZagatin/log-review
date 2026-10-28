@@ -58,6 +58,7 @@ class ScenarioMapTests(unittest.TestCase):
 
     def node(self, system=None, kind="operation", evidence=None):
         identifier = self.good("upsert_step", name="Получение результата", kind="operation",
+                         outcome="success" if kind == "end" else "unknown",
                          continuation_mode="choice" if kind == "decision" else "all" if kind == "fork" else "sequence",
                          description="Самостоятельное действие над обращением", evidence_status="observed",
                          evidence=evidence or self.cite())["id"]
@@ -182,6 +183,20 @@ class ScenarioMapTests(unittest.TestCase):
             self.good("upsert_step", **{**node, "outcome": outcome})
         self.assertFalse(self.state.dispatch("upsert_step", {**node, "outcome": "invented"})["ok"])
         self.assertTrue(self.state.dispatch("upsert_step", {**node, "kind": "operation", "outcome": "deferred"})["ok"])
+
+    def test_unknown_terminal_outcome_requires_an_addressed_gap_and_stays_partial(self):
+        _, first, last = self.complete_small_map()
+        node = next(node for node in self.state.model['nodes'] if node['id'] == last)
+        self.good('upsert_step', **{**node, 'outcome': 'unknown'})
+        self.review_current_operations()
+        response = self.state.dispatch('finish', {'summary': 'Исследованы переданные источники'})
+        self.assertFalse(response['ok'])
+        self.assertIn('бизнес-исход конечной операции не установлен', response['error'])
+        self.good('add_gap', description='Не установлен итог получения результата', node_ids=[first], evidence=self.cite())
+        self.assertTrue(any('бизнес-исход конечной операции' in error for error in self.state.quality_errors()),
+                        'An unrelated gap must not stand in for the terminal outcome')
+        self.good('add_gap', description='Не установлен бизнес-итог последней операции', node_ids=[last], evidence=self.cite())
+        self.assertEqual(self.good('finish', summary='Неуточнённый исход сохранён явно')['status'], 'partial')
 
     def test_decision_requires_labels_even_for_non_branch_edges(self):
         system, first, last = self.complete_small_map()

@@ -84,7 +84,8 @@ class RepairAndDependencyTests(unittest.TestCase):
         report = run(client)
         self.assertTrue(report["facts"])
         self.assertEqual(stage(report, "fact_requirements")["execution_status"], "completed")
-        self.assertIn("Отклонено", " ".join(stage(report, "fact_requirements")["reasons"]))
+        self.assertEqual(stage(report, "fact_requirements")["result_status"], "partial")
+        self.assertIn("question_ids", " ".join(stage(report, "fact_requirements")["reasons"]))
 
     def test_broken_dependency_chain_is_dropped_transitively_not_the_report(self):
         def chained(answer, payload):

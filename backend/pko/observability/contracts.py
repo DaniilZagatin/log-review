@@ -63,6 +63,13 @@ def validate_report(report: dict, model: dict) -> None:
         raise ReportError("stage results must be a list with unique ids")
     for row in stages:
         stage_result(row.get("id"), row.get("execution_status"), row.get("result_status"))
+    delivery = report.get("delivery")
+    if delivery is not None:
+        for key, allowed in (("report", ("completed", "partial", "failed")),
+                             ("handoff", ("not_run", "completed", "failed")),
+                             ("audit", ("complete", "partial"))):
+            if not isinstance(delivery, dict) or (delivery.get(key) or {}).get("status") not in allowed:
+                raise ReportError(f"delivery.{key}: unknown publication status")
     logging = report.get("logging") or {}
     sites = logging.get("sites") or []
     site_ids = [site.get("id") for site in sites]
@@ -154,3 +161,9 @@ def _validate_downstream(report: dict, operations: set, binding_ids: set, confir
             raise ReportError(f"{label}: metric values are not computed in this version")
         if any(ref not in facts for ref in metric.get("fact_ids") or []) or                 any(ref not in change_ids for ref in metric.get("change_ids") or []):
             raise ReportError(f"{label}: refers to unknown facts or changes")
+    metric_ids = {metric["id"] for metric in report.get("metrics") or []}
+    for requested in report.get("requested_facts") or []:
+        if requested.get("requested_by") not in metric_ids or requested.get("status") not in ("unassessed", "assessed"):
+            raise ReportError("requested_facts: unknown metric or assessment status")
+        if requested["status"] == "assessed" and requested.get("fact_id") not in facts:
+            raise ReportError("requested_facts: an assessed requirement must refer to a fact")

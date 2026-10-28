@@ -90,7 +90,7 @@ class ModelFaultTests(unittest.TestCase):
         stage_model = StageModel(client, ReportBudget(max_requests=requests, deadline=time.monotonic() + 60))
         return run_observability(data or model(), source or tree(), stage_model=stage_model)
 
-    def test_transient_network_error_is_retried_inside_one_request(self):
+    def test_transient_network_error_counts_every_physical_request(self):
         scripted, calls = ScriptedReportClient(), []
 
         class Flaky:
@@ -104,8 +104,8 @@ class ModelFaultTests(unittest.TestCase):
         with patch("pko.scenario_map.model_retry.time.sleep"):
             report = self.run_with(Flaky())
         self.assertEqual(stage(report, "event_binding_review")["result_status"], "complete")
-        self.assertEqual(report["budget"]["by_stage"]["event_binding"], 1)
-        self.assertEqual(len(calls), report["budget"]["used_requests"] + 1)
+        self.assertEqual(report["budget"]["by_stage"]["event_binding"], 2)
+        self.assertEqual(len(calls), report["budget"]["used_requests"])
 
     def test_answer_as_fenced_json_text_is_accepted(self):
         scripted = ScriptedReportClient()

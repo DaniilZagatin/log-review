@@ -10,7 +10,7 @@ not accepted until a specialist reviews it.
 from __future__ import annotations
 
 from pko.observability.evidence import EvidenceRegistry, overlaps
-from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel
+from pko.observability.model_stage import BudgetExhausted, PacketTooLarge, StageModel, request_failure
 
 STAGE = "event_binding"
 ROLES = ("request", "queued", "start", "result", "refusal", "error", "retry", "duplicate",
@@ -212,8 +212,17 @@ def review_bindings(model: dict, sites: list[dict], wrappers: list[dict], regist
                 reasons[batch[0]["id"]] = [str(exc)]
             continue
         except BudgetExhausted as exc:
-            deferred += [site["id"] for rest in [batch, *queue] for site in rest]
+            remaining = [site["id"] for rest in [batch, *queue] for site in rest]
+            deferred += remaining
+            reasons.update({identity: [str(exc)] for identity in remaining})
             errors.append(str(exc))
+            break
+        except Exception as exc:
+            reason = request_failure(exc)
+            remaining = [site["id"] for rest in [batch, *queue] for site in rest]
+            deferred += remaining
+            reasons.update({identity: [reason] for identity in remaining})
+            errors.append(reason)
             break
         errors += problems
         by_site: dict[str, list[dict]] = {}

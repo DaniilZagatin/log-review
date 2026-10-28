@@ -438,6 +438,10 @@ class ResearchQuality:
                 errors.append(f"{node['id']}: несколько направлений требуют условий на всех выходах; общий участок не должен терять категорию маршрута")
             if node['id'] in self.model['scenario'].get('terminal_operation_ids', []) and node.get('effect_kind','unknown')=='unknown':
                 errors.append(f"{node['id']}: укажите effect_kind — decision/recommendation/command/result; не подменяйте решение достигнутым эффектом")
+            if (node['id'] in self.model['scenario'].get('terminal_operation_ids', [])
+                    and node.get('outcome', 'unknown') == 'unknown'
+                    and not any(node['id'] in gap['node_ids'] for gap in self.model['gaps'])):
+                errors.append(f"{node['id']}: бизнес-исход конечной операции не установлен; уточните outcome по основаниям либо добавьте адресный gap")
         for task in self.model['research_tasks']:
             if task['status'] in ('open','read','analyzed'):
                 errors.append(f"{task['id']}: не раскрыт {task['target']}; исследуйте либо сохраните адресный gap")

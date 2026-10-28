@@ -33,6 +33,38 @@ def _timing(lifecycle: str, moments: set[str]) -> str:
     return "consistent"
 
 
+def _runtime_quality(runtime: dict, event: str, wanted: set[str]) -> str:
+    """Quality within this key's records; a union of field names proves no completeness."""
+    by_event = runtime.get("quality_by_event")
+    stats = by_event.get(event) if isinstance(by_event, dict) else None
+    if not isinstance(stats, dict):
+        # Old profiles have only file-wide errors and a union of field names.
+        # Neither establishes quality for the records observing this fact.
+        return "unknown"
+    count = stats.get("record_count")
+    fields = stats.get("field_counts")
+    if (type(count) is not int or count <= 0 or count != runtime["event_counts"].get(event)
+            or not isinstance(fields, dict)):
+        return "unknown"
+    uncertain = False
+    for name in ("missing_case_count", "invalid_time_count", "missing_event_id_count", "conflicting_event_id_count"):
+        amount = stats.get(name)
+        if type(amount) is not int or amount < 0:
+            uncertain = True
+        elif amount:
+            return "issues"
+    for name in wanted:
+        if name not in fields:
+            if stats.get("field_names_truncated") is False:
+                return "issues"
+            uncertain = True
+        elif type(fields[name]) is not int or not 0 <= fields[name] <= count:
+            uncertain = True
+        elif fields[name] < count:
+            return "issues"
+    return "unknown" if uncertain else "no_issues_found"
+
+
 def _record_axes(fact: dict, binding: dict, site: dict, runtime: dict | None) -> dict:
     """Axes established by one record alone; nothing is borrowed from another record."""
     sources = [source for source in fact["field_sources"] if source["binding_id"] == binding["id"]]
@@ -62,10 +94,9 @@ def _record_axes(fact: dict, binding: dict, site: dict, runtime: dict | None) ->
     elif site.get("key_status") not in _LITERAL_KEYS:
         axes["runtime"], axes["quality"] = "key_unknown", "not_assessed"
     elif site.get("event_key") in runtime["event_counts"]:
-        delivered = set(runtime["fields_by_event"].get(site["event_key"], []))
-        wanted = {source["field"] for source in sources}
-        issues = runtime["missing_case_count"] or runtime["invalid_time_count"] or (wanted - delivered)
-        axes["runtime"], axes["quality"] = "records_present", "issues" if issues else "no_issues_found"
+        wanted = {source["field"] for source in sources} | set(binding["case_fields"])
+        axes["runtime"] = "records_present"
+        axes["quality"] = _runtime_quality(runtime, site["event_key"], wanted)
     else:
         axes["runtime"], axes["quality"] = "no_records", "not_assessed"
     return axes

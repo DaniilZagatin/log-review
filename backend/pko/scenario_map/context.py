@@ -120,6 +120,11 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
         # The rows themselves are the complete ID index; do not duplicate it.
         result.pop("all_node_ids")
         result["nodes"] = [{key: node.get(key, "") for key in fields} for node in nodes]
+        for node, row in zip(nodes, result["nodes"]):
+            # Preserve business outcomes without repeating empty placeholders on
+            # every intermediate operation and displacing the complete registry.
+            if node.get("id") in terminals or node.get("outcome") not in (None, "", "unknown"):
+                row.update(outcome=node.get("outcome", "unknown"), effect_kind=node.get("effect_kind", "unknown"))
         result["names_complete"] = True
     else:
         result["names_complete"] = False

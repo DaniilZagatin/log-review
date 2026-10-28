@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from pko.llm.client import ChatResult
 from pko.scenario_map.agent import _brief
 from pko.scenario_map.compaction import compact_research_context, summary_request, validate_summary
-from pko.scenario_map.context import COMPACTION_MARKER, compact_context, _size
+from pko.scenario_map.context import COMPACTION_MARKER, compact_context, _size, graph_identity
 from pko.scenario_map.schema import MapState
 from scenario_script import scripted_summary
 from test_scenario_schema import workspace
@@ -63,6 +63,17 @@ class ScenarioCompactionTests(unittest.TestCase):
         self.assertEqual(self.state.model["context_summary"]["revision"], 2)
         self.assertEqual(self.state.model["nodes"], original)
         self.assertEqual(sum(COMPACTION_MARKER in row.get("content", "") for row in after), 1)
+
+    def test_registry_preserves_terminal_business_outcome_and_conditional_stop(self):
+        self.state.model['nodes'] = [{'id': 'step-1', 'name': 'Отказать в оформлении', 'kind': 'operation',
+            'outcome': 'refusal', 'effect_kind': 'result', 'continuation_mode': 'choice',
+            'completion_condition': 'Заявка отклонена', 'join_mode': 'any', 'group_id': None}]
+        self.state.model['scenario']['terminal_operation_ids'] = ['step-1']
+        registry = graph_identity(self.state.model)
+        row = registry['nodes'][0]
+        self.assertEqual((row['outcome'], row['effect_kind'], row['completion_condition']),
+                         ('refusal', 'result', 'Заявка отклонена'))
+        self.assertEqual(registry['terminal_operation_ids'], ['step-1'])
 
     def test_bad_summary_and_provider_error_fall_back_once_without_losing_existing_summary(self):
         self.compress(lambda _: scripted_summary())

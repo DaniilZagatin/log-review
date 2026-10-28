@@ -13,6 +13,83 @@ async function chooseStage(page, id) {
   await page.locator(`#stage-menu .stage-option[data-value=${JSON.stringify(id)}]`).click();
 }
 
+async function checkTerminalOutcomes(page, model, legacy) {
+  const ends = new Set(model.scenario?.terminal_operation_ids || []);
+  const styles = await page.locator('.node').evaluateAll(nodes => nodes.map(node => {
+    const surface = node.querySelector('.node-surface'), shape = surface.firstElementChild;
+    const tokens = getComputedStyle(node);
+    return {id:node.dataset.nodeId, classes:[...node.classList], label:node.querySelector('.node-terminal')?.textContent,
+      accessible:node.getAttribute('aria-label'), glow:getComputedStyle(surface).filter,
+      stroke:getComputedStyle(shape).stroke, success:tokens.getPropertyValue('--success').trim(),
+      danger:tokens.getPropertyValue('--danger').trim()};
+  }));
+  for (const style of styles) {
+    const node = model.nodes.find(node=>node.id===style.id), terminal=legacy?node.kind==='end':ends.has(node.id);
+    const negative=['refusal','failure','cancelled'].includes(node.outcome);
+    assert.equal(!!style.label,terminal,'Only declared terminal operations have an outcome label');
+    assert.equal(style.classes.includes('terminal-success'),terminal&&node.outcome==='success','Success comes from the explicit business outcome');
+    assert.equal(style.classes.includes('terminal-negative'),terminal&&negative,'Refusal ends its branch even when its code returned normally');
+    if(terminal){
+      assert(style.accessible.includes(style.label),'The outcome is accessible without relying on colour');
+      if(node.completion_condition)assert(style.label.startsWith('При завершении:'),'Conditional outcomes must not imply every execution ends here');
+      if(node.outcome==='success'||negative)assert.match(style.glow,/drop-shadow/,'A terminal business outcome must retain its glow');
+      else assert.equal(style.glow,'none','Unresolved or deferred outcomes must not acquire a success/failure colour');
+    }
+  }
+  const refusal=model.nodes.find(node=>ends.has(node.id)&&node.outcome==='refusal');
+  if(refusal){
+    const button=page.locator('[data-node-id="'+refusal.id+'"]');
+    await button.focus();await page.keyboard.press('Enter');
+    assert.match(await page.locator('#inspector-content').innerText(),/Бизнес-отказ/);
+    const selected=await button.evaluate(node=>({glow:getComputedStyle(node.querySelector('.node-surface')).filter,
+      stroke:getComputedStyle(node.querySelector('.node-surface').firstElementChild).stroke,
+      expected:(()=>{const swatch=document.createElement('span');swatch.style.color='var(--danger)';node.append(swatch);const color=getComputedStyle(swatch).color;swatch.remove();return color;})()}));
+    assert.match(selected.glow,/drop-shadow/);assert.equal(selected.stroke,selected.expected,'Selection must not recolour refusal as success');
+    await page.keyboard.press('Escape');await page.locator('#reset').click();
+  }
+}
+
+async function checkReportTabs(page, width, height, model) {
+  if(!await page.locator('#process-report').count())return;
+  for(const tab of ['logging','changes','metrics','basis','map']){
+    await page.locator('#tab-'+tab).click();
+    assert.equal(await page.locator('[role=tab][aria-selected=true]').getAttribute('id'),'tab-'+tab);
+    assert.equal(await page.locator('#panel-map').evaluate(node=>node.inert),tab!=='map');
+  }
+  await page.locator('#zoom-in').click();await page.locator('#zoom-in').click();
+  const before=await page.locator('#zoom-value').innerText();
+  await page.locator('#tab-logging').click();
+  await page.setViewportSize({width:width-12,height:height-12});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  await page.locator('#tab-map').click();
+  assert.equal(await page.locator('#zoom-value').innerText(),before,'Resize under a report tab preserves map zoom');
+  await page.locator('#tab-logging').click();
+  if(model.gaps?.length){
+    await page.locator('.findings-toggle').click();
+    assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
+    assert.equal(await page.locator('#inspector').evaluate(node=>node.inert),false);
+    assert.equal(await page.locator('#inspector').isVisible(),true);
+    await page.locator('#report-return').click();
+    assert.equal(await page.locator('#tab-logging').getAttribute('aria-selected'),'true');
+  }
+  const operation=page.locator('#logging-content button[title="Показать на карте"]').first();
+  if(await operation.count()){
+    await operation.click();
+    assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
+    assert.equal(await page.locator('#inspector').isVisible(),true);
+    await page.locator('#report-return').click();
+    assert.equal(await page.locator('#tab-logging').getAttribute('aria-selected'),'true');
+  }
+  await page.locator('#tab-map').focus();await page.keyboard.press('End');
+  assert.equal(await page.locator('#tab-basis').getAttribute('aria-selected'),'true');
+  await page.keyboard.press('Home');
+  assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
+  await page.setViewportSize({width,height});
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  if(await page.locator('#inspector').isVisible())await page.locator('#close-inspector').click();
+  await page.locator('#reset').click();
+}
+
 async function checkCursorZoom(page, member) {
   // Observe delivered browser events; never invoke the renderer's zoom helpers.
   await page.evaluate(()=>{
@@ -261,7 +338,8 @@ async function main() {
       assert.equal(await page.locator('#notation-toggle').getAttribute('aria-expanded'), 'false');
       assert.equal(await page.locator('#notation-toggle').evaluate(e=>document.activeElement===e), true);
       assert.equal(await page.locator('#structure-toggle').count(), 0);
-      assert.equal(await page.locator('.workspace-bar,.map-footer,.scope,.heading-badges,#search,[role="tab"]').count(), 0);
+      assert.equal(await page.locator('.workspace-bar,.map-footer,.scope,.heading-badges,#search').count(), 0);
+      assert.equal(await page.locator('[role="tab"]').count(), html.includes('id="process-report"')?5:0);
       if(width>900){
         const title=await page.locator('#page-title').boundingBox();
         const overview=await page.locator('#overview').boundingBox();
@@ -453,6 +531,8 @@ async function main() {
       await page.locator('#reset').click();
       assert.equal(await page.locator('#zoom-value').innerText(), '100%');
       assert.equal(await page.locator('.node.dimmed').count(), 0);
+      await checkTerminalOutcomes(page,model,legacy);
+      await checkReportTabs(page,width,height,model);
       if (output) {
         await page.locator('#reset').click();
         await page.screenshot({path:path.join(output,`map-${width}x${height}.png`)});
@@ -465,4 +545,5 @@ async function main() {
     await browser.close();
   }
 }
-main().catch(error=>{console.error(error);process.exitCode=1;});
+module.exports = {checkTerminalOutcomes, checkReportTabs};
+if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});
