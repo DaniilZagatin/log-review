@@ -1,6 +1,6 @@
-"""Public map-only mode: no report work or stale report tabs, with tracing intact."""
-import json
+"""Belka publishes the map and its business stages only, with its own audit and trace."""
 import io
+import json
 import os
 import tempfile
 import unittest
@@ -10,10 +10,13 @@ from unittest.mock import patch
 
 from pko.cli import _build_parser
 from pko.errors import PkoError
-from pko.observability.pipeline import ReportOptions
 from pko.scenario_map import runner
-from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
+
+
+def entries(path: Path) -> list[dict]:
+    text = path.read_text(encoding="utf-8")
+    return [json.loads(part.split("\n", 1)[1]) for part in text.split("\n=== ")[1:]]
 
 
 class MapOnlyTests(unittest.TestCase):
@@ -23,74 +26,79 @@ class MapOnlyTests(unittest.TestCase):
         self.out = Path(self.temp.name) / "out"
         self.enterContext(patch.dict(os.environ, {"PKO_PHOENIX_ENABLED": "false"}))
 
-    def test_disabled_cli_flags_stop_before_inputs_or_models(self):
+    def test_cli_has_no_report_options(self):
         parser = _build_parser()
-        flags = [["--observability"], ["--runtime-log", "missing.jsonl"],
-                 ["--runtime-fields", "case_id=id"], ["--domain-profile", "bank-process-kpi"],
-                 ["--observability-max-requests", "24"], ["--observability-max-seconds", "1800"]]
-        with patch.object(runner, "read_process_description") as read, \
-                patch.object(runner, "run_scenario") as run, \
-                patch.object(runner, "profile_runtime_log") as logs:
-            for extra in flags:
-                with self.subTest(extra=extra):
-                    args = parser.parse_args(["map-scenario", "--process-file", "missing.txt", *extra])
-                    with self.assertRaisesRegex(PkoError, "временно отключены"):
-                        args.handler(args)
-            read.assert_not_called()
-            run.assert_not_called()
-            logs.assert_not_called()
+        for extra in (["--observability"], ["--runtime-log", "log.jsonl"], ["--domain-profile", "bank"]):
+            with self.subTest(extra=extra), patch("sys.stderr"), self.assertRaises(SystemExit):
+                parser.parse_args(["map-scenario", "--process-file", "p.txt", "--source", "a.zip", *extra])
 
-    def test_python_entry_points_cannot_start_the_report(self):
-        with patch.object(runner, "researcher_spec") as spec, patch.object(runner, "_read_saved_map") as load:
-            for kwargs in ({"observability": True}, {"report_options": ReportOptions()}):
-                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(PkoError, "временно отключены"):
-                    runner.run_scenario(SCENARIO, sources(), self.out, **kwargs)
-                with self.subTest(kwargs=kwargs), self.assertRaisesRegex(PkoError, "временно отключены"):
-                    runner.rebuild_from_map("missing.json", [], self.out, **kwargs)
-            spec.assert_not_called()
-            load.assert_not_called()
-        self.assertFalse(self.out.exists())
-
-    def test_normal_cli_passes_no_report_options_and_rebuild_ignores_old_report_error(self):
+    def test_cli_runs_and_rebuilds_with_the_map_options_only(self):
         parser = _build_parser()
-        model = {"run": {"id": "previous", "status": "completed", "process_report_error": "historical failure"}}
+        model = {"run": {"id": "previous", "status": "completed"}}
         for extra, method in ((["--scenario-text", SCENARIO, "--source", "source.zip"], "run_scenario"),
                               (["--from-map", "saved/scenario_map.json"], "rebuild_from_map")):
             with self.subTest(method=method), patch.object(runner, method, return_value=model) as run, \
-                    redirect_stdout(io.StringIO()) as stdout:
+                    redirect_stdout(io.StringIO()):
                 args = parser.parse_args(["map-scenario", *extra, "--out", str(self.out), "--quiet"])
                 self.assertEqual(args.handler(args), 0)
-                self.assertFalse(run.call_args.kwargs["observability"])
-                self.assertIsNone(run.call_args.kwargs["report_options"])
-                self.assertNotIn("historical failure", stdout.getvalue())
+                run.assert_called_once()
 
-    def test_map_has_both_views_and_local_audit_without_report_calls(self):
-        with patch.object(runner, "run_observability") as report:
-            result = runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient())
-        report.assert_not_called()
+    def test_rebuild_rejects_inputs_it_does_not_use(self):
+        parser = _build_parser()
+        for extra in (["--no-stages"], ["--source", "source.zip"]):
+            with self.subTest(extra=extra), patch.object(runner, "rebuild_from_map") as rebuild:
+                args = parser.parse_args(["map-scenario", "--from-map", "saved/scenario_map.json", *extra])
+                with self.assertRaises(PkoError):
+                    args.handler(args)
+                rebuild.assert_not_called()
+
+    def test_run_publishes_map_stages_and_audit_only(self):
+        result = runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient())
         self.assertEqual(result["run"]["status"], "completed")
-        self.assertTrue((self.out / "map_hierarchy.json").exists())
-        self.assertFalse((self.out / "process_report.json").exists())
-        self.assertFalse((self.out / "handoff").exists())
+        self.assertEqual({path.name for path in self.out.iterdir()},
+                         {"scenario_map.json", "scenario_map.html", "scenario_map.checkpoint.json",
+                          "map_hierarchy.json", "audit"})
         html = (self.out / "scenario_map.html").read_text(encoding="utf-8")
         self.assertIn("Бизнес-этапы", html)
         self.assertNotIn('role="tablist"', html)
-        audit = next((self.out / "audit").glob("run_*.txt")).read_text(encoding="utf-8")
-        self.assertIn("business_stages", audit)
-        self.assertIn("scenario_map_run", audit)
-        self.assertNotIn('"name": "process_observability"', audit)
 
-    def test_rebuild_ignores_saved_report_but_preserves_its_files_and_map(self):
-        # Create a historical report without making the feature available to normal runs.
-        with patch.object(runner, "OBSERVABILITY_ENABLED", True):
-            runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient(),
-                                observability=True, report_options=ReportOptions(client=ScriptedReportClient()))
-        self.assertIn('role="tablist"', (self.out / "scenario_map.html").read_text(encoding="utf-8"))
-        original = {name: (self.out / name).read_bytes() for name in
-                    ("scenario_map.json", "process_report.json", "handoff/manifest.json")}
-        with patch.object(runner, "run_observability") as report:
-            runner.rebuild_from_map(self.out / "scenario_map.json", [], self.out, spec=SPEC, client=ScriptedClient())
-        report.assert_not_called()
+    def test_grouping_joins_the_run_trace_and_every_span_ends(self):
+        result = runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient())
+        self.assertEqual(result["run"]["audit_status"], "complete")
+        path = next((self.out / "audit").glob("run_*.txt"))
+        data = entries(path)
+        started = {row["span_id"]: row for row in data if row["event"] == "span_started"}
+        finished = {row["span_id"]: row for row in data if row["event"] == "span_finished"}
+        self.assertEqual(set(started), set(finished), "every started span ends")
+        roots = [row for row in started.values() if row["parent_span_id"] is None]
+        self.assertEqual([row["name"] for row in roots], ["scenario_map_run"])
+        by_name = {row["name"]: row for row in started.values()}
+        self.assertEqual(started[by_name["stage_model_request"]["parent_span_id"]]["name"], "business_stages")
+        self.assertEqual(started[by_name["business_stages"]["parent_span_id"]]["name"], "scenario_map_run")
+        self.assertTrue(any(row["event"] == "stage_model_answer" for row in data))
+        self.assertNotIn("reasoning_chars", path.read_text(encoding="utf-8"))
+
+    def test_failed_local_journal_is_visible_in_the_result(self):
+        with patch("pko.audit.harden_file", side_effect=OSError("disk is read-only")):
+            result = runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient())
+        self.assertEqual(result["run"]["status"], "completed")
+        self.assertEqual(result["run"]["audit_status"], "partial")
+        self.assertTrue((self.out / "scenario_map.json").exists())
+
+    def test_saved_map_must_be_a_finished_current_map(self):
+        path = Path(self.temp.name) / "map.json"
+        for content in ({"schema_version": "1.0", "run": {"status": "completed"}, "nodes": [{}]},
+                        {"schema_version": "2.0", "run": {"status": "running"}, "nodes": [{}]}):
+            path.write_text(json.dumps(content), encoding="utf-8")
+            with self.assertRaises(PkoError):
+                runner.load_saved_map(path)
+
+    def test_rebuild_leaves_other_files_of_the_folder_untouched(self):
+        runner.run_scenario(SCENARIO, sources(), self.out, spec=SPEC, client=ScriptedClient())
+        # Files of earlier Belka versions are neither read nor removed.
+        (self.out / "process_report.json").write_text('{"report_version": "0.1"}', encoding="utf-8")
+        original = {name: (self.out / name).read_bytes() for name in ("scenario_map.json", "process_report.json")}
+        runner.rebuild_from_map(self.out / "scenario_map.json", self.out, spec=SPEC, client=ScriptedClient())
         self.assertNotIn('role="tablist"', (self.out / "scenario_map.html").read_text(encoding="utf-8"))
         for name, content in original.items():
             self.assertEqual(content, (self.out / name).read_bytes(), name)
@@ -102,9 +110,7 @@ class MapOnlyTests(unittest.TestCase):
         original = json.dumps(json.loads(source.read_text(encoding="utf-8")), ensure_ascii=False, indent=4)
         source.write_bytes((original.replace("\n", "\r\n") + "\r\n").encode("utf-8"))
         target = self.out.parent / "rebuilt"
-        with patch.object(runner, "run_observability") as report:
-            runner.rebuild_from_map(source, [], target, spec=SPEC, client=ScriptedClient())
-        report.assert_not_called()
+        runner.rebuild_from_map(source, target, spec=SPEC, client=ScriptedClient())
         self.assertEqual((target / "scenario_map.json").read_bytes(), source.read_bytes())
         self.assertTrue((target / "scenario_map.html").exists())
         self.assertTrue((target / "map_hierarchy.json").exists())
@@ -112,10 +118,10 @@ class MapOnlyTests(unittest.TestCase):
         renamed = target / "published.json"
         renamed.write_bytes(source.read_bytes())
         (target / "scenario_map.json").unlink()
-        runner.rebuild_from_map(renamed, [], target, spec=SPEC, client=ScriptedClient())
+        runner.rebuild_from_map(renamed, target, spec=SPEC, client=ScriptedClient())
         self.assertEqual((target / "scenario_map.json").read_bytes(), renamed.read_bytes())
 
-    def test_late_trace_failure_is_saved_in_map_only_outputs(self):
+    def test_late_trace_failure_is_saved_in_the_published_map(self):
         original = runner._publish_stages
         completed = False
 
@@ -135,3 +141,7 @@ class MapOnlyTests(unittest.TestCase):
         saved = json.loads((self.out / "scenario_map.json").read_text(encoding="utf-8"))
         self.assertEqual(saved["run"]["trace_export"]["status"], "failed")
         self.assertIn("stage export failed", (self.out / "scenario_map.html").read_text(encoding="utf-8"))
+
+
+if __name__ == "__main__":
+    unittest.main()

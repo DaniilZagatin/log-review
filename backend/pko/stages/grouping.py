@@ -10,11 +10,11 @@ from __future__ import annotations
 import re
 
 from pko.audit import record
-from pko.observability.contracts import map_revision
-from pko.observability.model_stage import PacketTooLarge, StageModel, methodology
 from pko.scenario_map.quality import QualityError, ResearchQuality
 from pko.stages.contracts import HIERARCHY_VERSION, validate_hierarchy
-from pko.stages.inputs import METHODOLOGY, STAGE, build_payload, input_fingerprint, payload_fingerprint
+from pko.stages.inputs import (METHODOLOGY, STAGE, build_payload, input_fingerprint, map_revision, methodology,
+                               payload_fingerprint)
+from pko.stages.model import PacketTooLarge, StageModel
 from pko.stages.regions import collapse_check, operation_graph
 
 MAX_STAGES = 60

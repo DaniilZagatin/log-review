@@ -1,7 +1,6 @@
 """Local source snapshots -> one researcher -> offline map and durable audit."""
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import tempfile
@@ -14,42 +13,26 @@ from pko.audit import AuditedClient, audit_run, current_audit, record, sanitize
 from pko.build import build_identity
 from pko.errors import PkoError
 from pko.llm.tracing import flush_tracing, init_phoenix_tracing, trace_client, trace_span
-from pko.observability.contracts import map_revision, validate_report
-from pko.observability.export import build_handoff
-from pko.observability.inputs import load_profile, parse_field_map, profile_names, profile_runtime_log
-from pko.observability.model_stage import ReportBudget, StageModel
-from pko.observability.pipeline import ReportOptions, run_observability
 from pko.output.publisher import write_outputs
 from pko.render.scenario_map import render_scenario_map
 from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAULT_MODEL_TIMEOUT, DeadlineClient, run_agent
 from pko.scenario_map.config import researcher_spec
 from pko.scenario_map.sources import build_workspace, read_process_description
 from pko.stages import grouping
-from pko.stages.contracts import HierarchyError, validate_hierarchy
+from pko.stages.contracts import HierarchyError
+from pko.stages.inputs import map_revision
+from pko.stages.model import RequestBudget, StageModel
 
 HIERARCHY_FILE = "map_hierarchy.json"
 # One grouping request and one repair, with room for transient retries.
 STAGES_MAX_REQUESTS = 4
 STAGES_MAX_SECONDS = 1200.0
-# Product switch: retained report code is exercised by offline tests only.
-# Business stages and the agent's own audit/Phoenix tracing remain enabled.
-OBSERVABILITY_ENABLED = False
-
-
-def _require_observability_enabled(requested: bool) -> None:
-    if requested and not OBSERVABILITY_ENABLED:
-        raise PkoError("Логи, метрики и рекомендации по доработкам временно отключены. Белка строит только карту.",
-                       hint="уберите --observability и параметры отчёта; технический трейс агента сохраняется")
-
-
 def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  client=None, max_steps: int = DEFAULT_MAX_STEPS,
                  max_seconds: float = DEFAULT_MAX_SECONDS, thinking=None,
                  model_timeout: float = DEFAULT_MODEL_TIMEOUT,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
-                 observability: bool = False, report_options: ReportOptions | None = None,
                  stages: bool = True, on_event=None, demo: bool = False) -> dict:
-    _require_observability_enabled(observability or report_options is not None)
     scenario = scenario.strip()
     if not scenario:
         raise PkoError("Нужно описание процесса: вариант сценария, который требуется восстановить по коду.",
@@ -64,8 +47,6 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
         raise PkoError("Бюджет суммаризации должен быть целым числом от 512 до 32768 токенов.")
     if summary_mode not in ("standard", "inherit"):
         raise PkoError("Режим суммаризации: standard или inherit.")
-    if observability:
-        _check_report_options(report_options)
     spec = spec or researcher_spec(thinking=thinking)
     out_dir = Path(out_dir).resolve()
     # An output subtree can be excluded, but excluding an ancestor would silently
@@ -130,18 +111,13 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                                                     model_timeout=model_timeout, on_event=on_event)
                     else:
                         _remove_hierarchy(out_dir)
-                    if observability:
-                        _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
-                                        options=report_options or ReportOptions(),
-                                        client=client, spec=spec, model_timeout=model_timeout, hierarchy=hierarchy)
-                    else:
-                        # Grouping also uses the trace; persist failures observed after the first map save.
-                        _refresh_audit_status(model)
-                        with trace_span("publish_map"):
-                            write_outputs(out_dir, {
-                                "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
-                                "scenario-map": ("scenario_map.html", render_scenario_map(model, hierarchy=hierarchy)),
-                            })
+                    # Grouping also uses the trace; persist failures observed after the first map save.
+                    _refresh_audit_status(model)
+                    with trace_span("publish_map"):
+                        write_outputs(out_dir, {
+                            "scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
+                            "scenario-map": ("scenario_map.html", render_scenario_map(model, hierarchy)),
+                        })
                     run_span.set_output({"run": model["run"], "nodes": len(model.get("nodes", [])),
                                          "edges": len(model.get("edges", [])),
                                          "gaps": len(model.get("gaps", [])),
@@ -157,20 +133,19 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
 
 
 def _publish_stages(model: dict, out_dir: Path, *, run_id: str, client, spec, model_timeout: float,
-                    report: dict | None = None, on_event=None, map_text: str | None = None) -> dict:
+                    on_event=None, map_text: str | None = None) -> dict:
     """Business stages over the published map, then the map HTML with both views.
 
     The grouping cannot change the atomic map: its revision is compared after
-    the model answers. ``scenario_map.json`` is not rewritten, so a published
-    handoff keeps matching it. A failure still publishes ``map_hierarchy.json``
-    with every operation unassigned and the reason.
+    the model answers. A failure still publishes ``map_hierarchy.json`` with
+    every operation unassigned and the reason. ``map_text`` copies a saved map
+    into another folder byte for byte.
     """
     revision = map_revision(model)
     stage_model = None
     try:
         with trace_span("business_stages") as span:
-            stage_model = _stage_model(client, spec, model_timeout, STAGES_MAX_REQUESTS, STAGES_MAX_SECONDS,
-                                       methodology_dir=grouping.METHODOLOGY)
+            stage_model = _stage_model(client, spec, model_timeout, STAGES_MAX_REQUESTS, STAGES_MAX_SECONDS)
             hierarchy = grouping.build_hierarchy(model, stage_model, run_id=run_id)
             if map_revision(model) != revision:
                 raise HierarchyError("группировка изменила карту атомарных операций")
@@ -182,7 +157,7 @@ def _publish_stages(model: dict, out_dir: Path, *, run_id: str, client, spec, mo
         hierarchy = grouping.unavailable_hierarchy(model, message, run_id=run_id,
                                                    budget=stage_model.budget.snapshot() if stage_model else None)
     with trace_span("render_map"):
-        html = render_scenario_map(model, report if OBSERVABILITY_ENABLED else None, hierarchy)
+        html = render_scenario_map(model, hierarchy)
     files = {"map-hierarchy": (HIERARCHY_FILE, json.dumps(hierarchy, ensure_ascii=False, indent=2)),
              "scenario-map": ("scenario_map.html", html)}
     if map_text is not None:
@@ -203,141 +178,6 @@ def _remove_hierarchy(out_dir: Path) -> None:
         record("stale_hierarchy_kept", error=str(sanitize(str(exc)))[:300])
 
 
-def _saved_hierarchy(folder: Path, model: dict) -> dict | None:
-    """Stages saved next to a map, reused only for exactly this map revision."""
-    try:
-        hierarchy = json.loads((Path(folder) / HIERARCHY_FILE).read_text(encoding="utf-8"))
-        validate_hierarchy(hierarchy, model)
-    except (OSError, ValueError, LookupError, TypeError, AttributeError):
-        return None
-    return hierarchy
-
-
-def _saved_report(folder: Path, model: dict) -> dict | None:
-    """A published report of exactly this map revision, kept in the HTML when only stages change."""
-    if not OBSERVABILITY_ENABLED:
-        return None
-    try:
-        report = json.loads((Path(folder) / "process_report.json").read_text(encoding="utf-8"))
-        validate_report(report, model)
-    except (OSError, ValueError, LookupError, TypeError, AttributeError):
-        return None
-    return report if report.get("map_revision") == map_revision(model) else None
-
-
-def _publish_report(model: dict, workspace, out_dir: Path, *, run_id: str, trace_id,
-                    options: ReportOptions, client, spec, model_timeout: float,
-                    hierarchy: dict | None = None) -> dict | None:
-    """Report stages, tabbed HTML and handoff after the map is published.
-
-    A report failure leaves the published map; a handoff failure leaves both.
-    Outcomes are recorded in ``model["run"]``.
-    """
-    _require_observability_enabled(True)
-    stage_model = None
-    latest = None
-    interrupted = False
-    # A rerun must not inherit an earlier delivery outcome.
-    for key in ("process_report", "process_report_error", "handoff", "handoff_error", "delivery"):
-        model["run"].pop(key, None)
-
-    def checkpoint(report):
-        nonlocal latest
-        latest = report
-        with trace_span("save_report_checkpoint"):
-            write_outputs(out_dir, {
-                "report-checkpoint": ("process_report.checkpoint.json", json.dumps(report, ensure_ascii=False, indent=2)),
-                "report-cache": (CACHE_FILE, json.dumps(stage_model.cache, ensure_ascii=False)),
-            })
-
-    try:
-        with trace_span("process_observability") as report_span:
-            stage_model = _report_model(options, client, spec, model_timeout, _load_cache(out_dir))
-            report = run_observability(model, workspace.tree, options=options, run_id=run_id,
-                                       stage_model=stage_model, checkpoint=checkpoint)
-            report_span.set_output({row["id"]: row["execution_status"] for row in report["stages"]})
-    except KeyboardInterrupt:
-        interrupted = True
-        report = latest
-        if report is not None:
-            report["interrupted"] = True
-        model["run"]["process_report_error"] = "Отчёт прерван пользователем; сохранены готовые части."
-    except Exception as exc:
-        message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
-        record("process_report_failed", error_type=type(exc).__name__, error=message)
-        model["run"]["process_report_error"] = message
-        report = latest
-    if report is None:
-        journal = current_audit()
-        if journal is not None:
-            journal.outcome = "interrupted" if interrupted else "partial"
-        _refresh_audit_status(model)
-        model["run"]["delivery"] = {"report": {"status": "failed", "reason": model["run"]["process_report_error"]},
-                                    "handoff": {"status": "not_run"},
-                                    "audit": {"status": model["run"]["audit_status"], "scope": "до публикации результата"},
-                                    "trace_export": model["run"]["trace_export"]}
-        write_outputs(out_dir, {"scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
-                               "scenario-map": ("scenario_map.html", render_scenario_map(model, hierarchy=hierarchy))})
-        if interrupted:
-            raise KeyboardInterrupt
-        return None
-
-    incomplete = interrupted or bool(model["run"].get("process_report_error")) or any(
-        row["execution_status"] != "completed" or row["result_status"] != "complete" for row in report["stages"])
-    report["delivery"] = {"report": {"status": "partial" if incomplete else "completed"},
-                          "handoff": {"status": "not_run"}, "audit": {"status": "complete"}}
-    if model["run"].get("process_report_error"):
-        report["delivery"]["report"]["reason"] = model["run"]["process_report_error"]
-    journal = current_audit()
-    if journal is not None:
-        journal.outcome = "interrupted" if interrupted else "partial" if incomplete else model["run"]["status"]
-    trace = {"run_id": run_id, "trace_id": trace_id or None, "local_audit": f"audit/run_{run_id}.txt"}
-    cache = stage_model.cache if stage_model is not None else {}
-
-    # At most two publication attempts. The map saved before research of the report
-    # survives either failure. Never publish a successful handoff claim before its write.
-    for attempt in range(2):
-        try:
-            with trace_span("publish_report", attempt=attempt + 1):
-                report["delivery"]["handoff"] = {"status": "completed", "path": "handoff/manifest.json"}
-                _refresh_audit_status(model)
-                saved = _report_files(model, report, cache, hierarchy)
-                try:
-                    with trace_span("export_handoff"):
-                        files = build_handoff(model, report, _published_json(saved), trace)
-                        write_outputs(out_dir / "handoff", files)
-                    # Export diagnostics can change audit health. Rebuild the manifest
-                    # against the exact final JSON bytes if that happened.
-                    _refresh_audit_status(model)
-                    final = _report_files(model, report, cache, hierarchy)
-                    if _published_json(final) != _published_json(saved):
-                        write_outputs(out_dir / "handoff", build_handoff(model, report, _published_json(final), trace))
-                    saved = final
-                except Exception as exc:
-                    message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
-                    record("handoff_failed", error_type=type(exc).__name__, error=message)
-                    report["delivery"]["handoff"] = {"status": "failed", "reason": message}
-                    model["run"]["handoff_error"] = message
-                    if journal is not None:
-                        journal.outcome = "interrupted" if interrupted else "partial"
-                    _refresh_audit_status(model)
-                    saved = _report_files(model, report, cache, hierarchy)
-                write_outputs(out_dir, saved)
-            break
-        except Exception as exc:
-            message = str(sanitize(f"{type(exc).__name__}: {exc}"))[:500]
-            record("report_publication_failed", attempt=attempt + 1, error=message)
-            report["delivery"]["report"] = {"status": "partial", "reason": "Повторная публикация после ошибки: " + message}
-            model["run"]["process_report_error"] = message
-            if journal is not None:
-                journal.outcome = "interrupted" if interrupted else "partial"
-            if attempt:
-                raise
-    if interrupted:
-        raise KeyboardInterrupt
-    return report
-
-
 def _refresh_audit_status(model: dict) -> None:
     """Health known immediately before publication, not a claim about future I/O."""
     journal = current_audit()
@@ -346,39 +186,6 @@ def _refresh_audit_status(model: dict) -> None:
         journal.flush()
     status = "partial" if journal is not None and journal.failed else "complete"
     model["run"]["audit_status"] = status
-    if model["run"].get("report_runs"):
-        model["run"]["report_runs"][-1]["audit_status"] = status
-
-
-def _published_json(files: dict) -> dict[str, str]:
-    return {name: content for name, content in files.values() if name in ("scenario_map.json", "process_report.json")}
-
-
-def _report_files(model: dict, report: dict, cache: dict, hierarchy: dict | None = None) -> dict:
-    report["delivery"]["audit"] = {"status": model["run"]["audit_status"], "scope": "до публикации результата"}
-    report["delivery"]["trace_export"] = model["run"]["trace_export"]
-    model["run"]["process_report"] = "process_report.json"
-    model["run"]["delivery"] = report["delivery"]
-    if report["delivery"]["handoff"]["status"] == "completed":
-        model["run"]["handoff"] = "handoff/manifest.json"
-        model["run"].pop("handoff_error", None)
-    else:
-        model["run"].pop("handoff", None)
-    with trace_span("render_report"):
-        html = render_scenario_map(model, report, hierarchy)
-    return {"scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2)),
-            "process-report": ("process_report.json", json.dumps(report, ensure_ascii=False, indent=2)),
-            "scenario-map": ("scenario_map.html", html),
-            "report-cache": (CACHE_FILE, json.dumps(cache, ensure_ascii=False))}
-
-
-def _check_report_options(options: ReportOptions | None) -> None:
-    if options is not None and (
-            isinstance(options.max_requests, bool) or not isinstance(options.max_requests, int)
-            or not 1 <= options.max_requests <= 200
-            or not (math.isfinite(options.max_seconds) and options.max_seconds > 0)):
-        raise PkoError("Лимиты этапов отчёта: от 1 до 200 запросов и конечное положительное время.",
-                       hint="проверьте --observability-max-requests и --observability-max-seconds")
 
 
 def load_saved_map(map_path) -> dict:
@@ -398,121 +205,50 @@ def _read_saved_map(map_path) -> tuple[dict, str]:
     if not isinstance(run, dict) or str(model.get("schema_version")) != "2.0":
         raise PkoError("Перестроение возможно только по карте атомарных операций схемы 2.0.")
     if run.get("status") not in ("completed", "partial") or not model.get("nodes"):
-        raise PkoError("Карта не содержит результата исследования: этапы и отчёт по ней не строятся.",
+        raise PkoError("Карта не содержит результата исследования: этапы по ней не строятся.",
                        hint="используйте scenario_map.json завершённого или частичного запуска, не checkpoint")
     return model, text
 
 
-def rebuild_from_map(map_path, sources: list, out_dir: Path, *, stages: bool = True, observability: bool = False,
-                     client=None, spec=None, thinking=None, model_timeout: float = DEFAULT_MODEL_TIMEOUT,
-                     report_options: ReportOptions | None = None, on_event=None) -> dict:
-    """Rebuild business stages and, with ``observability``, the report over a saved map.
+def rebuild_from_map(map_path, out_dir: Path, *, client=None, spec=None, thinking=None,
+                     model_timeout: float = DEFAULT_MODEL_TIMEOUT, on_event=None) -> dict:
+    """Rebuild business stages over a saved map without new research.
 
-    There is no new research: the atomic map stays as saved. The report needs
-    sources that reproduce the map's snapshot digests, otherwise its cited
-    lines may no longer exist. The rebuild is a new run with its own trace that
-    references the run which built the map. Without ``stages`` the saved stages
-    of this map revision are kept.
+    The atomic map stays as saved; in another folder it is copied byte for
+    byte. The rebuild is a new run with its own trace that references the run
+    which built the map.
     """
-    _require_observability_enabled(observability or report_options is not None)
-    if not (stages or observability):
-        raise PkoError("Перестраивать нечего: этапы отключены, отчёт не запрошен.",
-                       hint="уберите --no-stages")
-    if observability:
-        _check_report_options(report_options)
     model, map_text = _read_saved_map(map_path)
-    sources = list(sources or [])
-    if observability and not 1 <= len(sources) <= 32:
-        raise PkoError("Для отчёта нужно от 1 до 32 источников кода — те же, что при построении карты.")
     spec = spec or researcher_spec(thinking=thinking)
     out_dir = Path(out_dir).resolve()
-    for source in sources:
-        if Path(source).resolve().is_relative_to(out_dir):
-            raise PkoError("Каталог результата совпадает с источником кода или содержит его.",
-                           hint="выберите для --out отдельную подпапку, не содержащую источники")
-    folder = Path(map_path).resolve().parent
     copy_saved_map = Path(map_path).resolve() != out_dir / "scenario_map.json"
-    hierarchy = None if stages else _saved_hierarchy(folder, model)
     previous = model["run"].get("id")
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:8]
     with audit_run(out_dir / "audit" / f"run_{run_id}.txt", run_id) as journal:
         init_phoenix_tracing()
         try:
-            with trace_span("scenario_rebuild_run", run_id=run_id, resumed_from_run_id=previous) as run_span, \
-                    tempfile.TemporaryDirectory(prefix="belka-rebuild-") as temporary:
-                run_span.set_input({"stages": stages, "observability": observability})
-                record("map_rebuild", resumed_from_run_id=previous, stages=stages, observability=observability)
-                workspace = None
-                if observability:
-                    # Sources are checked first: a mismatch must not leave rebuilt stages behind.
-                    with trace_span("prepare_sources") as source_span:
-                        workspace = build_workspace(sources, Path(temporary) / "sources", exclude_paths=[out_dir])
-                        source_span.set_output({"sources": workspace.sources, "omissions": workspace.omissions})
-                    expected = {(row.get("id"), row.get("digest")) for row in model.get("sources") or []}
-                    actual = {(row.get("id"), row.get("digest")) for row in workspace.sources}
-                    if expected != actual:
-                        raise PkoError("Источники не совпадают со снимком, по которому построена карта.",
-                                       hint="передайте те же директории или архивы в том же порядке")
-                    record("report_rerun", resumed_from_run_id=previous, sources=workspace.sources)
-                    if on_event:
-                        on_event("sources_ready", {"sources": len(workspace.sources), "files": len(workspace.tree.files)})
-                if stages:
-                    # Only the stages change: a report of this map stays in the HTML.
-                    report = None if observability or folder != out_dir else _saved_report(folder, model)
-                    hierarchy = _publish_stages(model, out_dir, run_id=run_id, client=client, spec=spec,
-                                                model_timeout=model_timeout, report=report, on_event=on_event,
-                                                map_text=map_text if copy_saved_map and not observability else None)
-                    journal.outcome = {"complete": "completed", "partial": "partial"}.get(
-                        hierarchy["status"]["result"], "failed")
-                if workspace is not None:
-                    model["run"]["report_runs"] = [*model["run"].get("report_runs", []),
-                                                   {"id": run_id, "trace_id": run_span.trace_id or None,
-                                                    "generated_at": datetime.now(timezone.utc).isoformat(),
-                                                    "build": build_identity()}]
-                    files = {"scenario-model": ("scenario_map.json", json.dumps(model, ensure_ascii=False, indent=2))}
-                    if hierarchy is not None and not stages:
-                        files["map-hierarchy"] = (HIERARCHY_FILE, json.dumps(hierarchy, ensure_ascii=False, indent=2))
-                    write_outputs(out_dir, files)
-                    _publish_report(model, workspace, out_dir, run_id=run_id, trace_id=run_span.trace_id,
-                                    options=report_options or ReportOptions(),
-                                    client=None, spec=spec, model_timeout=model_timeout, hierarchy=hierarchy)
-                run_span.set_output({"business_stages": hierarchy["status"] if hierarchy else None,
-                                     "process_report": model["run"].get("process_report"),
-                                     "error": model["run"].get("process_report_error")})
+            with trace_span("scenario_rebuild_run", run_id=run_id, resumed_from_run_id=previous) as run_span:
+                record("map_rebuild", resumed_from_run_id=previous)
+                hierarchy = _publish_stages(model, out_dir, run_id=run_id, client=client, spec=spec,
+                                            model_timeout=model_timeout, on_event=on_event,
+                                            map_text=map_text if copy_saved_map else None)
+                journal.outcome = {"complete": "completed", "partial": "partial"}.get(
+                    hierarchy["status"]["result"], "failed")
+                run_span.set_output({"business_stages": hierarchy["status"]})
                 return model
         finally:
             flush_tracing()
 
 
-CACHE_FILE = "report_cache.json"
-
-
-def _load_cache(out_dir: Path) -> dict:
-    """Accepted report answers of earlier runs; each is revalidated before reuse."""
-    try:
-        cache = json.loads((out_dir / CACHE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return cache if isinstance(cache, dict) else {}
-
-
-def _report_model(options: ReportOptions, research_client, spec, model_timeout: float,
-                  cache: dict | None = None) -> StageModel:
-    """Report stages use the research provider with their own request and time budget."""
-    return _stage_model(options.client or research_client, spec, model_timeout,
-                        options.max_requests, options.max_seconds, cache)
-
-
-def _stage_model(client, spec, model_timeout: float, max_requests: int, max_seconds: float,
-                 cache: dict | None = None, **kwargs) -> StageModel:
-    """A bounded model for work after research; without a client, the research provider."""
+def _stage_model(client, spec, model_timeout: float, max_requests: int, max_seconds: float) -> StageModel:
+    """A bounded model for grouping after research; without a client, the research provider."""
     deadline = time.monotonic() + max_seconds
     if client is None:
         client = DeadlineClient(spec=spec, timeout=model_timeout)
         client.deadline = deadline
     client = trace_client(client, spec)
     audited = client if isinstance(client, AuditedClient) else AuditedClient(client)
-    return StageModel(audited, ReportBudget(max_requests=max_requests, deadline=deadline), cache, **kwargs)
+    return StageModel(audited, RequestBudget(max_requests=max_requests, deadline=deadline))
 
 
 def add_cli_command(subparsers):
@@ -537,16 +273,6 @@ def add_cli_command(subparsers):
                          help="Суммаризация: standard отключает настроенный thinking, inherit наследует режим исследования")
     command.add_argument("--no-stages", dest="stages", action="store_false",
                          help="Не строить бизнес-этапы: карта будет только в виде атомарных операций")
-    # Recognise old commands to explain the disabled feature before reading inputs.
-    command.add_argument("--observability", action="store_true", help=argparse.SUPPRESS)
-    command.add_argument("--observability-max-requests", type=int, default=None, help=argparse.SUPPRESS)
-    command.add_argument("--observability-max-seconds", type=float, default=None, help=argparse.SUPPRESS)
-    command.add_argument("--runtime-log", default="",
-                         help=argparse.SUPPRESS)
-    command.add_argument("--domain-profile", default=None, choices=profile_names(),
-                         help=argparse.SUPPRESS)
-    command.add_argument("--runtime-fields", default="",
-                         help=argparse.SUPPRESS)
     command.add_argument("--thinking", action="store_true", default=None)
     command.add_argument("--no-thinking", dest="thinking", action="store_false")
     command.add_argument("--quiet", action="store_true", help="Не печатать ход исследования")
@@ -554,19 +280,16 @@ def add_cli_command(subparsers):
 
 
 def command_main(args) -> int:
-    _require_observability_enabled(bool(args.observability or args.runtime_log or args.domain_profile
-                                       or args.runtime_fields or args.observability_max_requests is not None
-                                       or args.observability_max_seconds is not None))
-    scenario = read_process_description(args.process_file) if args.process_file else args.scenario_text
-
-    if (args.runtime_log or args.domain_profile) and not args.observability:
-        raise PkoError("Файл логов и профиль используются только с --observability.")
-    if not args.source and not (args.from_map and not args.observability):
+    if args.from_map and not args.stages:
+        raise PkoError("Перестраивать нечего: по сохранённой карте строятся только бизнес-этапы.",
+                       hint="уберите --no-stages")
+    if args.from_map and args.source:
+        raise PkoError("Перестроение этапов использует только сохранённую карту.", hint="уберите --source")
+    if not args.from_map and not args.source:
         raise PkoError("Нужны источники кода.", hint="передайте ZIP-архивы или директории через --source")
-    out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()
     # Inputs are checked before research so a bad file does not waste the research budget.
-    runtime = (profile_runtime_log(args.runtime_log, parse_field_map(args.runtime_fields))
-               if args.runtime_log else None)
+    scenario = read_process_description(args.process_file) if args.process_file else args.scenario_text
+    out = Path(args.out or (Path(args.from_map).parent if args.from_map else "scenario-map-out")).resolve()
 
     if not args.quiet:
         build = build_identity()
@@ -593,21 +316,15 @@ def command_main(args) -> int:
             print(f"Связь с моделью временно недоступна. Попытка {data['next_attempt']} "
                   f"из {data['max_attempts']} через {data['delay_seconds']:g} с.", flush=True)
 
-    options = ReportOptions(max_requests=args.observability_max_requests if args.observability_max_requests is not None else 24,
-                            max_seconds=args.observability_max_seconds if args.observability_max_seconds is not None else 1800,
-                            runtime=runtime,
-                            profile=load_profile(args.domain_profile) if args.domain_profile else None) if args.observability else None
     if args.from_map:
-        model = rebuild_from_map(args.from_map, args.source, out, stages=args.stages,
-                                 observability=args.observability, thinking=args.thinking,
-                                 model_timeout=args.model_timeout, report_options=options, on_event=event)
+        model = rebuild_from_map(args.from_map, out, thinking=args.thinking,
+                                 model_timeout=args.model_timeout, on_event=event)
         print(f"Перестроено по карте запуска {model['run'].get('id')}")
     else:
         model = run_scenario(scenario, args.source, out, max_steps=args.max_steps,
                              max_seconds=args.max_seconds, model_timeout=args.model_timeout,
                              thinking=args.thinking, summary_max_tokens=args.summary_max_tokens,
-                             summary_mode=args.summary_mode, observability=args.observability,
-                             report_options=options, stages=args.stages, on_event=event)
+                             summary_mode=args.summary_mode, stages=args.stages, on_event=event)
     status = model["run"]["status"]
     labels = {"completed": "Исследование завершено", "partial": "Сохранён частичный результат",
               "failed": "Исследование не выполнено"}
@@ -618,14 +335,6 @@ def command_main(args) -> int:
     print(f"Данные: {(out / 'scenario_map.json')}")
     if stages:
         print(f"Бизнес-этапы: {(out / HIERARCHY_FILE)}")
-    if args.observability and model["run"].get("process_report"):
-        print(f"Отчёт наблюдаемости: {(out / 'process_report.json')}")
-        if model["run"].get("handoff"):
-            print(f"Комплект передачи: {(out / 'handoff')}")
-        elif model["run"].get("handoff_error"):
-            print(f"Комплект передачи не построен: {model['run']['handoff_error']}")
-    elif args.observability and model["run"].get("process_report_error"):
-        print(f"Отчёт наблюдаемости не построен: {model['run']['process_report_error']}")
     if model["run"].get("interrupted"):
         return 130
     if args.from_map:
@@ -633,5 +342,5 @@ def command_main(args) -> int:
         result = stages.get("status", {}).get("result", "complete")
         if result == "none":
             return 1
-        return 2 if result == "partial" or (args.observability and model["run"].get("process_report_error")) else 0
+        return 2 if result == "partial" else 0
     return 0 if status == "completed" else (2 if status == "partial" else 1)

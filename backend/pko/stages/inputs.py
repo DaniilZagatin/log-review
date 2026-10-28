@@ -68,3 +68,17 @@ def input_fingerprint(model: dict, mode: str) -> str:
 
 def payload_fingerprint(payload: dict) -> str:
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def map_revision(model: dict) -> str:
+    """Digest of what the map asserts about execution; run metadata is excluded."""
+    content = {key: model.get(key) for key in ("schema_version", "scenario", "nodes", "edges")}
+    data = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def methodology(stage: str = STAGE, folder: Path = METHODOLOGY) -> dict:
+    """Request instructions: the folder's shared rules plus the stage file, with a content digest."""
+    text = (folder / "common.md").read_text(encoding="utf-8") + "\n\n" + \
+        (folder / f"{stage}.md").read_text(encoding="utf-8")
+    return {"id": stage, "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "text": text}

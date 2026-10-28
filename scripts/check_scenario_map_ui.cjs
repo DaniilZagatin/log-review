@@ -14,18 +14,6 @@ async function chooseStage(page, id) {
 }
 
 const settleMap=page=>page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-async function mapSnapshot(page) {
-  return page.evaluate(()=>({
-    mode:document.querySelector('#view-mode [aria-pressed=true]')?.dataset.mode,
-    expanded:[...document.querySelectorAll('.stage-frame-head')].map(n=>n.dataset.stageId).sort(),
-    zoom:getComputedStyle(document.getElementById('stage')).transform,
-    left:document.getElementById('viewport').scrollLeft,top:document.getElementById('viewport').scrollTop,
-    selected:[...document.querySelectorAll('#nodes .selected,#connections .edge.selected')].map(n=>n.dataset.nodeId||n.dataset.stageId||n.dataset.edgeId).sort(),
-    inspectorHidden:document.getElementById('inspector').hidden,
-    title:document.querySelector('#inspector-content h2')?.textContent
-  }));
-}
-
 async function checkBusinessStages(page, model) {
   if(!await page.locator('#map-hierarchy').count())return;
   const hierarchy=JSON.parse(await page.locator('#map-hierarchy').textContent());
@@ -129,66 +117,6 @@ async function checkTerminalOutcomes(page, model, legacy) {
     assert.match(selected.glow,/drop-shadow/);assert.equal(selected.stroke,selected.expected,'Selection must not recolour refusal as success');
     await page.keyboard.press('Escape');await page.locator('#reset').click();
   }
-}
-
-async function checkReportTabs(page, width, height, model) {
-  if(!await page.locator('#process-report').count())return;
-  for(const tab of ['logging','changes','metrics','basis','map']){
-    await page.locator('#tab-'+tab).click();
-    assert.equal(await page.locator('[role=tab][aria-selected=true]').getAttribute('id'),'tab-'+tab);
-    assert.equal(await page.locator('#panel-map').evaluate(node=>node.inert),tab!=='map');
-  }
-  await page.locator('#zoom-in').click();await page.locator('#zoom-in').click();
-  const before=await page.locator('#zoom-value').innerText();
-  await page.locator('#tab-logging').click();
-  await page.setViewportSize({width:width-12,height:height-12});
-  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  await page.locator('#tab-map').click();
-  assert.equal(await page.locator('#zoom-value').innerText(),before,'Resize under a report tab preserves map zoom');
-  await page.locator('#tab-logging').click();
-  if(model.gaps?.length){
-    await page.locator('.findings-toggle').click();
-    assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
-    assert.equal(await page.locator('#inspector').evaluate(node=>node.inert),false);
-    assert.equal(await page.locator('#inspector').isVisible(),true);
-    await page.locator('#report-return').click();
-    assert.equal(await page.locator('#tab-logging').getAttribute('aria-selected'),'true');
-  }
-  const operation=page.locator('#logging-content button[title="Показать на карте"]').first();
-  if(await operation.count()){
-    await page.locator('#tab-map').click();
-    // Keep a real selection and a non-default camera while making a temporary report jump.
-    const hasStages=await page.locator('.kind-stage').count()||await page.locator('#map-hierarchy').count();
-    if(hasStages&&await page.locator('#view-mode').isVisible()){
-      await page.locator('#view-mode [data-mode=stages]').click();
-      const block=page.locator('.kind-stage').first();
-      if(await block.count()){await block.focus();await page.keyboard.press('Enter');await settleMap(page);}
-    }
-    const node=page.locator('.node[data-node-id]').first();
-    if(await node.count()){await node.focus();await page.keyboard.press('Enter');await settleMap(page);}
-    await page.locator('#zoom-in').focus();await page.keyboard.press('Enter');
-    await page.locator('#viewport').evaluate(node=>{node.scrollLeft+=17;node.scrollTop+=23;});
-    const beforeJump=await mapSnapshot(page);
-    await page.locator('#tab-logging').click();
-    await operation.click();
-    await settleMap(page);
-    assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
-    assert.equal(await page.locator('#inspector').isVisible(),true);
-    assert.equal(await page.locator('#view-mode [aria-pressed=true]').getAttribute('data-mode'),'atomic','Report links open the requested atomic operation');
-    await page.locator('#report-return').click();
-    assert.equal(await page.locator('#tab-logging').getAttribute('aria-selected'),'true');
-    await page.locator('#tab-map').click();await settleMap(page);
-    assert.deepEqual(await mapSnapshot(page),beforeJump,'Return restores the previous mode, expansion, selection, panel and camera');
-  }
-  await page.locator('#tab-map').focus();await page.keyboard.press('End');
-  assert.equal(await page.locator('#tab-basis').getAttribute('aria-selected'),'true');
-  await page.keyboard.press('Home');
-  assert.equal(await page.locator('#tab-map').getAttribute('aria-selected'),'true');
-  await page.setViewportSize({width,height});
-  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  if(await page.locator('#inspector').isVisible())await page.locator('#close-inspector').click();
-  if(await page.locator('#view-mode').isVisible())await page.locator('#view-mode [data-mode=atomic]').click();
-  await page.locator('#reset').click();
 }
 
 async function checkCursorZoom(page, member) {
@@ -440,7 +368,7 @@ async function main() {
       assert.equal(await page.locator('#notation-toggle').evaluate(e=>document.activeElement===e), true);
       assert.equal(await page.locator('#structure-toggle').count(), 0);
       assert.equal(await page.locator('.workspace-bar,.map-footer,.scope,.heading-badges,#search').count(), 0);
-      assert.equal(await page.locator('[role="tab"]').count(), html.includes('id="process-report"')?5:0);
+      assert.equal(await page.locator('[role="tab"]').count(), 0);
       if(width>900){
         const title=await page.locator('#page-title').boundingBox();
         const overview=await page.locator('#overview').boundingBox();
@@ -636,7 +564,6 @@ async function main() {
       assert.equal(await page.locator('.node.dimmed').count(), 0);
       await checkTerminalOutcomes(page,model,legacy);
       await checkBusinessStages(page,model);
-      await checkReportTabs(page,width,height,model);
       if (output) {
         await page.locator('#reset').click();
         await page.screenshot({path:path.join(output,`map-${width}x${height}.png`)});
@@ -649,5 +576,5 @@ async function main() {
     await browser.close();
   }
 }
-module.exports = {checkTerminalOutcomes, checkReportTabs, checkBusinessStages};
+module.exports = {checkTerminalOutcomes, checkBusinessStages};
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});

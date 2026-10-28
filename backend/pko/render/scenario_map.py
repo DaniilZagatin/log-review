@@ -12,10 +12,8 @@ import json
 import re
 from typing import Any
 
-from pko.observability.contracts import validate_report
 from pko.render.dpss_theme import embedded_fonts
 from pko.render.horizon_theme import horizon_tokens
-from pko.render.process_report import REPORT_PANELS, REPORT_SCRIPT, REPORT_STYLE, REPORT_TABS
 from pko.stages.contracts import validate_hierarchy
 
 
@@ -26,19 +24,15 @@ def _script_json(value: Any) -> str:
             .replace("\u2029", "\\u2029"))
 
 
-def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = None,
-                        hierarchy: dict[str, Any] | None = None) -> str:
+def render_scenario_map(model: dict[str, Any], hierarchy: dict[str, Any] | None = None) -> str:
     """Return one self-contained HTML document without modifying ``model``.
 
     Unknown evidence or run statuses display as unknown, never as confirmed.
     Empty/partial models remain inspectable; facts are not created by rendering.
-    A process report adds tabs only after it is validated against this map;
-    business stages add the second view only for this exact map revision.
+    Business stages add the second view only for this exact map revision.
     """
     if not isinstance(model, dict):
         raise TypeError("scenario map must be a dictionary")
-    if report is not None:
-        validate_report(report, model)
     if hierarchy is not None:
         validate_hierarchy(hierarchy, model)
     scenario = model.get("scenario") or {}
@@ -46,21 +40,17 @@ def render_scenario_map(model: dict[str, Any], report: dict[str, Any] | None = N
     title = str(scenario.get("title") or "Карта сценария")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
-        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + _STAGE_STYLE + (REPORT_STYLE if report else ""),
-        "SCRIPT": _SCRIPT.replace("/*__REPORT_JS__*/", REPORT_SCRIPT if report else ""),
+        "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + _STAGE_STYLE,
+        "SCRIPT": _SCRIPT,
         "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
         "RUN_NOTE": html.escape(str(run.get("reason") or ""), quote=True),
         "RUN_NOTE_HIDDEN": "" if run.get("reason") and run.get("status") in ("partial", "failed") else " hidden",
-        "REPORT_TABS": REPORT_TABS if report else "",
-        "REPORT_PANELS": REPORT_PANELS if report else "",
-        "REPORT_DATA": (f'<script id="process-report" type="application/json">{_script_json(report)}</script>'
-                        if report else "")
-                       + (f'<script id="map-hierarchy" type="application/json">{_script_json(hierarchy)}</script>'
-                          if hierarchy else ""),
+        "HIERARCHY_DATA": (f'<script id="map-hierarchy" type="application/json">{_script_json(hierarchy)}</script>'
+                           if hierarchy else ""),
     }
     # A single pass also keeps placeholder-like words in user text literal.
-    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|REPORT_TABS|REPORT_PANELS|REPORT_DATA)__",
+    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|HIERARCHY_DATA)__",
                   lambda match: values[match.group(1)], _DOCUMENT)
 
 
@@ -75,7 +65,7 @@ __FONTS__<style>__STYLE__</style></head>
 <section id="status-panel" class="map-popover status-panel" aria-label="Предупреждения" hidden><div class="header-status" id="header-status">
 <p id="legacy-note" class="legacy-note"__LEGACY_HIDDEN__>Архивная карта прежней методологии. Её узлы и группировки не подтверждают атомарность по правилам версии 2.0.</p>
 <p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></div></section></div></div>
-<p id="scenario-description" class="description"></p>__REPORT_TABS__</header>
+<p id="scenario-description" class="description"></p></header>
 <main id="workspace" tabindex="-1">
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
@@ -84,12 +74,12 @@ __FONTS__<style>__STYLE__</style></head>
 <div class="map-toolbar">
 <div class="map-actions"><button type="button" id="zoom-out" aria-label="Уменьшить масштаб">−</button><output id="zoom-value" aria-label="Масштаб">100%</output><button type="button" id="zoom-in" aria-label="Увеличить масштаб">+</button><button type="button" id="fit">Вписать</button><button type="button" id="reset">Сбросить</button><button id="notation-toggle" type="button" aria-label="Обозначения" title="Обозначения" aria-expanded="false" aria-controls="notation-panel">?</button></div></div>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Карта сценария. Колесо мыши и pinch меняют масштаб относительно курсора; перетаскивание фона перемещает схему. Tab выбирает операции."><div id="canvas-size"><div id="stage"><svg id="connections" xmlns="http://www.w3.org/2000/svg" aria-label="Переходы между операциями"></svg><div id="nodes"></div></div></div><div id="empty-map" class="empty" hidden>Карта пока не содержит операций. Причина и незавершённые участки указаны в результатах исследования.</div></div>
-</section>__REPORT_PANELS__
+</section>
 </div><aside id="inspector" class="inspector" aria-label="Описание выбранного элемента" hidden><div class="inspector-head"><span>Описание элемента</span><button type="button" id="close-inspector" aria-label="Закрыть описание">×</button></div><div id="inspector-content"></div></aside></div>
 <p class="footnote">Карта восстановлена по переданным материалам. Подтверждение в коде не гарантирует поведение работающих систем и полноту бизнес-процесса.</p>
 </main><div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
 <noscript><p class="empty">Для просмотра интерактивной карты включите JavaScript. Все данные находятся внутри этого HTML-файла; подключение к сети не требуется.</p></noscript>
-<script id="scenario-model" type="application/json">__MODEL__</script>__REPORT_DATA__<script>__SCRIPT__</script></body></html>'''
+<script id="scenario-model" type="application/json">__MODEL__</script>__HIERARCHY_DATA__<script>__SCRIPT__</script></body></html>'''
 
 
 _STYLE = r'''
@@ -539,7 +529,7 @@ const badge = value => el('span','badge '+evidenceStatus(value),evidenceNames[ev
 const systemName = node => (systemById.get(text(node.system_id)) || {}).name || 'АС не установлена';
 const validEdges=edges.filter(e => byId.has(text(e.source)) && byId.has(text(e.target)));
 const positions=new Map(), nodeButtons=new Map(), edgeGroups=new Map();
-let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null, inspectorView={type:'overview'};
+let selected=null, zoom=1, graphWidth=1000, graphHeight=600, restoreFocus=null;
 
 $('page-title').textContent=scenario.title || 'Карта сценария';
 const fullDescription=text(scenario.description).trim();
@@ -614,7 +604,6 @@ for(const [kind,label] of (legacy?[['start','Начало сценария'],['a
 if(stageRecords.length){const row=el('div','notation-item');row.append(notationIcon('stage'),el('span','','Бизнес-этап с одним входом'));$('notation-items').append(row,el('p','','Вид «Бизнес-этапы» — предложение модели поверх карты операций. Этап с одним входом показан блоком; нажатие раскрывает его операции внутри рамки этапа. Этап с несколькими входами показан своими операциями с подписью этапа, чтобы не рисовать путей, которых нет в коде. Связь между блоками объединяет переходы карты.'));}
 $('notation-items').append(el('p','', 'Свечение отмечает итог конечной операции: зелёное — успешное завершение, красное — отказ, сбой или отмена. Подпись уточняет исход. Неизвестный итог, перенос срока и отсутствие решения остаются нейтральными. Условное завершение отмечено словами «При завершении»; другие продолжения сохраняются.'));
 function showGroup(group){
- inspectorView={type:'group',id:text(group.id)};
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',group.kind==='stage'?'ЭТАП':'БИЗНЕС-ОПЕРАЦИЯ'),el('h2','',group.name));
  field(panel,'Бизнес-смысл',group.description);field(panel,group.kind==='stage'?'Промежуточная цель':'Отделимый результат',group.result);
  const parent=groupById.get(text(group.parent_id));if(parent)relatedButton(panel,'Этап: '+parent.name,()=>selectGroup(parent));
@@ -655,7 +644,6 @@ $('stage-select').addEventListener('change',()=>{
 });
 $('clear-selection').addEventListener('click',()=>closeInspector());
 function showOverview(){
- inspectorView={type:'overview'};
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
  panel.append(el('p','muted',model.summary || 'Выберите операцию, чтобы увидеть её смысл, вход, результат, условия продолжения и подтверждения в коде.'));
  field(panel,'Описание варианта сценария',fullDescription);
@@ -694,7 +682,6 @@ function continuations(container,node){
  }container.append(section);
 }
 function showNode(node){
- inspectorView={type:'node',id:text(node.id)};
  const panel=$('inspector-content');panel.replaceChildren();
  const meta=el('div','operation-meta');meta.append(el('div','inspector-kicker',nodeKindLabel(node)));
  const ancestry=nodeGroups(node),stage=nodeStage(node);if(ancestry.length||stage){const links=el('div','group-links');if(stage)relatedButton(links,'Этап: '+stage.name,()=>selectStage(stage));for(const group of ancestry)relatedButton(links,(group.kind==='stage'?'Этап: ':'Группа: ')+group.name,()=>selectGroup(group));meta.append(links);}
@@ -711,7 +698,6 @@ function showNode(node){
  const nodeGaps=gaps.filter(g=>array(g.node_ids).map(text).includes(text(node.id)));for(const gap of nodeGaps)field(panel,'Не установлено',gap.description);
 }
 function showEdge(edge){
- inspectorView={type:'edge',id:text(edge.id)};
  const panel=$('inspector-content');panel.replaceChildren();panel.append(el('div','inspector-kicker',legacy?'ПЕРЕХОД · '+(edgeNames[edge.kind] || 'Связь'):'ПРОДОЛЖЕНИЕ ИСПОЛНЕНИЯ'),badge(edge.evidence_status));
  const from=byId.get(text(edge.source)), to=byId.get(text(edge.target));panel.append(el('h2','',(from.name || from.id)+' → '+(to.name || to.id)));
  field(panel,'Что происходит',edge.description);codeExplanations(panel,edge);field(panel,'Обоснование перехода',edge.basis);field(panel,'Условие перехода',edge.condition);field(panel,'Передаваемые данные',edge.data);field(panel,'Связь экземпляра сценария',edge.correlation);
@@ -767,8 +753,6 @@ function updateHighlight(){
 }
 function announce(value){$('announcement').textContent=value;}
 function availableWidth(){const view=$('viewport');return Math.max(180,view.clientWidth-(!$('inspector').hidden&&window.innerWidth>700?$('inspector').offsetWidth:0));}
-// Set by the report tabs: the operation panel is shown only over a visible map.
-let mapTabHook=null;
 function focusReference(element=document.activeElement){
  const owner=element?.closest?.('[data-node-id],[data-stage-id],[data-edge-id]');
  const transition=owner?.dataset.transitionIds?JSON.parse(owner.dataset.transitionIds)[0]:null;
@@ -777,7 +761,6 @@ function focusReference(element=document.activeElement){
  return {element,reference:reference?{...reference}:null};
 }
 function restoreMapFocus(target){
- if($('panel-map').inert)return;
  const ref=target?.reference;let element=target?.element;
  if(!element?.isConnected||element===document.body||element.closest('[hidden],[inert]')){
   const id=ref?.type==='node'?display.represent(ref.id):ref?.type==='stage'?'stage:'+text(ref.id):null;
@@ -788,7 +771,7 @@ function restoreMapFocus(target){
  const fallback=[$('view-mode').querySelector('[aria-pressed=true]'),$('stage-button'),$('viewport')].find(node=>node&&!node.closest('[hidden],[inert]')&&!node.disabled);
  (element||fallback).focus({preventScroll:true});
 }
-function openInspector(){if($('panel-map').inert&&mapTabHook)mapTabHook();if($('inspector').hidden)restoreFocus=focusReference();$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
+function openInspector(){if($('inspector').hidden)restoreFocus=focusReference();$('inspector').hidden=false;$('inspector-content').scrollTop=0;applyZoom(zoom);if(window.innerWidth<=700)$('close-inspector').focus({preventScroll:true});}
 function closeInspector(restore=true){const target=restoreFocus||focusReference();selected=null;$('inspector').hidden=true;updateHighlight();applyZoom(zoom);if(restore)restoreMapFocus(target);restoreFocus=null;}
 // On the stage view an operation inside a closed block is shown by opening that block.
 function revealNode(id){
@@ -832,7 +815,6 @@ function selectStage(stage){
  requestAnimationFrame(()=>frameStage(stage));announce('Выбран бизнес-этап: '+(stage.name||stage.id));
 }
 function showStage(stage){
- inspectorView={type:'stage',id:text(stage.id)};
  const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
  panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
  field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
@@ -872,7 +854,6 @@ function showStage(stage){
 }
 function selectLink(link){closePopovers();selected={type:'link',id:link.id};showLink(link);openInspector();updateHighlight();announce('Выбран переход: '+itemName(link.source)+' → '+itemName(link.target));}
 function showLink(link){
- inspectorView={type:'link',id:text(link.id)};
  const panel=$('inspector-content');panel.replaceChildren();
  panel.append(el('div','inspector-kicker','ПЕРЕХОД НА КАРТЕ ЭТАПОВ'),badge(link.evidence_status),el('h2','',itemName(link.source)+' → '+itemName(link.target)));
  panel.append(el('p','muted','Связь объединяет переходы карты операций: '+link.transitions.length+'. Условия и основания указаны у каждого перехода.'));
@@ -901,26 +882,12 @@ function setMode(mode){
  announce(mode==='stages'?'Показаны бизнес-этапы':'Показаны атомарные операции');
 }
 function syncModeButtons(){for(const button of $('view-mode').querySelectorAll('button'))button.setAttribute('aria-pressed',String(button.dataset.mode===viewMode));}
-function captureMapState(){
- const view=$('viewport');return {mode:viewMode,expanded:[...expandedStages],zoom,left:view.scrollLeft,top:view.scrollTop,selected:selected?{...selected}:null,
-  inspectorHidden:$('inspector').hidden,inspectorView:{...inspectorView},inspectorScroll:$('inspector-content').scrollTop,restoreFocus};
-}
-function restoreMapState(state){
- if(!state)return;viewMode=state.mode;expandedStages.clear();for(const id of state.expanded)expandedStages.add(id);
- display=buildDisplay();selected=state.selected;restoreFocus=state.restoreFocus;syncModeButtons();$('inspector').hidden=state.inspectorHidden;
- const view=state.inspectorView,value=view.type==='node'?byId.get(view.id):view.type==='edge'?validEdges.find(edge=>text(edge.id)===view.id):
-  view.type==='stage'?businessStageById.get(view.id):view.type==='group'?groupById.get(view.id):view.type==='link'?display.linkById.get(view.id):null;
- if(value)({node:showNode,edge:showEdge,stage:showStage,group:showGroup,link:showLink}[view.type])(value);
- else if(view.type==='findings'){showFindings();$('inspector').hidden=state.inspectorHidden;}else showOverview();
- draw();applyZoom(state.zoom);$('viewport').scrollTo({left:state.left,top:state.top});$('inspector-content').scrollTop=state.inspectorScroll;
-}
 $('view-mode').hidden=!stageRecords.length;
 for(const button of $('view-mode').querySelectorAll('button'))button.addEventListener('click',()=>setMode(button.dataset.mode));
 display=buildDisplay();syncModeButtons();
-document.addEventListener('keydown',event=>{if(event.defaultPrevented||$('panel-map').inert)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
+document.addEventListener('keydown',event=>{if(event.defaultPrevented)return;if(event.key==='Escape'&&!$('inspector').hidden){event.preventDefault();closeInspector();}});
 
 function showFindings(){
- inspectorView={type:'findings'};
  closePopovers();selected=null;const panel=$('inspector-content');panel.replaceChildren();
  panel.append(el('h2','','Что осталось установить'));
  field(panel,'Результат исследования',stateNames[runState]||'Статус исследования не установлен');
@@ -1122,11 +1089,8 @@ viewport.addEventListener('gesturestart',event=>{if(!nodes.length)return;event.p
 viewport.addEventListener('gesturechange',event=>{if(gestureZoom===null)return;event.preventDefault();if(Number.isFinite(event.scale)&&event.scale>0)applyZoom(gestureZoom*event.scale,cursorAnchor(event));},{passive:false});
 viewport.addEventListener('gestureend',event=>{if(gestureZoom===null)return;event.preventDefault();gestureZoom=null;},{passive:false});
 let drag=null;viewport.addEventListener('pointerdown',event=>{if(event.button!==0||event.pointerType==='touch'||event.target.closest('button,.edge'))return;drag={id:event.pointerId,x:event.clientX,y:event.clientY,left:viewport.scrollLeft,top:viewport.scrollTop};viewport.setPointerCapture(event.pointerId);viewport.classList.add('dragging');});viewport.addEventListener('pointermove',event=>{if(!drag||drag.id!==event.pointerId)return;viewport.scrollLeft=drag.left-(event.clientX-drag.x);viewport.scrollTop=drag.top-(event.clientY-drag.y);});const stopDrag=()=>{drag=null;viewport.classList.remove('dragging');};viewport.addEventListener('pointerup',stopDrag);viewport.addEventListener('pointercancel',stopDrag);viewport.addEventListener('lostpointercapture',stopDrag);
-// Under a report tab the map keeps the user's zoom and scroll; only its geometry is redrawn.
-let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{
- if($('panel-map').inert){const view=$('viewport'),left=view.scrollLeft,top=view.scrollTop;draw();view.scrollLeft=left;view.scrollTop=top;}else{draw();initialView();}});});
+let resizeFrame=0;window.addEventListener('resize',()=>{cancelAnimationFrame(resizeFrame);resizeFrame=requestAnimationFrame(()=>{draw();initialView();});});
 showOverview();draw();initialView();updateHighlight();
  if(document.fonts?.ready)document.fonts.ready.then(()=>{const view=$('viewport'),left=view.scrollLeft,top=view.scrollTop;draw();view.scrollLeft=left;view.scrollTop=top;});
-/*__REPORT_JS__*/
 })();
 '''.replace('__GRAPH_LAYOUT_JS__', _GRAPH_LAYOUT_JS + _STAGE_PROJECTION_JS)

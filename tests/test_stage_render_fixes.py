@@ -1,7 +1,7 @@
 """Canonical paths and execution semantics survive the business-stage view.
 
 ``stage_render_fixture`` is also an offline browser fixture. It never calls a
-provider or changes source files; the optional report tests a retained renderer.
+provider or changes source files.
 """
 import copy
 import json
@@ -9,15 +9,13 @@ import shutil
 import subprocess
 import unittest
 
-from pko.observability.contracts import REPORT_VERSION, map_revision
-from pko.observability.model_stage import methodology
 from pko.render.scenario_map import _SCRIPT, _STAGE_PROJECTION_JS, render_scenario_map
 from pko.stages.contracts import HIERARCHY_VERSION
-from pko.stages.inputs import METHODOLOGY, STAGE, input_fingerprint
+from pko.stages.inputs import METHODOLOGY, STAGE, input_fingerprint, map_revision, methodology
 from pko.stages.regions import collapse_check, operation_graph
 
 
-def stage_render_fixture(with_report=False):
+def stage_render_fixture():
     names = {"a": "Принять обращение", "b": "Согласовать обслуживание", "c": "Проверить причину отказа",
              "d": "Подготовить документы", "x": "Зарегистрировать решение", "y": "Отменить обращение",
              "u": "Отложить обработку", "v": "Зафиксировать отсутствие решения", "w": "Передать результат проверки",
@@ -58,11 +56,7 @@ def stage_render_fixture(with_report=False):
                  "input_mode": "full", "input_sha256": input_fingerprint(model, "full"),
                  "methodology_sha256": methodology(STAGE, METHODOLOGY)["sha256"],
                  "authority_status": "proposed", "stages": stages, "membership": membership, "unassigned": []}
-    report = {"report_version": REPORT_VERSION, "map_revision": map_revision(model), "stages": [],
-              "logging": {"sites": [{"id": "demo-log", "path": "synthetic/service.py", "line_start": 1,
-                  "line_end": 1, "callee": "logger.info", "kind": "logging", "operation_ids": ["x"],
-                  "link_status": "linked", "link_basis": "operation_evidence", "event_key": "synthetic.result"}]}} if with_report else None
-    return model, report, hierarchy
+    return model, hierarchy
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js is needed for renderer graph checks")
@@ -75,7 +69,7 @@ class StageRenderFixTests(unittest.TestCase):
 
     def test_atomic_scope_is_projected_without_another_members_exits(self):
         helpers = _SCRIPT[_SCRIPT.index("function scenarioNodeScope("):_SCRIPT.index("function updateHighlight(")]
-        model, _, hierarchy = stage_render_fixture()
+        model, hierarchy = stage_render_fixture()
         source = _STAGE_PROJECTION_JS + helpers + """
 const data=JSON.parse(require('fs').readFileSync(0,'utf8'));
 const scope=scenarioNodeScope('b',data.model.edges);
@@ -131,7 +125,7 @@ console.log(JSON.stringify(references.map(ref=>({ref,restored:opened.links.find(
             _SCRIPT.index("const outcomeNames="):_SCRIPT.index("const nodeKindLabel=")]
 
     def test_every_exact_outcome_and_conditional_completion_survive_badges(self):
-        model, _, _ = stage_render_fixture()
+        model, _ = stage_render_fixture()
         model["nodes"].append({"id": "extra-success", "outcome": "success"})
         model["scenario"]["terminal_operation_ids"].append("extra-success")
         source = "const data=JSON.parse(require('fs').readFileSync(0,'utf8')),scenario=data.scenario;\n" + self.terminal_helpers() + "console.log(JSON.stringify(stageOutcomes(data.nodes)));"
@@ -145,7 +139,7 @@ console.log(JSON.stringify(references.map(ref=>({ref,restored:opened.links.find(
         self.assertIn("отмена", next(row for row in outcomes if row["outcome"] == "cancelled")["label"])
 
     def test_continuation_and_join_semantics_keep_their_own_operation(self):
-        model, _, _ = stage_render_fixture()
+        model, _ = stage_render_fixture()
         source = "const data=JSON.parse(require('fs').readFileSync(0,'utf8')),scenario=data.scenario;\n" + self.terminal_helpers() + "console.log(JSON.stringify(stageSemantics(data.nodes,data.edges).map(row=>[row.node.id,row.dimension,row.mode])));"
         self.assertEqual(self.js(source, model), [["a", "continuation", "choice"], ["b", "continuation", "all"],
             ["c", "continuation", "choice"], ["x", "continuation", "choice"], ["x", "join", "all"], ["v", "join", "any"]])
@@ -157,17 +151,15 @@ console.log(JSON.stringify(references.map(ref=>({ref,restored:opened.links.find(
         source = "const data=JSON.parse(require('fs').readFileSync(0,'utf8')),scenario=data.scenario;\n" + self.terminal_helpers() + "console.log(JSON.stringify(stageSemantics(data.nodes,data.edges)));"
         self.assertEqual(self.js(source, model), [])
 
-    def test_standalone_and_retained_report_fixture_are_valid_and_do_not_mutate_map(self):
-        for with_report in (False, True):
-            model, report, hierarchy = stage_render_fixture(with_report)
-            original = copy.deepcopy((model, report, hierarchy))
-            html = render_scenario_map(model, report, hierarchy)
-            self.assertEqual((model, report, hierarchy), original)
-            self.assertEqual('id="process-report"' in html, with_report)
-            self.assertIn('id="map-hierarchy"', html)
-            script = html[html.rindex("<script>") + len("<script>"):html.rindex("</script>")]
-            result = subprocess.run([shutil.which("node"), "--check"], input=script, encoding="utf-8", capture_output=True, timeout=20)
-            self.assertEqual(result.returncode, 0, result.stderr)
+    def test_fixture_page_is_valid_and_does_not_mutate_the_map(self):
+        model, hierarchy = stage_render_fixture()
+        original = copy.deepcopy((model, hierarchy))
+        html = render_scenario_map(model, hierarchy)
+        self.assertEqual((model, hierarchy), original)
+        self.assertIn('id="map-hierarchy"', html)
+        script = html[html.rindex("<script>") + len("<script>"):html.rindex("</script>")]
+        result = subprocess.run([shutil.which("node"), "--check"], input=script, encoding="utf-8", capture_output=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 """Business stages: regions, grouping contract, publication and the projected view."""
 
 import copy
-import hashlib
 import json
 import os
 import random
@@ -14,17 +13,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pko.errors import PkoError
-from pko.observability.contracts import map_revision
-from pko.observability.model_stage import ReportBudget, StageModel
-from pko.observability.pipeline import ReportOptions
 from pko.render.scenario_map import _STAGE_PROJECTION_JS, render_scenario_map
 from pko.scenario_map.runner import HIERARCHY_FILE, rebuild_from_map, run_scenario
 from pko.stages import grouping
 from pko.stages.contracts import HierarchyError, validate_hierarchy
-from pko.stages.inputs import input_fingerprint
+from pko.stages.inputs import input_fingerprint, map_revision
+from pko.stages.model import RequestBudget, StageModel
 from pko.stages.regions import collapse_check, immediate_dominators, operation_graph
-from observability_script import ScriptedReportClient
 from scenario_script import SCENARIO, SPEC, ScriptedClient, sources
+from stage_script import ScriptedStageClient
 
 NAMES = ["Приём платежа", "Поиск договора по реквизитам платежа", "Проверка, найден ли договор",
          "Зачисление платежа на договор", "Уведомление клиента о зачислении", "Передача платежа специалисту"]
@@ -59,8 +56,7 @@ def graph_of(pairs, entries=()):
 
 
 def stage_model(client):
-    return StageModel(client, ReportBudget(max_requests=4, deadline=time.monotonic() + 60), {},
-                      methodology_dir=grouping.METHODOLOGY)
+    return StageModel(client, RequestBudget(max_requests=4, deadline=time.monotonic() + 60), grouping.METHODOLOGY)
 
 
 class RegionTests(unittest.TestCase):
@@ -101,7 +97,7 @@ class RegionTests(unittest.TestCase):
 
 class HierarchyTests(unittest.TestCase):
     def ask(self, *answers, model=None):
-        client = ScriptedReportClient({"submit_business_stages": [lambda payload, messages, answer=answer: answer
+        client = ScriptedStageClient({"submit_business_stages": [lambda payload, messages, answer=answer: answer
                                                                   for answer in answers]})
         model = model or payment_map()
         before = copy.deepcopy(model)
@@ -213,7 +209,7 @@ class HierarchyTests(unittest.TestCase):
         full = len(json.dumps(grouping.build_payload(model), ensure_ascii=False))
         compact = len(json.dumps(grouping.build_payload(model, compact=True), ensure_ascii=False))
         self.assertLess(compact, full)
-        client = ScriptedReportClient({"submit_business_stages": [lambda payload, messages: STAGES]})
+        client = ScriptedStageClient({"submit_business_stages": [lambda payload, messages: STAGES]})
         model_stage = stage_model(client)
         messages = [{"role": "system", "content": grouping.methodology(grouping.STAGE, grouping.METHODOLOGY)["text"]},
                     {"role": "user", "content": json.dumps(grouping.build_payload(model, compact=True), ensure_ascii=False,
@@ -393,52 +389,28 @@ class StagePublicationTests(unittest.TestCase):
         self.assertFalse((output / HIERARCHY_FILE).exists())
         self.assertNotIn('id="map-hierarchy"', (output / "scenario_map.html").read_text(encoding="utf-8"))
 
-    @patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True, create=True)
-    def test_rebuilding_stages_keeps_the_map_report_and_handoff_intact(self):
+    def test_rebuilding_stages_keeps_the_map_intact(self):
         output = self.root / "full"
-        run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient(), observability=True,
-                     report_options=ReportOptions(client=ScriptedReportClient()))
+        run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient())
         map_bytes = (output / "scenario_map.json").read_bytes()
         first = json.loads((output / HIERARCHY_FILE).read_text(encoding="utf-8"))
-        client = ScriptedReportClient()
-        rebuild_from_map(output / "scenario_map.json", [], output, spec=SPEC, client=client)
+        client = ScriptedStageClient()
+        rebuild_from_map(output / "scenario_map.json", output, spec=SPEC, client=client)
         self.assertEqual([tool for tool, _ in client.requests], ["submit_business_stages"])
         self.assertEqual((output / "scenario_map.json").read_bytes(), map_bytes, "stages never rewrite the map")
-        manifest = json.loads((output / "handoff" / "manifest.json").read_text(encoding="utf-8"))
-        checksum = next(row["sha256"] for row in manifest["files"] if row["name"] == "../scenario_map.json")
-        self.assertEqual(checksum, hashlib.sha256(map_bytes).hexdigest())
         second = json.loads((output / HIERARCHY_FILE).read_text(encoding="utf-8"))
         self.assertNotEqual(second["run_id"], first["run_id"])
         self.assertEqual(second["map_run_id"], first["map_run_id"])
         html = (output / "scenario_map.html").read_text(encoding="utf-8")
-        self.assertIn('role="tablist"', html, "the saved report stays in the HTML")
         self.assertIn('id="map-hierarchy"', html)
         if shutil.which("node"):
-            # Map, stage view and report scripts share one scope: names must not collide.
+            # Map and stage view scripts share one scope: names must not collide.
             script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
             result = subprocess.run([shutil.which("node"), "--check"], input=script, capture_output=True,
                                     text=True, encoding="utf-8", timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
         audit = (output / "audit" / f"run_{second['run_id']}.txt").read_text(encoding="utf-8")
         self.assertIn("scenario_rebuild_run", audit)
-
-    @patch("pko.scenario_map.runner.OBSERVABILITY_ENABLED", True, create=True)
-    def test_report_rebuild_without_stages_reuses_the_saved_ones(self):
-        output = self.root / "reuse"
-        run_scenario(SCENARIO, sources(), output, spec=SPEC, client=ScriptedClient())
-        saved = (output / HIERARCHY_FILE).read_bytes()
-        stages_client = ScriptedReportClient()
-        rebuild_from_map(output / "scenario_map.json", sources(), output, spec=SPEC, stages=False, observability=True,
-                         client=stages_client, report_options=ReportOptions(client=ScriptedReportClient()))
-        self.assertEqual(stages_client.requests, [])
-        self.assertEqual((output / HIERARCHY_FILE).read_bytes(), saved)
-        html = (output / "scenario_map.html").read_text(encoding="utf-8")
-        self.assertIn('id="map-hierarchy"', html)
-        self.assertIn('role="tablist"', html)
-        with self.assertRaises(PkoError):
-            rebuild_from_map(output / "scenario_map.json", [], output, spec=SPEC, stages=False)
-        with self.assertRaisesRegex(PkoError, "источников"):
-            rebuild_from_map(output / "scenario_map.json", [], output, spec=SPEC, observability=True)
 
 
 @unittest.skipUnless(shutil.which("node"), "Node.js нужен для проверки проекции этапов")
@@ -501,7 +473,7 @@ console.log(JSON.stringify(input.map(c=>{const view=projectScenarioStages(c.node
     def test_a_closed_stage_lights_the_paths_through_it_only(self):
         from pko.render.scenario_map import _SCRIPT
         from test_stage_render_fixes import stage_render_fixture
-        model, _, hierarchy = stage_render_fixture()
+        model, hierarchy = stage_render_fixture()
         helpers = _SCRIPT[_SCRIPT.index("function scenarioNodeScope("):_SCRIPT.index("function updateHighlight(")]
         runner = _STAGE_PROJECTION_JS + helpers + """
 const data=JSON.parse(require('fs').readFileSync(0,'utf8'));
