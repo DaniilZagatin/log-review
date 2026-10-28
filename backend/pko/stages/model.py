@@ -23,6 +23,8 @@ from pko.scenario_map.context import context_budget
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
 from pko.stages.inputs import METHODOLOGY, methodology
 
+RESPONSE_CAP = 32768
+
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.S)
 
 
@@ -104,7 +106,9 @@ class StageModel:
 
     def _limits(self, schema: dict) -> tuple[int, int]:
         window = getattr(getattr(self.client, "spec", None), "context_window", None) or DEFAULT_CONTEXT_WINDOW
-        return context_budget(window, [schema])
+        # One answer lists every operation of the map with a goal, result and
+        # boundary per stage; the research limit of 8192 tokens is too small.
+        return context_budget(window, [schema], response_cap=RESPONSE_CAP)
 
     def ask(self, stage: str, payload: dict, tool: dict,
             validate: Callable[[dict], tuple[Any, list[str]]], *,
@@ -132,10 +136,13 @@ class StageModel:
                     break
             with trace_span("stage_model_request", stage=stage, attempt=attempt) as span:
                 try:
+                    # Without reasoning: the answer is a structured tool call that the
+                    # host checks, and reasoning used up the whole answer budget twice.
                     reply = call_model(self.client, messages, deadline=self.budget.deadline,
                                        before_attempt=lambda: self.budget.take(stage),
                                        before_retry=self.budget.check,
-                                       tools=[schema], temperature=0, max_tokens=response_tokens)
+                                       tools=[schema], temperature=0, max_tokens=response_tokens,
+                                       enable_thinking=False)
                 except (ModelDeadlineExceeded, BudgetExhausted) as exc:
                     if result is not None:
                         errors.append(str(exc))

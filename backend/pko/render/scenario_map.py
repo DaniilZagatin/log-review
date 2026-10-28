@@ -187,11 +187,13 @@ button:hover{border-color:transparent}
 .node.selected .node-surface>*{stroke:var(--accent);fill:var(--accent-soft);stroke-width:2}
 .node.terminal-success{--terminal-color:var(--success);--terminal-soft:var(--success-soft)}
 .node.terminal-negative{--terminal-color:var(--danger);--terminal-soft:var(--danger-soft)}
-.node.terminal-success .node-surface,.node.terminal-negative .node-surface{filter:drop-shadow(0 0 7px color-mix(in srgb,var(--terminal-color) 42%,transparent))}
-.node.terminal-success .node-surface>*,.node.terminal-negative .node-surface>*{stroke:var(--terminal-color);stroke-width:1.8}
-.node.terminal-success.selected .node-surface>*,.node.terminal-negative.selected .node-surface>*{fill:var(--terminal-soft);stroke-width:2.5}
+:root{--neutral-end:#2196f3;--neutral-end-ink:#0a64ad;--neutral-end-soft:#e3f2fd}:root[data-theme="dark"]{--neutral-end:#64b5f6;--neutral-end-ink:#90caf9;--neutral-end-soft:#0d2338}
+.node.terminal-neutral{--terminal-color:var(--neutral-end);--terminal-soft:var(--neutral-end-soft)}
+.node.terminal-success .node-surface,.node.terminal-negative .node-surface,.node.terminal-neutral .node-surface{filter:drop-shadow(0 0 7px color-mix(in srgb,var(--terminal-color) 42%,transparent))}
+.node.terminal-success .node-surface>*,.node.terminal-negative .node-surface>*,.node.terminal-neutral .node-surface>*{stroke:var(--terminal-color);stroke-width:1.8}
+.node.terminal-success.selected .node-surface>*,.node.terminal-negative.selected .node-surface>*,.node.terminal-neutral.selected .node-surface>*{fill:var(--terminal-soft);stroke-width:2.5}
 .node-terminal{font-size:11px;font-weight:500;line-height:1.35;color:var(--ink-secondary)}
-.terminal-success .node-terminal,.terminal-negative .node-terminal{color:var(--terminal-color)}
+.terminal-success .node-terminal,.terminal-negative .node-terminal{color:var(--terminal-color)}.terminal-neutral .node-terminal{color:var(--neutral-end-ink)}
 .node-type,.node-system,.node-group,.node-status{color:var(--ink-tertiary)}
 .node-status.observed:before{background:var(--success)}
 .node-name{font-weight:500;letter-spacing:-.01em}
@@ -200,7 +202,8 @@ button:hover{border-color:transparent}
 .edge-inferred .edge-visible{stroke:var(--warning)}
 .edge-unknown .edge-visible{stroke:var(--ink-disabled)}
 .edge.selected .edge-visible,.edge.in-scope .edge-visible{stroke:var(--accent);stroke-width:2}
-#arrow path{fill:var(--line-control)}
+#arrow path{fill:var(--line-control)}#arrow-active path{fill:var(--accent)}
+.edge-visible{stroke-linecap:round;stroke-linejoin:round}.edge.selected .edge-visible,.edge.in-scope .edge-visible{marker-end:url(#arrow-active)}
 .map-actions{border:0;border-radius:var(--radius-pill);background:var(--bg-raised);box-shadow:var(--shadow-md);padding:4px;gap:4px}
 .map-actions button{min-height:40px}
 .map-actions #fit{border-left:0;border-radius:var(--radius-pill)}
@@ -284,9 +287,10 @@ _STAGE_STYLE = r'''
 .stage-outcome{font-size:11px;line-height:1.5;padding:1px 8px;border-radius:var(--radius-pill);background:var(--bg-muted);color:var(--ink-secondary)}
 .stage-outcome.success{background:var(--success-soft);color:var(--success)}
 .stage-outcome.negative{background:var(--danger-soft);color:var(--danger)}
+.stage-outcome.neutral{background:var(--neutral-end-soft);color:var(--neutral-end-ink)}
 .node .stage-chip{align-self:flex-start;padding:1px 8px;border-radius:var(--radius-pill);background:var(--accent-soft);color:var(--accent-ink)}
 .stage-proposal{margin:2px 0 4px}
-.stage-end.success .continuation-condition{color:var(--success)}.stage-end.negative .continuation-condition{color:var(--danger)}
+.stage-end.success .continuation-condition{color:var(--success)}.stage-end.negative .continuation-condition{color:var(--danger)}.stage-end.neutral .continuation-condition{color:var(--neutral-end-ink)}
 .stage-switch{margin-top:16px}
 .stage-frame rect{fill:color-mix(in srgb,var(--accent-soft) 40%,var(--bg));stroke:var(--accent);stroke-width:1.4;stroke-dasharray:6 4;vector-effect:non-scaling-stroke}
 .stage-frame.in-scope rect,.stage-frame.selected rect{stroke-dasharray:none;stroke-width:2}
@@ -305,48 +309,106 @@ _STAGE_STYLE = r'''
 
 _GRAPH_LAYOUT_JS = r'''
 function layoutScenarioGraph(nodes, edges, sizes, vertical=false, entryIds=[]) {
- const key=value=>String(value),adj=new Map(nodes.map(n=>[key(n.id),[]]));
- const valid=edges.filter(e=>adj.has(key(e.source))&&adj.has(key(e.target)));
- for(const e of valid)if(e.kind!=='data'&&e.kind!=='retry')adj.get(key(e.source)).push(key(e.target));
- let counter=0;const indices=new Map(),low=new Map(),stack=[],inStack=new Set(),components=[];
- function visit(id){indices.set(id,counter);low.set(id,counter++);stack.push(id);inStack.add(id);for(const to of adj.get(id)){if(!indices.has(to)){visit(to);low.set(id,Math.min(low.get(id),low.get(to)));}else if(inStack.has(to))low.set(id,Math.min(low.get(id),indices.get(to)));}if(low.get(id)===indices.get(id)){const group=[];let member;do{member=stack.pop();inStack.delete(member);group.push(member);}while(member!==id);components.push(group.reverse());}}
- for(const node of [...nodes.filter(n=>entryIds.map(key).includes(key(n.id))||n.kind==='start'),...nodes])if(!indices.has(key(node.id)))visit(key(node.id));
- const owner=new Map();components.forEach((group,i)=>group.forEach(id=>owner.set(id,i)));const out=components.map(()=>new Set()),indegree=components.map(()=>0),base=components.map(()=>0);
- for(const [from,tos] of adj)for(const to of tos){const a=owner.get(from),b=owner.get(to);if(a!==b&&!out[a].has(b)){out[a].add(b);indegree[b]++;}}
- const queue=components.map((_,i)=>i).filter(i=>indegree[i]===0);for(let at=0;at<queue.length;at++){const i=queue[at];for(const j of out[i]){base[j]=Math.max(base[j],base[i]+components[i].length);if(--indegree[j]===0)queue.push(j);}}
- const rank=new Map();components.forEach((group,i)=>group.forEach((id,j)=>rank.set(id,base[i]+j)));
- const groups=new Map(),centers=new Map();for(const node of nodes){const id=key(node.id),r=rank.get(id)||0;if(!groups.has(r))groups.set(r,[]);groups.get(r).push(id);}
- const levels=[...groups.keys()].sort((a,b)=>a-b),secondarySize=id=>vertical?sizes.get(id).w:sizes.get(id).h;
- for(const level of levels){let cursor=0;for(const id of groups.get(level)){centers.set(id,cursor+secondarySize(id)/2);cursor+=secondarySize(id)+38;}for(const id of groups.get(level))centers.set(id,centers.get(id)-(cursor-38)/2);}
- const incoming=new Map(nodes.map(n=>[key(n.id),[]])),outgoing=new Map(nodes.map(n=>[key(n.id),[]]));
- for(const e of valid)if(e.kind!=='data'){incoming.get(key(e.target)).push(key(e.source));outgoing.get(key(e.source)).push(key(e.target));}
- for(let pass=0;pass<4;pass++){const forward=pass%2===0;for(const level of forward?levels:[...levels].reverse()){
-  const group=groups.get(level),desired=new Map();for(const id of group){const neighbors=(forward?incoming:outgoing).get(id).filter(other=>forward?rank.get(other)<level:rank.get(other)>level).map(other=>centers.get(other));desired.set(id,neighbors.length?neighbors.reduce((sum,n)=>sum+n,0)/neighbors.length:centers.get(id));}
-  group.sort((a,b)=>desired.get(a)-desired.get(b));let cursor=-Infinity;for(const id of group){const size=secondarySize(id),top=Math.max(desired.get(id)-size/2,cursor);centers.set(id,top+size/2);cursor=top+size+38;}const shift=group.reduce((sum,id)=>sum+desired.get(id)-centers.get(id),0)/group.length;for(const id of group)centers.set(id,centers.get(id)+shift);
- }}
- // Long jumps thread through rank gaps; only cycles need the outer channel.
+ // Layered layout: a depth-first walk from the entries turns loops into back
+ // links, operations take their longest-path rank, virtual points carry long
+ // links through the ranks they skip, the order inside each rank is chosen to
+ // reduce crossings, and cards then align with their neighbours.
+ const key=value=>String(value),ids=nodes.map(n=>key(n.id)),known=new Set(ids);
+ const valid=edges.filter(e=>known.has(key(e.source))&&known.has(key(e.target)));
+ const flow=valid.filter(e=>e.kind!=='data'&&e.kind!=='retry'&&key(e.source)!==key(e.target));
+ const out=new Map(ids.map(id=>[id,[]])),fedBy=new Map(ids.map(id=>[id,0]));
+ for(const e of flow){out.get(key(e.source)).push(e);fedBy.set(key(e.target),fedBy.get(key(e.target))+1);}
+ const entries=new Set(entryIds.map(key)),fixed=new Set([...entries,...nodes.filter(n=>n.kind==='start').map(n=>key(n.id))]);
+ const state=new Map(),back=new Set(),found=[];
+ for(const seed of [...ids.filter(id=>entries.has(id)),...ids.filter(id=>fixed.has(id)),...ids.filter(id=>!fedBy.get(id)),...ids]){
+  if(state.has(seed))continue;state.set(seed,1);found.push(seed);const stack=[[seed,0]];
+  while(stack.length){const top=stack[stack.length-1],list=out.get(top[0]);
+   if(top[1]<list.length){const e=list[top[1]++],to=key(e.target);
+    if(!state.has(to)){state.set(to,1);found.push(to);stack.push([to,0]);}else if(state.get(to)===1)back.add(e);}
+   else{state.set(top[0],2);stack.pop();}}}
+ const forward=flow.filter(e=>!back.has(e)),rank=new Map(ids.map(id=>[id,0])),waiting=new Map(ids.map(id=>[id,0]));
+ for(const e of forward)waiting.set(key(e.target),waiting.get(key(e.target))+1);
+ const order=ids.filter(id=>!waiting.get(id));
+ for(let i=0;i<order.length;i++)for(const e of out.get(order[i])){if(back.has(e))continue;const to=key(e.target);
+  rank.set(to,Math.max(rank.get(to),rank.get(order[i])+1));waiting.set(to,waiting.get(to)-1);if(!waiting.get(to))order.push(to);}
+ // An operation reached only through a loop, or not at all, stands just before its nearest successor.
+ const fed=new Set(forward.map(e=>key(e.target)));
+ for(const id of [...order].reverse())if(!fed.has(id)&&!fixed.has(id)){const next=out.get(id).filter(e=>!back.has(e)).map(e=>rank.get(key(e.target)));if(next.length)rank.set(id,Math.max(0,Math.min(...next)-1));}
+ const deepest=Math.max(0,...rank.values()),layers=Array.from({length:deepest+1},()=>[]),info=new Map(),discovered=new Map(found.map((id,i)=>[id,i]));
+ const vertex=(id,r,owner)=>{info.set(id,{rank:r,dummy:owner!==undefined,owner,up:[],down:[]});layers[r].push(id);};
+ for(const id of ids)vertex(id,rank.get(id));
+ const link=(a,b,w)=>{info.get(a).down.push([b,w]);info.get(b).up.push([a,w]);},chains=new Map();
+ forward.forEach((e,index)=>{const s=key(e.source),t=key(e.target),name=e.id===undefined?'#'+index:key(e.id);
+  if(rank.get(t)-rank.get(s)===1){link(s,t,1);return;}
+  // A long link is a chain of virtual points, kept straight by heavier weights.
+  let previous=s;const chain=[];for(let r=rank.get(s)+1;r<rank.get(t);r++){const id='\0'+name+'\0'+r;vertex(id,r,s);link(previous,id,previous===s?2:8);chain.push(id);previous=id;}
+  link(previous,t,2);chains.set(name,chain);});
+ // Crossing reduction: barycentre sweeps from the depth-first order; the best order seen is kept.
+ const position=new Map(),index=()=>layers.forEach(layer=>layer.forEach((id,i)=>position.set(id,i)));
+ const hint=id=>{const v=info.get(id);return v.dummy?discovered.get(v.owner)+.5:discovered.get(id);};
+ layers.forEach(layer=>layer.sort((a,b)=>hint(a)-hint(b)));index();
+ const crossings=()=>{let total=0;for(let r=0;r<deepest;r++){const pairs=[];for(const id of layers[r])for(const [to] of info.get(id).down)pairs.push([position.get(id),position.get(to)]);
+  pairs.sort((a,b)=>a[0]-b[0]||a[1]-b[1]);for(let i=0;i<pairs.length;i++)for(let j=i+1;j<pairs.length;j++)if(pairs[j][0]>pairs[i][0]&&pairs[j][1]<pairs[i][1])total++;}return total;};
+ const sweep=down=>{for(const r of down?layers.keys():[...layers.keys()].reverse()){const layer=layers[r],weight=new Map();
+  for(const id of layer){const near=down?info.get(id).up:info.get(id).down;weight.set(id,near.length?near.reduce((sum,[other])=>sum+position.get(other),0)/near.length:position.get(id));}
+  layer.sort((a,b)=>weight.get(a)-weight.get(b)||position.get(a)-position.get(b));layer.forEach((id,i)=>position.set(id,i));}};
+ let best=layers.map(layer=>[...layer]),fewest=info.size<=1500?crossings():0;
+ for(let pass=0;pass<12&&fewest;pass++){sweep(pass%2===0);const count=crossings();if(count<fewest){fewest=count;best=layers.map(layer=>[...layer]);}}
+ best.forEach((layer,r)=>{layers[r]=layer;});index();
+ // Coordinates across the flow: each rank is placed as close as possible to the
+ // weighted mean of its neighbours while keeping its order and spacing
+ // (isotonic regression by pooling adjacent violators).
+ const extent=id=>info.get(id).dummy?0:(vertical?sizes.get(id).w:sizes.get(id).h)/2;
+ const spacing=(a,b)=>extent(a)+extent(b)+(info.get(a).dummy&&info.get(b).dummy?14:info.get(a).dummy||info.get(b).dummy?24:38);
+ const center=new Map();for(const layer of layers){let cursor=0;layer.forEach((id,i)=>{if(i)cursor+=spacing(layer[i-1],id);center.set(id,cursor);});for(const id of layer)center.set(id,center.get(id)-cursor/2);}
+ const settle=(layer,sides)=>{const offset=[0],blocks=[];for(let i=1;i<layer.length;i++)offset.push(offset[i-1]+spacing(layer[i-1],layer[i]));
+  layer.forEach((id,i)=>{let sum=0,total=0;for(const side of sides)for(const [other,w] of info.get(id)[side]){sum+=center.get(other)*w;total+=w;}
+   const weight=total||.05;let block={sum:((total?sum/total:center.get(id))-offset[i])*weight,weight,count:1};
+   while(blocks.length&&blocks[blocks.length-1].sum/blocks[blocks.length-1].weight>=block.sum/block.weight){const last=blocks.pop();block={sum:last.sum+block.sum,weight:last.weight+block.weight,count:last.count+block.count};}
+   blocks.push(block);});
+  let i=0;for(const block of blocks)for(let j=0;j<block.count;j++,i++)center.set(layer[i],block.sum/block.weight+offset[i]);};
+ for(let pass=0;pass<8;pass++){const down=pass%2===0;for(const r of down?layers.keys():[...layers.keys()].reverse())settle(layers[r],[down?'up':'down']);}
+ for(let pass=0;pass<2;pass++)for(const r of layers.keys())settle(layers[r],['up','down']);
+ // Links that return to an earlier rank share the outer channel: the longest span runs outermost, so loops nest.
+ const returning=valid.filter(e=>rank.get(key(e.target))<=rank.get(key(e.source)));
+ const backIndex=new Map([...returning].sort((a,b)=>(key(a.source)===key(a.target))-(key(b.source)===key(b.target))||
+  (rank.get(key(b.source))-rank.get(key(b.target)))-(rank.get(key(a.source))-rank.get(key(a.target)))).map((e,i)=>[key(e.id),i]));
  const outerEdges=new Set(valid.filter(e=>rank.get(key(e.target))-rank.get(key(e.source))!==1).map(e=>key(e.id)));
- const backward=valid.filter(e=>key(e.source)!==key(e.target)&&rank.get(key(e.target))<=rank.get(key(e.source))).length;
- const outerSpace=backward?80+backward*24:0,positions=new Map();
- if(!nodes.length)return {rank,positions,outerEdges,width:600,height:400};
- const secondaryMin=Math.min(...nodes.map(n=>centers.get(key(n.id))-secondarySize(key(n.id))/2)),secondaryMax=Math.max(...nodes.map(n=>centers.get(key(n.id))+secondarySize(key(n.id))/2));
- // A backward edge approaches its target from before the first rank; reserve that lead so curves stay on the canvas.
- let primary=32+(backward?24:0);
- for(const level of levels){const group=groups.get(level),primarySize=Math.max(...group.map(id=>vertical?sizes.get(id).h:sizes.get(id).w));for(const id of group){const size=sizes.get(id),secondary=32+centers.get(id)-secondarySize(id)/2-secondaryMin+(vertical?0:outerSpace);positions.set(id,{x:vertical?secondary:primary,y:vertical?primary:secondary,w:size.w,h:size.h});}primary+=primarySize+(vertical?58:82);}
- const crossSize=secondaryMax-secondaryMin+64+outerSpace;let width=vertical?crossSize:primary-82+32,height=vertical?primary-58+32:crossSize;
+ const outerSpace=returning.length?80+returning.length*24:0,positions=new Map();
+ if(!nodes.length)return {rank,positions,outerEdges,bends:new Map(),backIndex,ports:new Map(),width:600,height:400};
+ const all=[...info.keys()],low=Math.min(...all.map(id=>center.get(id)-Math.max(extent(id),12))),high=Math.max(...all.map(id=>center.get(id)+Math.max(extent(id),12)));
+ const across=id=>32+center.get(id)-low+(vertical?0:outerSpace);
+ // A backward link approaches its target from before the first rank; reserve that lead so curves stay on the canvas.
+ let primary=32+(returning.length?24:0);
+ for(const layer of layers){const cards=layer.filter(id=>!info.get(id).dummy),depth=Math.max(0,...cards.map(id=>vertical?sizes.get(id).h:sizes.get(id).w));
+  for(const id of cards){const size=sizes.get(id),secondary=across(id)-extent(id);positions.set(id,{x:vertical?secondary:primary,y:vertical?primary:secondary,w:size.w,h:size.h});}
+  primary+=depth+(vertical?58:82);}
+ const bends=new Map([...chains].map(([name,chain])=>[name,new Map(chain.map(id=>[info.get(id).rank,across(id)]))]));
+ // Lines meeting one side of a card are spread along it in the order of their other ends.
+ const ports=new Map(valid.filter(e=>key(e.source)!==key(e.target)).map(e=>[key(e.id),{source:0,target:0}])),sides=new Map();
+ const middle=id=>vertical?positions.get(id).x+positions.get(id).w/2:positions.get(id).y+positions.get(id).h/2,channel=vertical?Infinity:-Infinity;
+ for(const e of valid){if(key(e.source)===key(e.target))continue;const name=key(e.id),s=key(e.source),t=key(e.target),bend=bends.get(name);
+  const returns=rank.get(t)<=rank.get(s),toward=returns?channel:bend&&bend.size?bend.get(rank.get(s)+1):middle(t),from=returns?channel:bend&&bend.size?bend.get(rank.get(t)-1):middle(s);
+  for(const [id,side,along] of [[s,'source',toward],[t,'target',from]]){const slot=id+'\0'+side;if(!sides.has(slot))sides.set(slot,[]);sides.get(slot).push({name,side,along});}}
+ for(const [slot,list] of sides){if(list.length<2)continue;const id=slot.split('\0')[0],room=(vertical?positions.get(id).w:positions.get(id).h)-28,step=Math.min(14,room/(list.length-1));
+  list.sort((a,b)=>a.along-b.along).forEach((item,i)=>{ports.get(item.name)[item.side]=(i-(list.length-1)/2)*step;});}
+ const crossSize=high-low+64+outerSpace;let width=vertical?crossSize:primary-82+32,height=vertical?primary-58+32:crossSize;
  if(valid.some(e=>key(e.source)===key(e.target))){if(vertical)height+=70;else width+=70;}
- return {rank,positions,outerEdges,width,height};
+ return {rank,positions,outerEdges,bends,backIndex,ports,width,height};
 }
-function smoothScenarioPath(points) {
- // Shared tangents give continuous cubic curves, including long outer routes.
- // Bound handles by adjacent free corridors, so smoothing cannot cut a rank.
- const tangent=points.map((p,i)=>{const before=points[Math.max(0,i-1)],after=points[Math.min(points.length-1,i+1)];
-  const left=Math.hypot(p.x-before.x,p.y-before.y),right=Math.hypot(after.x-p.x,after.y-p.y);
-  const dx=(left?(p.x-before.x)/left:0)+(right?(after.x-p.x)/right:0),dy=(left?(p.y-before.y)/left:0)+(right?(after.y-p.y)/right:0),length=Math.hypot(dx,dy)||1;
-  const handle=Math.min(32,(left&&right?Math.min(left,right):Math.max(left,right))/3);
-  return {x:dx/length*handle,y:dy/length*handle};});
- const segments=points.slice(1).map((end,i)=>{const start=points[i];return [start,{x:start.x+tangent[i].x,y:start.y+tangent[i].y},{x:end.x-tangent[i+1].x,y:end.y-tangent[i+1].y},end];});
- return {segments,path:`M ${points[0].x} ${points[0].y} `+segments.map(([,c1,c2,end])=>`C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`).join(' ')};
+function roundedScenarioPath(points,radius=18) {
+ // An orthogonal route with circular corners: straight runs and quarter arcs as
+ // cubic segments whose shared ends have equal tangents.
+ const k=.5523,unit=(a,b)=>{const length=Math.hypot(b.x-a.x,b.y-a.y)||1;return {x:(b.x-a.x)/length,y:(b.y-a.y)/length};},length=(a,b)=>Math.hypot(b.x-a.x,b.y-a.y);
+ const route=points.filter((p,i)=>!i||length(points[i-1],p)>.01),corners=[];
+ for(let i=1;i<route.length-1;i++){const r=Math.min(radius,length(route[i-1],route[i])/2,length(route[i],route[i+1])/2),a=unit(route[i-1],route[i]),b=unit(route[i],route[i+1]);
+  corners.push({r,a,b,start:{x:route[i].x-a.x*r,y:route[i].y-a.y*r},end:{x:route[i].x+b.x*r,y:route[i].y+b.y*r}});}
+ const segments=[];let at=route[0],handle=null;
+ const straight=(to,next)=>{const d=unit(at,to),span=length(at,to);if(span<.01)return;const h0=handle??span/3,h1=next??span/3;
+  segments.push([at,{x:at.x+d.x*h0,y:at.y+d.y*h0},{x:to.x-d.x*h1,y:to.y-d.y*h1},to]);};
+ for(const c of corners){straight(c.start,k*c.r);const h=k*c.r;segments.push([c.start,{x:c.start.x+c.a.x*h,y:c.start.y+c.a.y*h},{x:c.end.x-c.b.x*h,y:c.end.y-c.b.y*h},c.end]);at=c.end;handle=h;}
+ straight(route[route.length-1]);
+ return {segments,path:`M ${segments[0][0].x} ${segments[0][0].y} `+segments.map(([,c1,c2,end])=>`C ${c1.x} ${c1.y}, ${c2.x} ${c2.y}, ${end.x} ${end.y}`).join(' ')};
 }
 function routeScenarioOuterEdge(edge,layout,vertical,index=0,anchors={}) {
  const a=layout.positions.get(String(edge.source)),b=layout.positions.get(String(edge.target));
@@ -355,10 +417,11 @@ function routeScenarioOuterEdge(edge,layout,vertical,index=0,anchors={}) {
  // channel. A single Bezier from a lower branch's top crosses its upper sibling.
  const trailing=rank=>Math.max(...[...layout.positions].filter(([id])=>layout.rank.get(id)===rank).map(([,p])=>vertical?p.y+p.h:p.x+p.w));
  let points,label;
- const sa=anchors.source??(vertical?a.x+a.w/2:a.y+a.h/2),sb=anchors.target??(vertical?b.x+b.w/2:b.y+b.h/2),pb=(anchors.targetEdge??(vertical?b.y:b.x))-3;
+ const end=layout.ports&&layout.ports.get(String(edge.id))||{source:0,target:0};
+ const sa=anchors.source??((vertical?a.x+a.w/2:a.y+a.h/2)+end.source),sb=anchors.target??((vertical?b.x+b.w/2:b.y+b.h/2)+end.target),pb=(anchors.targetEdge??(vertical?b.y:b.x))-3;
  if(vertical){const channel=layout.width-28-index*24,from=trailing(sourceRank)+24,to=b.y-24;points=[{x:sa,y:a.y+a.h},{x:sa,y:from},{x:channel,y:from},{x:channel,y:to},{x:sb,y:to},{x:sb,y:pb}];label={x:channel-9,y:(from+to)/2};}
  else{const channel=28+index*24,from=trailing(sourceRank)+28,to=b.x-28;points=[{x:a.x+a.w,y:sa},{x:from,y:sa},{x:from,y:channel},{x:to,y:channel},{x:to,y:sb},{x:pb,y:sb}];label={x:(from+to)/2,y:channel-9};}
- return {...smoothScenarioPath(points),label,outer:true};
+ return {...roundedScenarioPath(points),label,outer:true};
 }
 function scenarioColumns(layout,vertical) {
  // Rank envelopes along the flow (p) with their cards sorted across it (s).
@@ -377,12 +440,15 @@ function routeScenarioForwardEdge(edge,layout,vertical,port=0,bend=0,used=new Ma
  const from=layout.rank.get(String(edge.source)),to=layout.rank.get(String(edge.target)),columns=scenarioColumns(layout,vertical);
  const limit=(vertical?layout.width:layout.height)-6,point=(p,s)=>vertical?{x:s,y:p}:{x:p,y:s};
  // An anchor moves an end along the card border, e.g. to an operation's row inside an open stage.
- const sa=(anchors.source??(vertical?a.x+a.w/2:a.y+a.h/2))+port,sb=(anchors.target??(vertical?b.x+b.w/2:b.y+b.h/2))+port;
+ const end=layout.ports&&layout.ports.get(String(edge.id))||{source:0,target:0},reserved=layout.bends&&layout.bends.get(String(edge.id));
+ const sa=(anchors.source??((vertical?a.x+a.w/2:a.y+a.h/2)+end.source))+port,sb=(anchors.target??((vertical?b.x+b.w/2:b.y+b.h/2)+end.target))+port;
  // targetEdge ends the line at a card inside the target box, after a straight run from its border.
  const pa=vertical?a.y+a.h:a.x+a.w,pb=(anchors.targetEdge??(vertical?b.y:b.x))-3,lanes=[...columns.keys()].filter(r=>r>from&&r<to).sort((x,y)=>x-y);
  const waypoints=[[pa,sa]];if(columns.get(from).trail>pa+1)waypoints.push([columns.get(from).trail,sa]);
  let current=sa;
  for(const r of lanes){const column=columns.get(r),cards=column.cards,gaps=[[6,cards[0].s0-12]];
+  // The layout kept a free point for this link in every rank it skips.
+  if(reserved&&reserved.has(r)){current=reserved.get(r);waypoints.push([column.lead,current],[column.trail,current]);continue;}
   for(let i=1;i<cards.length;i++)gaps.push([cards[i-1].s1+10,cards[i].s0-10]);gaps.push([cards[cards.length-1].s1+12,limit]);
   const middle=(column.lead+column.trail)/2,desired=sa+(sb-sa)*(middle-pa)/((pb-pa)||1);
   // Keep the previous height while it fits, so a jump stays a straight line.
@@ -401,7 +467,8 @@ function routeScenarioForwardEdge(edge,layout,vertical,port=0,bend=0,used=new Ma
 }
 function routeScenarioEdge(edge,layout,vertical,state,port=0,bend=0,anchors={}) {
  if(layout.rank.get(String(edge.target))>layout.rank.get(String(edge.source)))return routeScenarioForwardEdge(edge,layout,vertical,port,bend,state.gaps||(state.gaps=new Map()),anchors);
- const index=state.back||0;state.back=index+1;
+ let index=layout.backIndex&&layout.backIndex.get(String(edge.id));
+ if(index===undefined){index=(layout.backIndex?layout.backIndex.size:0)+(state.back||0);state.back=(state.back||0)+1;}
  return routeScenarioOuterEdge(edge,layout,vertical,index,anchors);
 }
 '''
@@ -483,20 +550,32 @@ const outcomeNames={success:'Успешное завершение',refusal:'Б�
 const terminalIds=new Set(array(scenario.terminal_operation_ids).map(text));
 // A successful command, decision or recommendation is named as such: it does not prove the recipient's result.
 const successByEffect={command:'Успех · команда отправлена',decision:'Успех · решение принято',recommendation:'Успех · рекомендация сформирована'};
+const outcomeTone=outcome=>outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
 function terminalPresentation(node){
  const terminal=legacy?node.kind==='end':terminalIds.has(text(node.id));
  if(!terminal)return null;
  // A dangling operation is not a terminal; names and technical execution status do not determine the business outcome.
  const outcome=Object.prototype.hasOwnProperty.call(outcomeNames,node.outcome)?node.outcome:'unknown';
- const tone=outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
+ const tone=outcomeTone(outcome);
  const name=outcome==='success'&&successByEffect[node.effect_kind]||outcomeNames[outcome];
  const label=node.completion_condition?'При завершении: '+name:
   outcome==='success'||outcome==='unknown'?name:'Завершение · '+name.toLocaleLowerCase('ru');
- return {tone,label,outcome,conditional:!!node.completion_condition};
+ return {tone,label,outcome,conditional:!!node.completion_condition,glow:true};
+}
+// An operation that forms the business result keeps it although bookkeeping
+// follows, e.g. marking the queue item; it is not presented as the scenario's end.
+// Blue marks only an ending that is neither success nor refusal, so a neutral
+// result inside the route keeps its label without a glow.
+function outcomePresentation(node){
+ const end=terminalPresentation(node);if(end||legacy)return end;
+ const outcome=node.outcome;
+ if(!outcome||outcome==='unknown'||node.continuation_mode==='choice'||!Object.prototype.hasOwnProperty.call(outcomeNames,outcome))return null;
+ const tone=outcomeTone(outcome);
+ return {tone,label:outcome==='success'&&successByEffect[node.effect_kind]||outcomeNames[outcome],outcome,conditional:false,glow:tone!=='neutral'};
 }
 function stageOutcomes(members){
  const outcomes=new Map();
- for(const node of members){const end=terminalPresentation(node);if(!end)continue;const key=end.outcome+':'+end.conditional;
+ for(const node of members){const end=outcomePresentation(node);if(!end)continue;const key=end.outcome+':'+end.conditional+':'+end.glow;
   if(!outcomes.has(key))outcomes.set(key,{...end,count:0});outcomes.get(key).count++;}
  return [...outcomes.values()];
 }
@@ -914,7 +993,7 @@ __GRAPH_LAYOUT_JS__
 function operationCard(node){
  const id=text(node.id),kind=!legacy?'operation':Object.prototype.hasOwnProperty.call(kindNames,node.kind)?node.kind:'action';
  const button=el('button','node kind-'+kind);button.type='button';button.dataset.nodeId=id;
- const terminal=terminalPresentation(node);if(terminal)button.classList.add('terminal-'+terminal.tone);
+ const terminal=outcomePresentation(node);if(terminal&&terminal.glow)button.classList.add('terminal-'+terminal.tone);
  button.setAttribute('aria-label',nodeKindLabel(node)+': '+(node.name||node.id)+(legacy?'. '+systemName(node):'')+'. '+evidenceNames[evidenceStatus(node.evidence_status)]+(terminal?'. '+terminal.label:''));button.setAttribute('aria-pressed','false');
  const content=el('span','node-content');
  content.append(el('span','node-name',node.name||node.id));
@@ -960,7 +1039,7 @@ function drawLinks(list,layout,parent,vertical,inner=false,frames=new Map()){
  const cross=id=>{const p=positions.get(text(id));return p?(vertical?p.x+p.w/2:p.y+p.h/2):undefined;};
  for(const link of list){const key=JSON.stringify(ends(link));pairCounts.set(key,(pairCounts.get(key)||0)+1);}
  for(const link of list){const [source,target]=ends(link),a=layout.positions.get(source),key=JSON.stringify([source,target]),pairIndex=pairUsed.get(key)||0;pairUsed.set(key,pairIndex+1);
-  const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28,port=Math.max(-18,Math.min(18,bend/2));let path;
+  const bend=(pairIndex-(pairCounts.get(key)-1)/2)*28;let path;
   if(source===target){const reach=65+pairIndex*24;let start,c1,c2,end;
    if(vertical){start={x:a.x+a.w/2,y:a.y+a.h};c1={x:start.x,y:start.y+reach};c2={x:a.x+a.w+reach,y:a.y+a.h/2+reach};end={x:a.x+a.w+3,y:a.y+a.h/2};}
    else{start={x:a.x+a.w,y:a.y+a.h/2};c1={x:start.x+reach,y:start.y};c2={x:a.x+a.w/2+reach,y:a.y-reach};end={x:a.x+a.w/2,y:a.y-3};}
@@ -971,7 +1050,7 @@ function drawLinks(list,layout,parent,vertical,inner=false,frames=new Map()){
    const exit=source!==text(link.source)&&frames.has(source)?frameExit(text(link.source),frames.get(source),vertical):null;
    const anchors={source:exit?exit.row:undefined,target:target!==text(link.target)?cross(link.target):undefined,
     targetEdge:entry?(vertical?entry.y:entry.x):undefined};
-   path=routeScenarioEdge({...link,source,target},layout,vertical,routing,exit?0:port,bend,anchors).path;
+   path=routeScenarioEdge({...link,source,target},layout,vertical,routing,0,bend,anchors).path;
    if(exit)path=exit.path+' L '+path.replace(/^M\s*/,'');}
   const group=svg('g',{'class':'edge edge-'+evidenceStatus(link.evidence_status),tabindex:0,role:'button','data-edge-id':text(link.id),'data-transition-ids':JSON.stringify((link.transitions||[link]).map(edge=>text(edge.id))),'aria-label':'Переход: '+itemName(text(link.source))+' → '+itemName(text(link.target))});
   group.append(svg('path',{d:path,'class':'edge-visible','marker-end':'url(#arrow)'}),svg('path',{d:path,'class':'edge-hit'}));
@@ -1018,7 +1097,7 @@ function draw(){
   for(const [member,q] of box.local.positions){const at={...q,x:p.x+box.dx+q.x,y:p.y+box.top-14+q.y};positions.set(member,at);const button=nodeButtons.get(member);button.style.left=at.x+'px';button.style.top=at.y+'px';}}
  $('stage').style.width=graphWidth+'px';$('stage').style.height=graphHeight+'px';
  const drawing=$('connections');drawing.setAttribute('width',graphWidth);drawing.setAttribute('height',graphHeight);drawing.setAttribute('viewBox','0 0 '+graphWidth+' '+graphHeight);
- const defs=svg('defs');const marker=svg('marker',{id:'arrow',viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 0 L 10 5 L 0 10 z',fill:'#8b9ca7'}));defs.append(marker);drawing.append(defs);
+ const defs=svg('defs');for(const id of ['arrow','arrow-active']){const marker=svg('marker',{id,viewBox:'0 0 10 10',refX:8,refY:5,markerWidth:6,markerHeight:6,orient:'auto-start-reverse'});marker.append(svg('path',{d:'M 0 1 L 9 5 L 0 9 z',fill:'#8b9ca7'}));defs.append(marker);}drawing.append(defs);
  // Frames lie under every line; each frame's own lines are drawn in its coordinates.
  for(const [id,box] of inside){const p=positions.get(id),surface=svg('g',{'class':'stage-frame','data-stage-id':text(display.items.get(id).stage.id),'aria-hidden':'true'});
   surface.append(svg('rect',{x:p.x+1,y:p.y+1,width:p.w-2,height:p.h-2,rx:16}));drawing.append(surface);frameElements.set(id,{surface,head:box.head});}
@@ -1034,7 +1113,7 @@ function stageCard(item){
  content.append(el('span','node-stage-kicker','Бизнес-этап · '+members.length+' '+plural(members.length,['операция','операции','операций'])),el('span','node-name',stage.name||stage.id));
  if(stage.result)content.append(el('span','node-stage-result',stage.result));
  if(ends.length){const row=el('span','stage-outcomes'),count=value=>value>1?' · '+value:'';
-  for(const end of ends){const badge=el('span','stage-outcome '+end.tone,end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
+  for(const end of ends){const badge=el('span','stage-outcome'+(end.glow?' '+end.tone:''),end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
  if(semantics.length){const row=el('span','stage-outcomes stage-semantics');for(const label of new Set(semantics.map(item=>item.short)))row.append(el('span','stage-outcome',label));content.append(row);}
  if(findings)content.append(el('span','node-gap','Не установлено: '+findings));
  button.append(content);button.setAttribute('aria-pressed','false');button.setAttribute('aria-expanded','false');

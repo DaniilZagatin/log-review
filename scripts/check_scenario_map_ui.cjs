@@ -96,14 +96,18 @@ async function checkTerminalOutcomes(page, model, legacy) {
   for (const style of styles) {
     const node = model.nodes.find(node=>node.id===style.id), terminal=legacy?node.kind==='end':ends.has(node.id);
     const negative=['refusal','failure','cancelled'].includes(node.outcome);
-    assert.equal(!!style.label,terminal,'Only declared terminal operations have an outcome label');
-    assert.equal(style.classes.includes('terminal-success'),terminal&&node.outcome==='success','Success comes from the explicit business outcome');
-    assert.equal(style.classes.includes('terminal-negative'),terminal&&negative,'Refusal ends its branch even when its code returned normally');
+    // A non-terminal operation shows the business result it forms; a check with a choice does not.
+    const result=!legacy&&!terminal&&!!node.outcome&&node.outcome!=='unknown'&&node.continuation_mode!=='choice';
+    assert.equal(!!style.label,terminal||result,'Terminal operations and operations forming a result have an outcome label');
+    assert.equal(style.classes.includes('terminal-success'),(terminal||result)&&node.outcome==='success','Success comes from the explicit business outcome');
+    assert.equal(style.classes.includes('terminal-negative'),(terminal||result)&&negative,'Refusal ends its branch even when its code returned normally');
+    assert.equal(style.classes.includes('terminal-neutral'),terminal&&node.outcome!=='success'&&!negative,'Only an ending that is neither success nor refusal glows blue');
     if(terminal){
       assert(style.accessible.includes(style.label),'The outcome is accessible without relying on colour');
       if(node.completion_condition)assert(style.label.startsWith('При завершении:'),'Conditional outcomes must not imply every execution ends here');
       if(node.outcome==='success'||negative)assert.match(style.glow,/drop-shadow/,'A terminal business outcome must retain its glow');
-      else assert.equal(style.glow,'none','Unresolved or deferred outcomes must not acquire a success/failure colour');
+      else{assert(style.classes.includes('terminal-neutral'),'A neutral or unresolved ending is marked as neutral');
+        assert.match(style.glow,/drop-shadow/,'A neutral ending glows too, in blue rather than a success/failure colour');}
     }
   }
   const refusal=model.nodes.find(node=>ends.has(node.id)&&node.outcome==='refusal');

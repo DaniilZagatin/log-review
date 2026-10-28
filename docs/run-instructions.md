@@ -26,7 +26,7 @@ git pull
   --process-file "<путь к описанию П1679>" `
   --source "<архив 1 П1679>.zip" "<архив 2 П1679>.zip" `
   --out "runs\P1679" `
-  --max-steps 180 --max-seconds 7200 --model-timeout 900
+  --max-steps 300 --max-seconds 7200 --model-timeout 900
 ```
 
 ```powershell
@@ -34,7 +34,7 @@ git pull
   --process-file "<путь к описанию П3283>" `
   --source "<архив П3283>.zip" `
   --out "runs\P3283" `
-  --max-steps 180 --max-seconds 7200 --model-timeout 900
+  --max-steps 300 --max-seconds 7200 --model-timeout 900
 ```
 
 Бизнес-этапы строятся по умолчанию сразу после карты одним коротким запросом; `--no-stages` их отключает.

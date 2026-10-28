@@ -12,7 +12,10 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from pko.llm.client import ChatResult
 from pko.render.scenario_map import render_scenario_map
+from pko.scenario_map.agent import run_agent
+from scenario_script import SPEC
 from pko.scenario_map.code_references import symbol_valid
 from pko.scenario_map.evaluation import evaluate_map
 from pko.scenario_map.quality import QualityError, ResearchQuality
@@ -76,11 +79,13 @@ EDGES = [
 ]
 COMMANDS = {"reject", "reject_close", "resubmit", "resubmit_close", "manual_close", "manual_create",
             "failure_create", "failure_close", "mark_completed", "mark_exception"}
+# The business result belongs to the operation that forms it, not to the queue mark after it.
+OUTCOMES = {"reject": "refusal", "resubmit": "success", "manual_create": "deferred"}
 
 
 def route_map(names=NAMES, edges=EDGES):
-    nodes = [{"id": key, "name": name, "effect_kind": "command" if key in COMMANDS else "unknown"}
-             for key, name in names.items()]
+    nodes = [{"id": key, "name": name, "effect_kind": "command" if key in COMMANDS else "unknown",
+              "outcome": OUTCOMES.get(key, "unknown")} for key, name in names.items()]
     return {"nodes": nodes, "edges": [{"id": f"edge-{index}", "source": source, "target": target,
                                        "kind": "error" if "Сбой" in condition else "branch" if condition else "sequence",
                                        "condition": condition}
@@ -155,6 +160,28 @@ class RouteRubricTests(unittest.TestCase):
         self.assertDefect(model, "forbidden_transition", source="details_check", target="agency_contract_check")
         self.assertDefect(model, "missing_transition", source="details_check", target="reject")
 
+    def test_too_few_details_lead_to_refusal_or_manual_task_by_payment_kind(self):
+        edges = [edge for edge in EDGES if edge[0] != "enough_check" or "меньше двух" not in edge[2]]
+        model = route_map(edges=edges + [("enough_check", "reject", "Реквизитов меньше двух")])
+        self.assertDefect(model, "missing_transition", source="enough_check", target="reject")
+        self.assertDefect(model, "missing_transition", source="enough_check", target="manual_close")
+
+    def test_the_map_is_one_payment_not_the_worker_loop(self):
+        names = {**NAMES, "fill": "Добавление задач в очередь", "none_left": "Сообщение об отсутствии элементов для обработки"}
+        edges = EDGES + [("fill", "take_task", ""), ("take_task", "none_left", "Элементов нет"),
+                         ("mark_completed", "take_task", "Элемент отмечен, цикл продолжается")]
+        model = route_map(names, edges)
+        self.assertDefect(model, "forbidden_operation", label="Наполнение очереди другим компонентом")
+        self.assertDefect(model, "forbidden_operation", label="Отсутствие элементов очереди")
+        self.assertDefect(model, "forbidden_transition", source="mark_completed", target="take_task")
+
+    def test_results_keep_their_outcome_before_the_queue_mark(self):
+        model = route_map()
+        for node in model["nodes"]:
+            node["outcome"] = "unknown"
+        for alias in ("reject", "resubmit", "manual_create"):
+            self.assertDefect(model, "property_mismatch", operation=alias)
+
     def test_failure_before_the_guarded_block_is_not_the_manual_task_path(self):
         model = route_map(edges=without(EDGES, ("take_to_work", "mark_exception"))
                           + [("take_to_work", "failure_create", "Сбой при обработке задачи")])
@@ -214,6 +241,34 @@ class SharedExecutorHintTests(unittest.TestCase):
         hints = " ".join(merged.get("hints", []))
         self.assertIn("CloseTaskCommand", hints)
         self.assertIn(self.close_id, hints)
+
+    def test_the_executor_is_found_at_the_call_site_the_other_operation_cites(self):
+        # In the P1679 run the closing operation cited the call site, not the command's own file.
+        call = lines(self.state, "TaskOperations.java", "new CloseTaskCommand(clients.board(), item, \"Manual task created\")")
+        result = self.state.dispatch("upsert_step", explain_args({
+            "name": "Закрытие задачи перед созданием задачи сотруднику", "description": "Задача закрывается с комментарием.",
+            "evidence_status": "observed", "evidence": call, "effect_kind": "command",
+            "external_interactions": [{"name": "Доска задач", "purpose": "Закрытие задачи с комментарием",
+                                       "direction": "send", "contract": "closeTask", "evidence": call}]}))
+        self.assertTrue(result["ok"], result)
+        merged = self.step("Отказ по платежу", lines(self.state, "TaskOperations.java", "public void rejectAndClose", "Payment rejected"))
+        self.assertIn(result["id"], " ".join(merged.get("hints", [])))
+
+    def test_a_hint_is_given_once_and_not_for_the_following_operation(self):
+        evidence = lines(self.state, "TaskOperations.java", "public void rejectAndClose", "Payment rejected")
+        merged = self.step("Отказ по платежу", evidence)
+        self.assertIn(self.close_id, " ".join(merged.get("hints", [])))
+        again = self.state.dispatch("upsert_step", explain_args({
+            "id": merged["id"], "name": "Отказ по платежу", "description": "Платёж отклоняется с причиной.",
+            "evidence_status": "observed", "evidence": evidence, "effect_kind": "command"}))
+        self.assertNotIn(self.close_id, " ".join(again.get("hints", [])))
+        other = self.step("Отказ по платежу без договора", evidence)
+        self.state.dispatch("upsert_transition", explain_args({
+            "source": other["id"], "target": self.close_id, "kind": "sequence", "description": "Затем задача закрывается",
+            "evidence_status": "observed", "evidence": evidence}))
+        self.state._executor_hints.clear()
+        review = self.state._shared_executor_hints(next(n for n in self.state.model["nodes"] if n["id"] == other["id"]))
+        self.assertFalse([hint for hint in review if self.close_id in hint])
 
     def test_a_separate_refusal_gets_no_shared_command_hint(self):
         separate = self.step("Отказ по платежу", lines(self.state, "TaskOperations.java", "new RejectCommand"))
@@ -292,6 +347,49 @@ class PublicTextTests(unittest.TestCase):
             "evidence_status": "observed", "evidence": lines(state, "Dispatcher.java", "Strategy strategy = isSupportedKind")}))
         self.assertTrue(result["ok"], result)
         self.assertTrue(any("устройство кода" in hint for hint in result.get("hints", [])), result)
+
+
+class InstanceHarnessTests(unittest.TestCase):
+    def test_checks_hidden_in_one_operation_block_finish_until_split_or_addressed(self):
+        state = worker_state()
+        settle = lines(state, "ContractSearch.java", "public void settle", "default ->")
+        result = state.dispatch("upsert_step", explain_args({
+            "name": "Проверка найденных договоров", "description": "Выбирается продолжение по найденным договорам.",
+            "evidence_status": "observed", "evidence": settle}))
+        self.assertTrue(result["ok"], result)
+        hidden = [error for error in state._finish_errors() if error.startswith(result["id"] + ": в основаниях")]
+        self.assertTrue(hidden, state._finish_errors())
+        gap = state.dispatch("add_gap", {"description": "Ветви выбора по найденным договорам не раскрыты",
+                                         "node_ids": [result["id"]], "category": "unexplored"})
+        self.assertTrue(gap["ok"], gap)
+        self.assertFalse([error for error in state._finish_errors() if error.startswith(result["id"] + ": в основаниях")])
+
+    def test_a_return_to_the_entry_is_pointed_out(self):
+        tests = ScopeAndRegistryTests("test_a_map_without_branches_has_no_registry_note")
+        tests.setUp()
+        system, first, last = tests.complete_small_map()
+        response = tests.state.dispatch("upsert_transition", explain_args({
+            "source": last, "target": first, "kind": "sequence", "description": "Следующий элемент очереди",
+            "evidence_status": "observed", "evidence": tests.cite()}))
+        self.assertTrue(response["ok"], response)
+        self.assertTrue(any("путь одного экземпляра" in hint for hint in response.get("hints", [])), response)
+
+    def test_three_quarters_of_the_steps_turn_the_research_to_reviews(self):
+        seen = []
+
+        class Browsing:
+            spec = SPEC
+
+            def chat(self, messages, **kwargs):
+                seen.append([m.get("content", "") for m in messages if m["role"] == "user"])
+                offset = len(seen)
+                return ChatResult(text="", usage={}, tool_calls=[{"id": f"call-{offset}", "type": "function", "function": {
+                    "name": "inspect_map", "arguments": json.dumps({"section": "nodes", "offset": offset})}}])
+
+        run_agent(test_scenario_schema.workspace(1), "Обработка обращения", SPEC, client=Browsing(), max_steps=8)
+        notices = [index for index, contents in enumerate(seen) if any("три четверти шагов" in str(c) for c in contents)]
+        self.assertTrue(notices, "the budget notice must reach the model")
+        self.assertEqual(notices[0], 6)
 
 
 class ScopeAndRegistryTests(unittest.TestCase):

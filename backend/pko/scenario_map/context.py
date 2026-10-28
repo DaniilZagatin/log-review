@@ -40,14 +40,14 @@ def _size(messages: list[dict]) -> int:
     return sum(len(_json(message)) for message in messages)
 
 
-def context_budget(window: int, schemas: list[dict]) -> tuple[int, int]:
+def context_budget(window: int, schemas: list[dict], response_cap: int = 8192) -> tuple[int, int]:
     """Return conservative serialized-character and response-token budgets.
 
     Provider context is shared by messages, tool schemas, and the response.
     The message queue contains public output and tool exchanges, never thinking.
     """
     window = window or DEFAULT_CONTEXT_WINDOW
-    response_tokens = min(8192, max(1024, window // 8))
+    response_tokens = min(response_cap, max(1024, window // 8))
     budget = int((window - response_tokens - 2048) * 1.6) - len(_json(schemas))
     return budget, response_tokens
 

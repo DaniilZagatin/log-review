@@ -109,6 +109,46 @@ class ResearchQuality:
         return [ref for ref in evidence if ref['path'] == files[0] and
                 symbol_valid(symbol, 'field' if task['kind']=='prompt' else 'function', ref['quote'])]
 
+    def auto_map_tasks(self):
+        """Mark an automatic dependency mapped once map operations cite the read
+        declaration of its implementation and every dependency found inside it
+        is closed. The test is the one a manual mapped status passes; a task
+        closed this way reopens when the map stops satisfying it."""
+        existing = {node['id'] for node in self.model['nodes']}
+        for task in self.model['research_tasks']:
+            if task.get('auto_mapped') and (set(task['node_ids']) - existing or self._task_mapping_error(task)):
+                task.update(status='open', resolution='', node_ids=[], child_task_ids=[], auto_mapped=False)
+        cited = [ref for node in self.model['nodes'] for ref in node['evidence']]
+        closed = []
+        for _ in range(8):
+            index = {t['id']: t for t in self.model['research_tasks']}
+            before = len(closed)
+            for task in self.model['research_tasks']:
+                if not task.get('automatic') or task['status'] not in ('open', 'read', 'analyzed'):
+                    continue
+                files = self._dependency_files(task)
+                evidence = task['evidence'] + [ref for ref in cited if ref['path'] in files and ref not in task['evidence']]
+                implementation = self._dependency_implementation(task, evidence)
+                if not implementation:
+                    continue
+                nodes = [n['id'] for n in self.model['nodes']
+                         if any(self._overlap(a, b) for a in n['evidence'] for b in implementation)]
+                children = [t for t in index.values() if t.get('automatic') and t['id'] != task['id'] and
+                            any(self._overlap(ref, scope) for ref in t['evidence'][:1] for scope in implementation)]
+                if not nodes or any(child['status'] not in ('mapped', 'out_of_scope') for child in children):
+                    continue
+                kept = [child for child in children if child['status'] == 'mapped']
+                candidate = {**task, 'status': 'mapped', 'evidence': evidence, 'child_task_ids': [child['id'] for child in kept],
+                             'node_ids': list(dict.fromkeys(nodes + [n for child in kept for n in child['node_ids']]))}
+                if self._task_mapping_error(candidate):
+                    continue
+                task.update(candidate, auto_mapped=True,
+                            resolution='Реализация показана операциями карты: ' + ', '.join(candidate['node_ids'][:12]) + '.')
+                closed.append(task['id'])
+            if len(closed) == before:
+                break
+        return closed
+
     def _nodes_cover_dependency(self, node_ids, implementation):
         return any(any(a['path']==b['path'] and a['line_start']<=b['line_end'] and b['line_start']<=a['line_end']
                        for a in node['evidence'] for b in implementation)
