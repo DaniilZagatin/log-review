@@ -7,7 +7,6 @@ cited. Mutations are transactional, including edits of already linked objects.
 """
 from __future__ import annotations
 
-from collections import Counter
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 import hashlib
@@ -1089,11 +1088,4 @@ class MapState(ResearchQuality):
                   if partial else "Исследование переданных материалов завершено; это не подтверждение семантической полноты или исполнения в рабочей среде.")
         self.model["summary"] = summary
         self.model["run"].update(status=status, reason=reason)
-        branching = Counter(edge["source"] for edge in self.model["edges"] if edge.get("kind") != "data")
-        if not self.model["research_tasks"] and any(count > 1 for count in branching.values()):
-            # Not a gate: a minimum number of tasks would only invite placeholders.
-            note = ("Реестр задач исследования пуст: раскрытие вызванных обработчиков и ветвей "
-                    "не прослежено по задачам, полноту участков оценивает специалист.")
-            if note not in self.model["limitations"]:
-                self.model["limitations"].append(note)
         return {"status": status, "reason": reason, "limitations": list(self.model["limitations"])}

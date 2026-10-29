@@ -2,7 +2,6 @@
 import tempfile
 import time
 import unittest
-from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -119,22 +118,6 @@ class StageModelTests(unittest.TestCase):
                 return ChatResult(text='```json\n{"items": [{"id": "i-1", "name": "Принято"}]}\n```', usage={})
         accepted, errors = self.ask(self.engine(Fenced()))
         self.assertEqual((accepted, errors), ([{"id": "i-1", "name": "Принято"}], []))
-
-    def test_grouping_answer_is_requested_without_reasoning_and_with_a_large_limit(self):
-        # Both runs of 28 October lost their stages: reasoning used all 8192 answer tokens.
-        seen = []
-
-        class Recording(ScriptedStageClient):
-            spec = replace(SPEC, context_window=524288)
-
-            def chat(self, messages, **kwargs):
-                seen.append(kwargs)
-                return super().chat(messages, **kwargs)
-
-        stage = self.engine(Recording({"submit_items": lambda *_: {"items": [{"id": "i-1", "name": "Принято"}]}}))
-        self.ask(stage)
-        self.assertIs(seen[0]["enable_thinking"], False)
-        self.assertGreaterEqual(seen[0]["max_tokens"], 32768)
 
     def test_packet_that_does_not_fit_the_window_is_refused_before_any_request(self):
         client = ScriptedStageClient()

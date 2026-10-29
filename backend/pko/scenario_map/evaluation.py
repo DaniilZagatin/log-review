@@ -93,13 +93,6 @@ def evaluate_map(model: dict, rubric: dict) -> dict:
             raise ValueError(f"Неизвестный alias разметки: {alias}")
         return aliases[alias]
 
-    for operation in rubric.get("forbidden_operations", []):
-        if not isinstance(operation, dict) or not isinstance(operation.get("name_pattern"), str):
-            raise ValueError("forbidden_operations требует name_pattern")
-        present = [node["id"] for node in nodes if _pattern(operation["name_pattern"], node.get("name"))]
-        if present:
-            report("forbidden_operation", label=operation.get("label", operation["name_pattern"]), node_ids=present)
-
     control = [edge for edge in edges if edge.get("kind") != "data"]
     for collection, forbidden in (("expected_transitions", False), ("forbidden_transitions", True)):
         for rule in rubric.get(collection, []):

@@ -24,7 +24,7 @@ from pko.scenario_map.compaction import compact_research_context
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
 MAX_TOOL_CHARS = 24000
-DEFAULT_MAX_STEPS = 300
+DEFAULT_MAX_STEPS = 180
 DEFAULT_MAX_SECONDS = 7200
 DEFAULT_MODEL_TIMEOUT = 900
 DEFAULT_SUMMARY_MAX_TOKENS = 8192
@@ -261,7 +261,6 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     recent_errors: list[dict] = []
     failed_calls = 0
     failure_guidance_used = False
-    budget_warned = False
     next_compaction_step = 1
     window = spec.context_window or DEFAULT_CONTEXT_WINDOW
     summary_tokens = min(summary_max_tokens, max(512, window // 4))
@@ -425,12 +424,6 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             "Несколько изменений подряд отклонены проверкой; карта от них не изменилась." +
                             _failure_guidance(recent_errors)})
                         record("validation_recovery_guidance", step=step, failed_calls=failed_calls)
-                    if not budget_warned and step >= max_steps * 3 // 4:
-                        budget_warned = True
-                        messages.append({"role": "user", "content":
-                            "Использовано три четверти шагов. Закончи текущий участок, сохрани нераскрытое адресными "
-                            "пробелами и переходи к review_execution, review_semantics и finish."})
-                        record("step_budget_guidance", step=step, max_steps=max_steps)
                     if step >= max_steps - 3:
                         messages.append({"role": "user", "content":
                             "Лимит шагов почти исчерпан. Сохрани установленные операции и переходы, "

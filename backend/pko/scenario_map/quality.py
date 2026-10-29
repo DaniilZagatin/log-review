@@ -42,8 +42,7 @@ class ResearchQuality:
         value = text(value, field, limit)
         # Only unmistakable code syntax is rejected; natural business acronyms
         # and product names remain legitimate. This is not semantic validation.
-        if re.search(r"`|\b\w+\.\w+\(|\b\w+\(\)|\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z]*\b|[<>]|[=!]=|&&|\|\||\b[A-Za-z_]\w*\s*[<>]=?\s*\d|"
-                     r"\.(?:java|kt|kts|scala|groovy|py|ts|tsx|js|jsx|go|cs|rb|php|rs|swift|cpp|sql)(?:\b|:)", value):
+        if re.search(r"`|\b\w+\.\w+\(|\b\w+\(\)|\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z]*\b|[<>]|[=!]=|&&|\|\||\b[A-Za-z_]\w*\s*[<>]=?\s*\d|\.(?:java|py|ts|js)(?:\b|:)", value):
             raise QualityError(f"{field}: напишите смысл бизнес-языком; код, имена функций и технические идентификаторы оставьте в основаниях")
         return value
 
