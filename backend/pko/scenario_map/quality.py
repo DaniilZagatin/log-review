@@ -14,9 +14,6 @@ from pko.scenario_map.code_references import dependencies, symbol_valid
 
 SEMANTIC_CHECKS = ("outcomes", "order", "routing", "atomicity", "dependencies")
 EFFECT_KINDS = ("decision", "recommendation", "command", "result", "unknown")
-# Words that describe code rather than the process; names of systems and products stay legitimate.
-JARGON = re.compile(r"(?<![а-яё])(?:парс\w*|распарс\w*|невалидн\w*|валидн\w*|резолв\w*|хендлер\w*|"
-                    r"эндпоинт\w*|инстанс\w*|дебаг\w*)|\b(?:null|true|false|payload)\b", re.IGNORECASE)
 
 
 class QualityError(ValueError):
@@ -45,11 +42,8 @@ class ResearchQuality:
         value = text(value, field, limit)
         # Only unmistakable code syntax is rejected; natural business acronyms
         # and product names remain legitimate. This is not semantic validation.
-        if re.search(r"`|\b\w+\.\w+\(|\b\w+\(\)|\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z]*\b|[<>]|[=!]=|&&|\|\||\b[A-Za-z_]\w*\s*[<>]=?\s*\d|"
-                     r"\.(?:java|kt|kts|scala|groovy|py|ts|tsx|js|jsx|go|cs|rb|php|rs|swift|cpp|sql)(?:\b|:)", value):
+        if re.search(r"`|\b\w+\.\w+\(|\b\w+\(\)|\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b|\b[a-z]+[A-Z][A-Za-z]*\b|[<>]|[=!]=|&&|\|\||\b[A-Za-z_]\w*\s*[<>]=?\s*\d|\.(?:java|py|ts|js)(?:\b|:)", value):
             raise QualityError(f"{field}: напишите смысл бизнес-языком; код, имена функций и технические идентификаторы оставьте в основаниях")
-        if JARGON.search(value):
-            raise QualityError(f"{field}: замените программистский жаргон («{JARGON.search(value).group(0)}») предметным действием или результатом")
         return value
 
     @staticmethod

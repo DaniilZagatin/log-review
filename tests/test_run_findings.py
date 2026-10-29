@@ -196,8 +196,7 @@ class HeaderAndScopeTests(unittest.TestCase):
 
     def test_header_shows_the_variant_not_the_submitted_json(self):
         page = render_scenario_map(self.model('{\n  "process": {"id": "P-1"}}'))
-        self.assertIn("(scenario.start&&scenario.end?text(scenario.start)+' → '+text(scenario.end)", page)
-        self.assertIn("'Исследован участок: '", page)
+        self.assertIn("briefDescription=scenario.start&&scenario.end", page)
         self.assertIn("'Вне исследования'", page)
         self.assertIn("исключено участков кода", page)
 

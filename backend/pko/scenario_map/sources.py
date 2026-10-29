@@ -364,9 +364,7 @@ def build_workspace(paths: list[str | Path], dest: Path, *,
                 notes.append(f"{source_id} ({path.name}): нет доступных текстовых файлов.")
         tree.files.sort()
         extraction = extract_all(tree)
-        notes.append("Все текстовые файлы доступны для list_files, read_file и search независимо от языка. "
-                     "show_facts и who_calls дают структурные подсказки только для части языков; "
-                     "отсутствие подсказки не означает отсутствия кода.")
+        notes.extend(extraction.notes)
         omissions.extend({"source_id": path.split("/", 1)[0], "kind": "parse_failure",
                           "count": 1, "path": path,
                           "detail": "Статический экстрактор не разобрал файл; исходный текст доступен агенту."}

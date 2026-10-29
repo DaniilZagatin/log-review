@@ -44,7 +44,7 @@ def build_payload(model: dict, compact: bool = False) -> dict:
                     "evidence_status": edge.get("evidence_status", "unknown")}
                    for edge in model.get("edges") or []]
     payload = {"scenario": {key: deepcopy(scenario.get(key)) for key in (
-        "title", "coverage", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids")},
+        "title", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids")},
         "operations": operations, "transitions": transitions,
         "gaps": [{key: deepcopy(value) for key, value in gap.items() if key not in ("evidence", "code_explanations")}
                  for gap in model.get("gaps") or []]}
