@@ -41,6 +41,18 @@ def ask(model, *answers):
 
 
 class StableGroupingTests(unittest.TestCase):
+    def test_shared_finalizer_scope_reaches_full_and_compact_grouping_input(self):
+        model = pending_map()
+        model['nodes'][0].update(outcome='unknown', outcome_scope='shared')
+        original = copy.deepcopy(model)
+        for compact in (False, True):
+            payload = build_payload(model, compact=compact)
+            operation = payload['operations'][0]
+            self.assertEqual(operation['outcome_scope'], 'shared')
+            self.assertEqual(operation['outcome'], 'unknown')
+            operation['outcome_scope'] = 'branch'
+            self.assertEqual(model, original)
+
     def test_compact_packet_keeps_discovered_unmapped_work_and_conditions(self):
         model = pending_map()
         original = copy.deepcopy(model)
@@ -102,6 +114,20 @@ class StableGroupingTests(unittest.TestCase):
 
 
 class GroupingInputCompatibilityTests(unittest.TestCase):
+    def test_scope_field_does_not_rewrite_legacy_input_fingerprints(self):
+        for profile in ('variant-actions-v1', None):
+            model = pending_map()
+            if profile is None:
+                model.pop('semantic_profile', None)
+            original = copy.deepcopy(model)
+            for node in model['nodes']:
+                node['outcome_scope'] = 'branch'
+            for mode in ('full', 'compact'):
+                self.assertEqual(input_fingerprint(model, mode, input_version='1'),
+                                 input_fingerprint(original, mode, input_version='1'))
+                packet = build_payload(model, compact=mode == 'compact', input_version='1')
+                self.assertTrue(all('outcome_scope' not in row for row in packet['operations']))
+
     def fixture(self):
         return json.loads((Path(__file__).with_name("fixtures") / "stability_legacy_hierarchy.json").read_text(encoding="utf-8"))
 

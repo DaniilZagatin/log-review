@@ -120,9 +120,18 @@ ROUTE_EXPECTATIONS = {"type": "array", "maxItems": 100, "items": {
                    "condition": _string("Самостоятельное условие продолжения, прочитанное в коде, даже если связи ещё нет"),
                    "expected_result": _string("Какое продолжение или результат подтверждает код при этом условии"),
                    "evidence": EVIDENCE,
+                   "from_operation_id": _string("ID найденного действия op-* или $local_ref из operations: откуда выполняется продолжение; пусто, если связь ещё не установлена"),
+                   "to_operation_id": _string("ID найденного следующего действия op-* или $local_ref; для отношения порядка укажи оба ID, независимо от наличия узлов"),
                    "edge_ids": _list("Соответствующие переходы, когда отображены; иначе опусти"),
                    "completion_node_id": _string("Действие, завершающее экземпляр при условии; только если подтверждено")},
     "required": ["condition", "expected_result", "evidence"]}}
+
+AMENDMENT = {"type": "object", "additionalProperties": False,
+             "properties": {"reason": _string("Почему прежний вывод оказался ошибочным или требует уточнения"),
+                            "evidence": EVIDENCE}, "required": ["reason", "evidence"]}
+# The discovery and the displayed node use the same explicit call contract.
+OPERATION['properties']['external_interactions'] = EXTERNAL_INTERACTIONS
+OPERATION['properties']['local_ref'] = _string("Уникальное локальное имя найденного действия; route_expectations может ссылаться как $имя")
 
 TOOLS = [
     _tool("save_research_task", "Зарегистрировать или обновить единицу работы: функцию, ветвь, вложенный исполнитель или промпт. "
@@ -170,6 +179,7 @@ TOOLS = [
           "Вариант содержит альтернативные исходы и повторы, экземпляр — одно его исполнение. "
           "Списки entry_operation_ids и terminal_operation_ids можно дополнить позже повторным вызовом.",
           {"title": _string("Название выбранного варианта"), "process_name": _string("Краткое название процесса, если установлено"), "start": _string("Событие начала"), "end": _string("Допустимые результаты завершения"),
+           "amendment": AMENDMENT,
            "variant_context": _string("Связь выбранного варианта с процессом и сценарием; известное отделяй от предположений"),
            "instance_unit": _string("Что считается одним исполнением варианта: заявка, платёж, пакет; как различаются повтор и следующий экземпляр"),
            "variant_factors": _list("Подтверждённые признаки выбранного варианта: канал, услуга, роль; неизвестные не выдумывать"),
@@ -189,6 +199,7 @@ TOOLS = [
            "continuation_mode": {"type": "string", "enum": ["sequence", "choice", "all"], "description": "sequence — одно продолжение; choice — выбирается одна ветвь; all — выполняются все подходящие продолжения"},
            "join_mode": {"type": "string", "enum": ["any", "all"], "description": "any — достаточно одного входящего результата; all — код ждёт все"},
            "outcome": {"type": "string", "enum": list(OUTCOME_KINDS), "description": "Исход экземпляра на завершающем действии; при условном завершении относится к completion_condition. Успех промежуточного действия описывай в output, а outcome оставляй unknown"},
+           "outcome_scope": {"type": "string", "enum": ["branch", "shared"], "description": "branch — исход относится к этому действию; shared — общий финализатор разных бизнес-исходов, требует outcome=unknown и остаётся нейтральным"},
            "effect_kind": {"type": "string", "enum": list(EFFECT_KINDS),
                            "description": "decision — решение, recommendation — рекомендация, command — отправленная команда, result — подтверждённый эффект"},
            "external_interactions": EXTERNAL_INTERACTIONS,
@@ -222,6 +233,9 @@ TOOLS = [
           "При правке по id передавай актуальный обзор. Пропущенные прежние действия остаются неотображёнными; "
           "ошибочное обнаружение снимай через discard_operations с причиной и основаниями. "
           "route_expectations сохраняет найденные условия и ожидаемые продолжения независимо от нарисованных связей; "
+          "from_operation_id/to_operation_id фиксируют порядок между найденными действиями, edge_ids — направленный путь между их узлами. "
+          "Для выбора ветви condition ожидания переносится в первый переход пути без переформулировки. "
+          "Изменение найденного действия/условия/порядка требует amendment с причиной и основаниями; привязки меняй без изменения найденного. "
           "неотображённые ожидания остаются открытыми, ошибочное обнаружение снимается через discard_route_expectations. "
           "Обзор устаревает, если у его действий меняются описание, вход, результат, условия, "
           "исходы, основания или переходы; правка названия, basis и code_explanations его не сбрасывает. "
@@ -230,10 +244,11 @@ TOOLS = [
            "name": _string("Обследованный участок исполнения"), "evidence": {**EVIDENCE, "maxItems": 100},
            "operations": {"type": "array", "items": OPERATION, "minItems": 0, "maxItems": 100},
            "route_expectations": ROUTE_EXPECTATIONS,
+           "amendment": AMENDMENT,
            "discard_operations": REVIEW_DISCARDS, "discard_route_expectations": REVIEW_DISCARDS,
            "checks": {"type": "object", "additionalProperties": False,
                       "properties": {name: EXECUTION_CHECK for name in EXECUTION_CHECKS}, "required": list(EXECUTION_CHECKS)}},
-          ["name", "evidence", "operations", "checks"]),
+          ["name", "evidence", "operations", "checks", "route_expectations"]),
     _tool("remove_element", "Удалить ошибочный элемент карты. Удаление не каскадное: сначала обнови или удали ссылки на него.",
           {"kind": {"type": "string", "enum": ["step", "transition", "gap", "execution_review"],
                     "description": "step — действие, transition — переход, gap — пробел, execution_review — обзор"},
@@ -262,11 +277,24 @@ TOOLS.append(_tool("patch_fragment",
     "До 100 изменений. Для новых действий можно задать local_ref, для их source/target и границ использовать $имя. "
     "При замене первого или последнего действия обновляй entry_operation_ids/terminal_operation_ids в этом же пакете. "
     "gap_updates явно переносит адреса существующих пробелов на заменяющие действия/переходы; описание, основания и ссылки на задачи сохраняются. "
+    "operation_mappings/route_mappings переносят найденные действия и ожидания на новые узлы/пути без изменения их смысла. "
+    "Ожидаемый порядок и явные обращения должны сохраниться; неперенесённое остаётся открытым в ответе. "
     "Удаляй старый обход при вставке проверки; не выдумывай ID. Ответ содержит назначенные ID.",
     {"steps": {"type": "array", "items": _step_patch, "maxItems": 100},
      "transitions": {"type": "array", "items": _edge_patch, "maxItems": 100},
      "remove_node_ids": _list("Ошибочные действия для удаления после замены ссылок"),
      "remove_edge_ids": _list("Прежние переходы, заменённые фрагментом"),
+     "operation_mappings": {"type": "array", "maxItems": 100, "items": {
+         "type": "object", "additionalProperties": False,
+         "properties": {"operation_id": _string("ID найденного действия op-*"),
+                        "node_id": _string("Новый ID узла или $local_ref; пустая строка оставляет действие открытым")},
+         "required": ["operation_id", "node_id"]}},
+     "route_mappings": {"type": "array", "maxItems": 100, "items": {
+         "type": "object", "additionalProperties": False,
+         "properties": {"route_id": _string("ID найденного ожидания review-*/route-*"),
+                        "edge_ids": _list("Направленный путь по порядку от from_operation_id к to_operation_id; допускает $local_ref переходов"),
+                        "completion_node_id": _string("ID условного конечного действия либо $local_ref; для отношения двух действий используй edge_ids")},
+         "required": ["route_id"]}},
      "gap_updates": {"type": "array", "maxItems": 100, "items": {
          "type": "object", "additionalProperties": False,
          "properties": {"id": _string("ID существующего пробела"),

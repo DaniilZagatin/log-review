@@ -144,6 +144,23 @@ console.log(JSON.stringify(references.map(ref=>({ref,restored:opened.links.find(
         self.assertEqual(self.js(source, model), [["a", "continuation", "choice"], ["b", "continuation", "all"],
             ["c", "continuation", "choice"], ["x", "continuation", "choice"], ["x", "join", "all"], ["v", "join", "any"]])
 
+    def test_shared_finalizer_is_neutral_and_is_not_merged_with_unknown_outcome(self):
+        model = {"scenario": {"terminal_operation_ids": ["shared", "unknown", "conditional"]},
+                 "nodes": [{"id": "shared", "outcome": "unknown", "outcome_scope": "shared"},
+                           {"id": "unknown", "outcome": "unknown"},
+                           {"id": "conditional", "outcome": "unknown", "outcome_scope": "shared",
+                            "completion_condition": "Обработка элемента завершена"},
+                           {"id": "not-terminal", "outcome": "success", "outcome_scope": "shared"}]}
+        source = "const data=JSON.parse(require('fs').readFileSync(0,'utf8')),scenario=data.scenario;\n" + self.terminal_helpers() + "console.log(JSON.stringify(stageOutcomes(data.nodes)));"
+        outcomes = self.js(source, model)
+        self.assertEqual(len(outcomes), 3)
+        self.assertTrue(all(row["tone"] == "neutral" and row["count"] == 1 for row in outcomes))
+        shared = [row for row in outcomes if row["scope"] == "shared"]
+        self.assertEqual(len(shared), 2)
+        self.assertTrue(all("исход не уточнён" not in row["label"] for row in shared))
+        self.assertTrue(next(row for row in shared if row["conditional"])["label"].startswith("При завершении:"))
+        self.assertIn("исход не уточнён", next(row for row in outcomes if row["scope"] == "branch")["label"])
+
     def test_data_links_do_not_invent_execution_forks_or_joins(self):
         model = {"scenario": {}, "nodes": [{"id": "a", "continuation_mode": "all"}, {"id": "b"}, {"id": "c", "join_mode": "all"}],
                  "edges": [{"source": "a", "target": "b", "kind": "sequence"}, {"source": "b", "target": "c", "kind": "sequence"},

@@ -541,6 +541,7 @@ class ResearchQuality:
                 errors.append(f"{node['id']}: укажите effect_kind — decision/recommendation/command/result; не подменяйте решение достигнутым эффектом")
             if (node['id'] in self.model['scenario'].get('terminal_operation_ids', [])
                     and node.get('outcome', 'unknown') == 'unknown'
+                    and node.get('outcome_scope', 'branch') != 'shared'
                     and not any(node['id'] in gap['node_ids'] for gap in self.model['gaps'])):
                 errors.append(f"{node['id']}: бизнес-исход конечной операции не установлен; уточните outcome по основаниям либо добавьте адресный gap")
         errors.extend(self._reviewed_kind_errors(

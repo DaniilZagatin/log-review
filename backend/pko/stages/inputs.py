@@ -75,6 +75,10 @@ def build_payload(model: dict, compact: bool = False, *, input_version: str | No
         row = {key: deepcopy(node.get(key, "")) for key in (
             "id", "name", "description", "input", "condition", "effect_kind", "continuation_mode",
             "join_mode", "outcome", "completion_condition", "evidence_status")}
+        # Only carry an explicitly recorded distinction in the current action
+        # contract. Older input packets keep their exact published fingerprint.
+        if stage == OPERATIONS_STAGE and input_version == CURRENT_INPUT_VERSION and "outcome_scope" in node:
+            row["outcome_scope"] = deepcopy(node["outcome_scope"])
         row.update(result=deepcopy(node.get("output", "")), dominator=dominators.get(node["id"]),
                    terminal=node["id"] in terminals)
         row["external_interactions"] = [{key: deepcopy(item[key]) for key in (

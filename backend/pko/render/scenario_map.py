@@ -14,6 +14,7 @@ from typing import Any
 
 from pko.render.dpss_theme import embedded_fonts
 from pko.render.horizon_theme import horizon_tokens
+from pko.scenario_map.public_summary import build_public_summary
 from pko.stages.contracts import validate_hierarchy
 from pko.stages.inputs import grouping_stage, OPERATIONS_STAGE
 
@@ -124,10 +125,14 @@ def render_scenario_map(model: dict[str, Any], hierarchy: dict[str, Any] | None 
     title = str(scenario.get("title") or "Карта сценария")
     action_profile = (semantic_stage == OPERATIONS_STAGE
                       or (hierarchy or {}).get("hierarchy_kind") == "business_operations")
+    publication = build_public_summary(model)
+    script = _action_terms(_SCRIPT) if action_profile else _SCRIPT
+    script = script.replace("__PUBLIC_SUMMARY__", _script_json({key: publication[key]
+                            for key in ("summary", "model_commentary")}))
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
         "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + _STAGE_STYLE,
-        "SCRIPT": _action_terms(_SCRIPT) if action_profile else _SCRIPT,
+        "SCRIPT": script,
         "LIFECYCLE": _lifecycle_summary(model, hierarchy),
         "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
@@ -530,6 +535,7 @@ _SCRIPT = r'''
 (() => {
 'use strict';
 const model = JSON.parse(document.getElementById('scenario-model').textContent);
+const publicSummary = __PUBLIC_SUMMARY__;
 const array = value => Array.isArray(value) ? value : [];
 const text = value => value === null || value === undefined ? '' : typeof value === 'string' ? value : typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
 const plural = (count, forms) => {const n=Math.abs(count)%100,last=n%10;return forms[n>=11&&n<=19?2:last===1?0:last>=2&&last<=4?1:2];};
@@ -573,16 +579,17 @@ const terminalIds=new Set(array(scenario.terminal_operation_ids).map(text));
 function terminalPresentation(node){
  const terminal=legacy?node.kind==='end':terminalIds.has(text(node.id));
  if(!terminal)return null;
+ if(node.outcome_scope==='shared')return {tone:'neutral',label:node.completion_condition?'При завершении: общая обработка разных исходов':'Общее завершение разных ветвей',outcome:'unknown',scope:'shared',conditional:!!node.completion_condition};
  // A dangling operation is not a terminal; names and technical execution status do not determine the business outcome.
  const outcome=Object.prototype.hasOwnProperty.call(outcomeNames,node.outcome)?node.outcome:'unknown';
  const tone=outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
  const label=node.completion_condition?'При завершении: '+outcomeNames[outcome]:
   outcome==='success'||outcome==='unknown'?outcomeNames[outcome]:'Завершение · '+outcomeNames[outcome].toLocaleLowerCase('ru');
- return {tone,label,outcome,conditional:!!node.completion_condition};
+ return {tone,label,outcome,scope:'branch',conditional:!!node.completion_condition};
 }
 function stageOutcomes(members){
  const outcomes=new Map();
- for(const node of members){const end=terminalPresentation(node);if(!end)continue;const key=end.outcome+':'+end.conditional;
+ for(const node of members){const end=terminalPresentation(node);if(!end)continue;const key=end.scope+':'+end.outcome+':'+end.conditional;
   if(!outcomes.has(key))outcomes.set(key,{...end,count:0});outcomes.get(key).count++;}
  return [...outcomes.values()];
 }
@@ -734,7 +741,9 @@ $('stage-select').addEventListener('change',()=>{
 $('clear-selection').addEventListener('click',()=>closeInspector());
 function showOverview(){
  const panel=$('inspector-content'); panel.replaceChildren();panel.append(el('div','inspector-kicker','ВАРИАНТ СЦЕНАРИЯ'),el('h2','',scenario.title || 'Карта процесса'));
- panel.append(el('p','muted',model.summary || 'Выберите операцию, чтобы увидеть её смысл, вход, результат, условия продолжения и подтверждения в коде.'));
+ panel.append(el('p','muted',publicSummary.summary));
+ if(publicSummary.model_commentary.text){const comment=el('details','details');comment.append(el('summary','','Комментарий исследователя'));
+  comment.append(el('p','muted','Текст модели; не источник счётчиков, статусов и исходов карты.'),el('p','muted',publicSummary.model_commentary.text));panel.append(comment);}
  field(panel,'Описание варианта сценария',fullDescription);
  const exclusions=array(scenario.exclusions),excludedTasks=array(model.research_tasks).filter(task=>task.status==='out_of_scope');
  if(exclusions.length){const block=el('div','field');block.append(el('dt','','Вне исследования'));
@@ -779,7 +788,8 @@ function showNode(node){
  field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);
  const terminal=legacy?node.kind==='end':array(scenario.terminal_operation_ids).map(text).includes(text(node.id));
  if(node.effect_kind&&(node.effect_kind!=='unknown'||terminal))field(panel,'Что установлено',{decision:'Сформировано решение',recommendation:'Сформирована рекомендация',command:'Отправлена команда',result:'Подтверждён результат',unknown:'Не установлено'}[node.effect_kind]||'Не установлено');
- if(node.outcome&&(node.outcome!=='unknown'||terminal))field(panel,'Исход',outcomeNames[node.outcome]||node.outcome);
+ if(node.outcome_scope==='shared')field(panel,'Завершение','Общая обработка разных бизнес-исходов; единый исход к этому действию не относится.');
+ else if(node.outcome&&(node.outcome!=='unknown'||terminal))field(panel,'Исход',outcomeNames[node.outcome]||node.outcome);
  if(node.join_mode==='all')field(panel,'Готовность к выполнению','Операция ожидает завершения всех предусмотренных входящих ветвей.');
  externalInteractions(panel,node);systemBlock(panel,node);
  codeExplanations(panel,node,true);
@@ -1121,7 +1131,7 @@ function stageCard(item){
  content.append(el('span','node-stage-kicker','Бизнес-этап · '+members.length+' '+plural(members.length,['операция','операции','операций'])),el('span','node-name',stage.name||stage.id));
   if(stage.result)content.append(el('span','node-stage-result',stage.result));
  if(ends.length){const row=el('span','stage-outcomes'),count=value=>value>1?' · '+value:'';
-  for(const end of ends){const badge=el('span','stage-outcome '+end.tone,end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
+  for(const end of ends){const badge=el('span','stage-outcome '+end.tone,end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.outcomeScope=end.scope;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
  if(semantics.length){const row=el('span','stage-outcomes stage-semantics');for(const label of new Set(semantics.map(item=>item.short)))row.append(el('span','stage-outcome',label));content.append(row);}
  if(findings)content.append(el('span','node-gap','Не установлено: '+findings));
  button.append(content);button.setAttribute('aria-pressed','false');button.setAttribute('aria-expanded','false');

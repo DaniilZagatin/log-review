@@ -122,10 +122,12 @@ class AddressedLoopTests(unittest.TestCase):
                     ('read_file', {'path': 'source-1/missing-' + str(number) + '.py'})]
         client = loop_fixtures.GeneratedBatchClient(batch)
         model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=30)
-        self.assertEqual(model['run']['stop_kind'], 'no_progress', model['run'])
-        self.assertLessEqual(client.requests, 8)
-        self.assertEqual(model['run']['loop_recoveries'], 1)
-        self.assertTrue(model['run']['recent_rejections'])
+        self.assertEqual(model['run']['stop_kind'], 'step_limit', model['run'])
+        self.assertEqual(client.requests, model['run']['max_steps'])
+        self.assertFalse(model['run'].get('loop_recovery_attempted'))
+        self.assertTrue(model['run']['unresolved_rejections'])
+        self.assertTrue(all(row['repair_attempts'] == 4 for row in model['run']['unresolved_rejections']))
+        self.assertEqual(model['run']['unresolved_rejections'][0]['object_ids'], ['step-1'])
         self.assertEqual(len(model['nodes']), 18)
 
     def test_same_patch_item_stays_addressed_when_its_index_changes(self):
@@ -140,9 +142,11 @@ class AddressedLoopTests(unittest.TestCase):
                     ('upsert_step', good)]
         client = loop_fixtures.GeneratedBatchClient(batch)
         model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=15)
-        self.assertEqual(model['run']['stop_kind'], 'no_progress', model['run'])
-        self.assertLessEqual(client.requests, 8)
-        self.assertEqual(model['run']['loop_recoveries'], 1)
+        self.assertEqual(model['run']['stop_kind'], 'step_limit', model['run'])
+        self.assertEqual(client.requests, model['run']['max_steps'])
+        self.assertFalse(model['run'].get('loop_recovery_attempted'))
+        self.assertTrue(model['run']['unresolved_rejections'])
+        self.assertTrue(all(row['repair_attempts'] == 4 for row in model['run']['unresolved_rejections']))
         self.assertEqual(len(model['nodes']), 18)
 
     def test_missing_review_coverage_survives_unrelated_edits(self):
@@ -161,9 +165,11 @@ class AddressedLoopTests(unittest.TestCase):
         client = loop_fixtures.GeneratedBatchClient(batch)
         model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=15,
                           resume_checkpoint=saved[-1])
-        self.assertEqual(model['run']['stop_kind'], 'no_progress', model['run'])
-        self.assertLessEqual(client.requests, 8)
-        self.assertEqual(model['run']['loop_recoveries'], 1)
+        self.assertEqual(model['run']['stop_kind'], 'step_limit', model['run'])
+        self.assertEqual(client.requests, model['run']['max_steps'])
+        self.assertFalse(model['run'].get('loop_recovery_attempted'))
+        self.assertTrue(model['run']['unresolved_rejections'])
+        self.assertTrue(all(row['repair_attempts'] == 4 for row in model['run']['unresolved_rejections']))
 
     def test_output_edits_cannot_repair_an_unread_citation(self):
         prefix = loop_fixtures.graph_prefix()
@@ -175,16 +181,18 @@ class AddressedLoopTests(unittest.TestCase):
                     ('upsert_step', {'id': 'step-1', 'output': 'Параметры обращения приняты с номером ' + str(number)})]
         client = loop_fixtures.GeneratedBatchClient(batch)
         model = run_agent(self.workspace, SCENARIO, SPEC, client=client, max_steps=10)
-        self.assertEqual(model['run']['stop_kind'], 'no_progress', model['run'])
-        self.assertLess(client.requests, 10)
-        self.assertEqual(model['run']['loop_recoveries'], 1)
+        self.assertEqual(model['run']['stop_kind'], 'step_limit', model['run'])
+        self.assertEqual(client.requests, 10)
+        self.assertFalse(model['run'].get('loop_recovery_attempted'))
+        self.assertTrue(model['run']['unresolved_rejections'])
+        self.assertEqual(model['run']['unresolved_rejections'][0]['repair_attempts'], 4)
 
     def test_meaningful_target_change_releases_non_evidence_problem(self):
         state = StabilityMemoryTests().state()
         tracker = AddressedRejections()
         function = {'name': 'upsert_step', 'arguments': json.dumps({'id': 'step-1'})}
         rejection = {'ok': False, 'code': 'quality_error', 'error': 'Missing continuation'}
-        for _ in range(3):
+        for _ in range(5):
             tracker.observe(function, rejection, state)
         self.assertTrue(tracker.stalled())
         state.model['nodes'][0]['continuation_mode'] = 'choice'
@@ -197,18 +205,18 @@ class AddressedLoopTests(unittest.TestCase):
         first = {'path': 'source-1/channel.py', 'line_start': 100, 'line_end': 100}
         second = {'path': 'source-2/cards.py', 'line_start': 100, 'line_end': 100}
         rejection = {'ok': False, 'code': 'invalid_evidence', 'error': 'Unread source range'}
-        for refs in ([first, second], [second, first], [first, second, first]):
+        for refs in ([first, second], [second, first], [first, second, first], [second, first], [first, second]):
             tracker.observe({'name': 'upsert_step', 'arguments': json.dumps({
                 'id': 'step-1', 'evidence': refs})}, rejection, state)
         self.assertTrue(tracker.stalled())
-        self.assertEqual(tracker.problems[tracker.current]['count'], 3)
+        self.assertEqual(tracker.problems[tracker.current]['count'], 5)
 
     def test_new_read_information_releases_addressed_problem(self):
         state = StabilityMemoryTests().state()
         tracker = AddressedRejections()
         function = {'name': 'upsert_step', 'arguments': json.dumps({'id': 'step-1'})}
         rejection = {'ok': False, 'code': 'quality_error', 'error': 'Missing source justification'}
-        for _ in range(3):
+        for _ in range(5):
             tracker.observe(function, rejection, state)
         self.assertTrue(tracker.stalled())
         # An additional actual line from the source is useful research progress.

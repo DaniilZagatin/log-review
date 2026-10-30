@@ -196,9 +196,14 @@ def research_calls():
         3: {"integrations": ["event"]},
     }
     for number in range(1, 4):
-        operations = [{"node_id": node["id"], "name": node["name"], "kind": node["operation_kind"],
+        operations = [{"node_id": node["id"], "local_ref": node['id'], "name": node["name"], "kind": node["operation_kind"],
                        "action": node["name"], "effect": node["effect"], "failure": node["failure"], "evidence": node["evidence"]}
                       for node in nodes.values() if node["system"] == number and node["operation_kind"]]
+        routes = [{'condition': condition, 'expected_result': nodes[target]['effect'],
+                   'from_operation_id': '$'+nodes[source]['id'], 'to_operation_id': '$'+nodes[target]['id'],
+                   'evidence': scopes[number], 'edge_ids': [edge_ids[key]]}
+                  for key, source, target, kind, condition in edge_specs
+                  if kind == 'branch' and nodes[source]['system'] == number]
         checks = {}
         for category, keys in check_nodes[number].items():
             checks[category] = {"status": "present" if keys else "not_found",
@@ -207,7 +212,8 @@ def research_calls():
                                 "evidence": scopes[number], "node_ids": [nodes[key]["id"] for key in keys],
                                 "edge_ids": [edge_ids[key] for key in check_edges[number].get(category, [])]}
         calls.append(("review_execution", {"name": f"Операции учебного обработчика {number}",
-                                           "evidence": scopes[number], "operations": operations, "checks": checks}))
+                                           "evidence": scopes[number], "operations": operations, "checks": checks,
+                                           "route_expectations": routes}))
         calls.append(("review_source", {"source_id": f"source-{number}", "disposition": "reviewed",
                                         "reason": "Прочитан выбранный обработчик и его операции. Соседний перевыпуск и неподключённый helper не включены."}))
     initial_brief = next(args for name, args in calls if name == "save_research_brief")

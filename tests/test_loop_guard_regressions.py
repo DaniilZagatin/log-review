@@ -85,7 +85,8 @@ class LoopGuardRegressionTests(unittest.TestCase):
         client, model = self.run_script(batch)
         self.assert_stopped_without_progress(client, model, before=21)
         self.assertEqual(len(model["edges"]), 1)
-        self.assertEqual(model["run"]["recent_rejections"][-1]["code"], "invalid_evidence")
+        self.assertEqual(model["run"]["recent_rejections"][-1]["code"], "retry_budget_exhausted")
+        self.assertEqual(model["run"]["unresolved_rejections"][0]["code"], "invalid_evidence")
 
     def test_edge_wording_in_same_batch_does_not_erase_a_rejection_loop(self):
         prefix = graph_prefix()

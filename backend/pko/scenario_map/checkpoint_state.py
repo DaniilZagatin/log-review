@@ -178,12 +178,31 @@ def _validate_model(state, model, counters):
     _object(model, state.model)
     if model['schema_version'] != SCHEMA_VERSION or model['semantic_profile'] != SEMANTIC_PROFILE:
         _fail('неподдерживаемая схема или методология')
-    _object(model['scenario'], state.model['scenario'])
+    _object(model['scenario'], set(state.model['scenario']) - {'scope_revision', 'scope_changes'},
+            {'scope_revision', 'scope_changes'})
     for key, value in model['scenario'].items():
+        if key in {'scope_revision', 'scope_changes'}:
+            continue
         if isinstance(state.model['scenario'][key], list):
             _strings(value, 'scenario.' + key)
         elif not isinstance(value, str):
             _fail('некорректное поле сценария')
+    scope_revision = model['scenario'].get('scope_revision', 1)
+    if type(scope_revision) is not int or scope_revision < 1:
+        _fail('некорректная ревизия границы сценария')
+    _list(model['scenario'].get('scope_changes', []), 'scope_changes', 30)
+    previous_revision = 0
+    for change in model['scenario'].get('scope_changes', []):
+        _object(change, {'revision', 'reason', 'evidence', 'fields'})
+        revision = change['revision']
+        if type(revision) is not int or not previous_revision < revision <= scope_revision:
+            _fail('некорректная история границы сценария')
+        previous_revision = revision
+        if not isinstance(change['reason'], str) or not change['reason'].strip() or not change['evidence']:
+            _fail('уточнение границы сценария требует причины и основания')
+        _strings(change['fields'], 'scope_changes.fields', 4)
+        if not change['fields'] or set(change['fields']) - {'start', 'end', 'instance_unit', 'exclusions'}:
+            _fail('неизвестное поле изменения границы сценария')
     _object(counters, state._counters)
     if any(type(n) is not int or not 0 <= n <= 1_000_000_000 for n in counters.values()):
         _fail('некорректные счётчики ID')
@@ -212,7 +231,7 @@ def _validate_model(state, model, counters):
                    'channel', 'contract', 'code_explanations'}
     for collection, fields in (('nodes', node_fields), ('edges', edge_fields)):
         for row in model[collection]:
-            _object(row, fields)
+            _object(row, fields, {'outcome_scope'} if collection == 'nodes' else ())
             _choice(row['kind'], STEP_KINDS if collection == 'nodes' else EDGE_KINDS, 'kind')
             _choice(row['evidence_status'], EVIDENCE_STATUSES, 'evidence_status')
             state._support(row)
@@ -221,6 +240,9 @@ def _validate_model(state, model, counters):
                                     ('continuation_mode', ('sequence', 'choice', 'all')), ('join_mode', ('any', 'all'))):
                     _choice(row[key], values, key)
                 state.external_interactions(row['external_interactions'], row['evidence'])
+                _choice(row.get('outcome_scope', 'branch'), ('branch', 'shared'), 'outcome_scope')
+                if row.get('outcome_scope') == 'shared' and row['outcome'] != 'unknown':
+                    _fail('общий финализатор не имеет единственного бизнес-исхода')
             state.code_explanations(row['code_explanations'], row['evidence'] + row.get('sender_evidence', []) + row.get('receiver_evidence', []))
             for key in fields - {'evidence', 'sender_evidence', 'receiver_evidence', 'external_interactions', 'code_explanations'}:
                 if not isinstance(row[key], str):
@@ -230,9 +252,30 @@ def _validate_model(state, model, counters):
     for review in model['execution_reviews']:
         _object(review, {'id', 'name', 'evidence', 'operations', 'checks', 'node_fingerprints', 'edge_fingerprints'},
                 {'route_expectations', 'discarded_operations', 'discarded_route_expectations',
-                 'discarded_operations_omitted', 'discarded_route_expectations_omitted'})
+                 'discarded_operations_omitted', 'discarded_route_expectations_omitted',
+                 'fact_revision', 'mapping_revision', 'fact_changes'})
         _list(review['operations'], 'operations', 100)
         _object(review['checks'], EXECUTION_CHECKS)
+        for field in ('fact_revision', 'mapping_revision'):
+            value = review.get(field, 1)
+            if type(value) is not int or value < 1:
+                _fail('некорректная ревизия обзора: ' + field)
+        _list(review.get('fact_changes', []), 'fact_changes', 30)
+        previous_revision = 0
+        for change in review.get('fact_changes', []):
+            _object(change, {'revision', 'reason', 'evidence', 'operation_ids', 'route_ids'})
+            revision = change['revision']
+            if type(revision) is not int or not previous_revision < revision <= review.get('fact_revision', 1):
+                _fail('некорректная история уточнений найденного исполнения')
+            previous_revision = revision
+            if not isinstance(change['reason'], str) or not change['reason'].strip() or not change['evidence']:
+                _fail('уточнение найденного исполнения требует причины и основания')
+            _strings(change['operation_ids'], 'fact_changes.operation_ids', 100)
+            _strings(change['route_ids'], 'fact_changes.route_ids', 100)
+            for oid in change['operation_ids']:
+                identifier(oid, 'op')
+            if any(not rid.startswith(review['id'] + '/route-') for rid in change['route_ids']):
+                _fail('история уточнений ссылается на чужой маршрут')
         for key, prefix in (('node_fingerprints', 'step'), ('edge_fingerprints', 'edge')):
             if not isinstance(review[key], dict):
                 _fail('некорректные отпечатки обзора')
@@ -241,21 +284,29 @@ def _validate_model(state, model, counters):
                 if not isinstance(fingerprint, str) or not re.fullmatch('[a-f0-9]{64}', fingerprint):
                     _fail('некорректный отпечаток обзора')
         for action in review['operations']:
-            _object(action, {'id', 'node_id', 'mapping_status', 'kind', 'name', 'action', 'effect', 'failure', 'condition', 'evidence'})
+            _object(action, {'id', 'node_id', 'mapping_status', 'kind', 'name', 'action', 'effect', 'failure', 'condition', 'evidence'},
+                    {'external_interactions'})
             identifier(action['id'], 'op')
             if action['id'] in action_ids:
                 _fail('повтор ID найденного действия')
             action_ids.add(action['id'])
             _choice(action['kind'], OPERATION_KINDS, 'operations.kind')
+            state.external_interactions(action.get('external_interactions', []), action['evidence'])
             if action['mapping_status'] != ('mapped' if action['node_id'] else 'unmapped'):
                 _fail('противоречивое сопоставление действия')
         route_ids = set()
+        review_action_ids = {action['id'] for action in review['operations']}
         for route in review.get('route_expectations', []):
-            _object(route, {'id', 'condition', 'expected_result', 'evidence', 'edge_ids', 'completion_node_id', 'mapping_status'})
+            _object(route, {'id', 'condition', 'expected_result', 'evidence', 'edge_ids', 'completion_node_id', 'mapping_status'},
+                    {'from_operation_id', 'to_operation_id'})
             if (not isinstance(route['id'], str) or not route['id'].startswith(review['id'] + '/route-')
                     or route['id'] in route_ids):
                 _fail('некорректный ID ожидаемого маршрута')
             route_ids.add(route['id'])
+            left, right = route.get('from_operation_id', ''), route.get('to_operation_id', '')
+            if (not isinstance(left, str) or not isinstance(right, str) or bool(left) != bool(right)
+                    or left and (left not in review_action_ids or right not in review_action_ids)):
+                _fail('ожидаемое продолжение ссылается на неизвестное действие обследованного участка')
             if not isinstance(route['evidence'], list) or not route['evidence']:
                 _fail('ожидаемый маршрут требует прочитанных оснований')
             for field in ('condition', 'expected_result'):
@@ -328,7 +379,8 @@ def _validate_model(state, model, counters):
     if summary is not None:
         _object(summary, {'revision', 'status', 'through_step', 'based_on_brief_revision', 'input_omitted_exchanges',
                           'input_truncated_fields', 'input_open_notes_complete', 'input_open_tasks_complete', 'summary'},
-                         {'input_unmapped_actions_complete', 'input_unmapped_routes_complete', 'normalization'})
+                         {'input_unmapped_actions_complete', 'input_unmapped_routes_complete',
+                          'input_execution_relations_complete', 'input_execution_interactions_complete', 'normalization'})
         _choice(summary['status'], ('public_summary_not_evidence',), 'summary.status')
         from pko.scenario_map.compaction import validate_summary
         normalization = {}

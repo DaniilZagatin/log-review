@@ -27,12 +27,13 @@ async function checkBusinessStages(page, model) {
     const card=page.locator('.kind-stage[data-stage-id="'+stage.id+'"]');
     assert.equal(await card.count(),1,'Every closed collapsible stage is a block');
     const members=model.nodes.filter(n=>hierarchy.membership[n.id]===stage.id),ends=members.filter(n=>terminalIds.has(n.id));
-    const badges=await card.locator('[data-outcome]').evaluateAll(items=>items.map(n=>({outcome:n.dataset.outcome,conditional:n.dataset.conditional,text:n.textContent})));
-    assert.equal(badges.length,new Set(ends.map(n=>(names[n.outcome]?n.outcome:'unknown')+':'+!!n.completion_condition)).size,'Each distinct outcome and conditional status has its own label');
+    const badges=await card.locator('[data-outcome]').evaluateAll(items=>items.map(n=>({outcome:n.dataset.outcome,scope:n.dataset.outcomeScope,conditional:n.dataset.conditional,text:n.textContent})));
+    assert.equal(badges.length,new Set(ends.map(n=>(n.outcome_scope||'branch')+':'+(names[n.outcome]?n.outcome:'unknown')+':'+!!n.completion_condition)).size,'Each distinct outcome, scope and conditional status has its own label');
     for(const node of ends){const outcome=names[node.outcome]?node.outcome:'unknown';
-      const badge=badges.find(b=>b.outcome===outcome&&b.conditional===String(!!node.completion_condition));
+      const badge=badges.find(b=>b.outcome===outcome&&b.scope===(node.outcome_scope||'branch')&&b.conditional===String(!!node.completion_condition));
       assert(badge,'A collapsed stage retains each terminal outcome');
-      assert(badge.text.toLocaleLowerCase('ru').includes(names[outcome].toLocaleLowerCase('ru')),'Exact outcome label survives collapsing');
+      const label=node.outcome_scope==='shared'?(node.completion_condition?'общая обработка разных исходов':'Общее завершение разных ветвей'):names[outcome];
+      assert(badge.text.toLocaleLowerCase('ru').includes(label.toLocaleLowerCase('ru')),'Exact outcome label survives collapsing');
       assert.equal(badge.text.startsWith('При завершении:'),!!node.completion_condition,'Conditional completion remains conditional');}
   }
   const stage=hierarchy.stages.find(stage=>stage.collapsible);
