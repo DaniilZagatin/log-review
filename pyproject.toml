@@ -1,21 +1,26 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "process-observability"
-version = "0.1.0"
-description = "Local agent that prepares a business process for digital monitoring (skeleton)."
+version = "0.2.0"
+description = "Scenario onboarding assistant: Belka map, logs, improvements, metrics and offline HTML."
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["openai>=1.30", "httpx>=0.27", "python-dotenv>=1.0"]
 
 [project.optional-dependencies]
-tokens = ["tokenizers"]
+phoenix = ["arize-phoenix-otel>=0.17"]
+
+[project.scripts]
+process-observability = "process_observability.cli:main"
+pko = "pko.cli:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
-# The vendored map renderer reads these files at report time; they must ship with a wheel.
 [tool.setuptools.package-data]
-"process_observability.map_presentation" = ["PROVENANCE.md", "assets/dpss/*.woff2", "assets/dpss/PROVENANCE.md",
-                                            "assets/horizon/tokens.css"]
+"process_observability.map_presentation" = ["PROVENANCE.md", "assets/dpss/*.woff2", "assets/dpss/PROVENANCE.md", "assets/horizon/tokens.css"]
+"pko.scenario_map" = ["*.md"]
+"pko.stages" = ["methodology/*.md"]
+"pko.render" = ["assets/dpss/*.woff2", "assets/dpss/*.md", "design/horizon/tokens.css", "design/horizon/components/bundle.css"]

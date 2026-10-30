@@ -125,17 +125,32 @@ class SourceToolsTests(unittest.TestCase):
                 with self.assertRaises(SourceError):
                     snapshot.evidence(ref)
 
-    def test_no_partial_scope_without_explicit_option_and_no_symlink_reads(self):
-        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
-            root = Path(temp);(root / "a.py").write_text("first=1\n");(root / "b.py").write_text("second=2\n")
-            secret = Path(outside) / "external.py";secret.write_text('password="CANARY"')
-            (root / "link.py").symlink_to(secret)
+    def test_partial_requires_explicit_option(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "a.py").write_text("first=1\n", encoding="utf-8")
+            (root / "b.py").write_text("second=2\n", encoding="utf-8")
             with self.assertRaises(SourceError):
                 snapshot_repository(root, max_files=1)
             snapshot = snapshot_repository(root, max_files=1, allow_partial=True)
             self.assertTrue(snapshot.scope["partial_input"])
             self.assertEqual(snapshot.scope["eligible_files"], 2)
+
+    def test_snapshot_does_not_read_symlinks(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as outside:
+            root = Path(temp)
+            (root / "a.py").write_text("first=1\n", encoding="utf-8")
+            secret = Path(outside) / "external.py"
+            secret.write_text('password="CANARY"', encoding="utf-8")
+            try:
+                (root / "link.py").symlink_to(secret)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows account lacks symbolic-link creation privilege")
+                raise
+            snapshot = snapshot_repository(root)
             self.assertNotIn("link.py", snapshot.files)
+            self.assertEqual(snapshot.scope["eligible_files"], 1)
 
     def test_quote_inside_private_key_block_is_redacted(self):
         with tempfile.TemporaryDirectory() as temp:

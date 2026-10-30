@@ -28,7 +28,7 @@ class Guards(unittest.TestCase):
         self.root = Path(self.temp.name).resolve(); self.repo = self.root/'repo'; self.repo.mkdir()
 
     def setup_code(self, code, operations):
-        (self.repo/'app.py').write_text(code)
+        (self.repo/'app.py').write_text(code, encoding='utf-8', newline='\n')
         view = MapView.from_dict({'schema_version': '2.0', 'scenario': {}, 'sources': [{'id': 'source-1'}],
                                  'nodes': operations, 'edges': [], 'run': {'id': 'r1', 'status': 'completed'}})
         return view, snapshot_repository(self.repo, max_files=None, max_chars=None)

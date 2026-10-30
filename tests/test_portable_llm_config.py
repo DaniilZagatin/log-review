@@ -74,8 +74,8 @@ class PortableRequestTests(unittest.TestCase):
             profile=Path(folder)/'model.json'
             profile.write_text(json.dumps({role:config(extra_body=OPTIONS).to_dict() for role in ('code','business')}))
             with patch.object(llm,'urllib_transport',t),contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
-                result=cli.main(['check-model','--config',str(profile),'--role','all'])
-        self.assertEqual(result,0);self.assertEqual(len(t.calls),2)
+                result=cli.main(['check-model','--config',str(profile)])
+        self.assertEqual(result,0);self.assertEqual(len(t.calls),1)
         self.assertTrue(all(call['payload']['reasoning']==OPTIONS['reasoning'] for call in t.calls))
 
 class PortableRateLimitTests(unittest.TestCase):

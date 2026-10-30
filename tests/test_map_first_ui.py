@@ -240,31 +240,32 @@ class MapFirstUiTests(unittest.TestCase):
         self.assertEqual(view.revision, self.view.revision)
         self.assertIs(data, self.data)
 
-    def test_vendored_package_is_self_contained_and_works_from_a_plain_copy(self):
-        for source in PACKAGE.glob('*.py'):
-            text = source.read_text(encoding='utf-8')
-            self.assertIsNone(re.search(r'^\s*(?:from|import)\s+pko\b', text, re.M), source.name)
-            self.assertNotIn('/Users/', text); self.assertNotIn('Downloads', text)
-        vendored = (PACKAGE/'scenario_map.py').read_text(encoding='utf-8')
-        self.assertTrue(vendored.startswith('# Vendored from the first agent (producer): backend/pko/render/scenario_map.py.\n'))
-        self.assertIn('from .compat import map_revision, validate_hierarchy\n', vendored)
-        self.assertIn('from .theme import embedded_fonts, horizon_tokens\n', vendored)
-        copy = self.root/'copied_map_presentation'
-        shutil.copytree(PACKAGE, copy, ignore=shutil.ignore_patterns('__pycache__'))
-        name = 'copied_map_presentation_under_test'
-        before = set(sys.modules)
-        try:
-            spec = importlib.util.spec_from_file_location(name, copy/'__init__.py', submodule_search_locations=[str(copy)])
-            module = importlib.util.module_from_spec(spec); sys.modules[name] = module; spec.loader.exec_module(module)
-            loaded = set(sys.modules) - before
-            self.assertFalse([item for item in loaded if item == 'pko' or item.startswith('pko.')])
-            parts = module.scenario_map_parts(self.data['map'], None, overlay=logging_overlay(self.data, self.view), embedded=True)
-            self.assertEqual(parts['fonts'].count('data:font/woff2;base64,'), 3)
-            self.assertEqual(Path(sys.modules[name + '.theme'].__file__).resolve().parent, copy)
-            self.assertIn('Цвет: покрытие логами', parts['body'])
-        finally:
-            for item in [key for key in sys.modules if key == name or key.startswith(name + '.')]:
-                del sys.modules[item]
+    def test_product_packages_work_from_a_plain_copy_without_developer_checkout(self):
+        import subprocess
+        copy = self.root/'portable-src'
+        source = Path(__file__).resolve().parents[1]/'src'
+        for package in ('process_observability', 'pko'):
+            shutil.copytree(source/package, copy/package, ignore=shutil.ignore_patterns('__pycache__'))
+        payload = self.root/'review.json'
+        payload.write_text(json.dumps(self.data, ensure_ascii=False), encoding='utf-8')
+        script = """import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from process_observability.product_report import build_product_html
+from process_observability.metrics import build_metrics
+import pko, process_observability
+root=Path(sys.argv[1]).resolve()
+assert Path(pko.__file__).resolve().is_relative_to(root)
+assert Path(process_observability.__file__).resolve().is_relative_to(root)
+data=json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
+page=build_product_html(data,build_metrics(data))
+assert page.count('data:font/woff2;base64,')==3
+assert 'panel-metrics' in page
+assert 'Цвет: покрытие логами' in page
+"""
+        result = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-B', '-c', script, str(copy), str(payload)],
+                                cwd=self.root, capture_output=True, text=True, encoding='utf-8')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_package_data_ships_the_renderer_assets(self):
         pyproject = tomllib.loads((Path(__file__).resolve().parents[1]/'pyproject.toml').read_text(encoding='utf-8'))

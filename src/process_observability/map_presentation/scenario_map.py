@@ -1,6 +1,6 @@
-# Vendored from the first agent (producer): backend/pko/render/scenario_map.py.
-# Rule: this copy differs from that file only in its import lines (pko.* -> .theme/.compat).
-# Change the producer renderer first, then re-vendor; never edit only this copy.
+# Integrated map renderer: source-bound overlays and embedded product panels.
+# Action terminology and lifecycle semantics are shared with the bundled Belka.
+# This adapter preserves map nodes/edges and adds presentation only.
 """Standalone, offline graph of atomic operations in one scenario.
 
 The renderer consumes the scenario-map contract, never ProgressModel. It does
@@ -17,6 +17,7 @@ from typing import Any
 
 from .compat import map_revision, validate_hierarchy
 from .theme import embedded_fonts, horizon_tokens
+from pko.render.scenario_map import _action_terms, _lifecycle_summary
 
 # A host page that embeds the map replaces these comments with its own header
 # content and tab panels. User text is escaped, so it can never form them.
@@ -86,8 +87,16 @@ def scenario_map_parts(model: dict[str, Any], hierarchy: dict[str, Any] | None =
         "PRESENTATION_DATA": _script_json(presentation) if layered else "",
         "OVERLAY_CONTROLS": _OVERLAY_CONTROLS, "HEADER_SLOT": EMBED_HEADER_SLOT, "PANELS_SLOT": EMBED_PANELS_SLOT,
     }
+    template = _body_template(overlay is not None, bool(embedded))
+    if model.get("semantic_profile") == "variant-actions-v1":
+        template = _action_terms(template)
+        values["SCRIPT"] = _action_terms(values["SCRIPT"])
+        values["OVERLAY_CONTROLS"] = _action_terms(values["OVERLAY_CONTROLS"])
+    body = _fill(template, values)
+    body = body.replace('</header>', _lifecycle_summary(model, hierarchy) + '</header>', 1)
+    values["STYLE"] += '.result-lifecycle{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;margin-top:8px}.result-lifecycle p{flex-basis:100%;margin:0}.result-lifecycle.emergency{color:var(--danger)}'
     return {"title": values["TITLE"], "fonts": values["FONTS"], "style": values["STYLE"],
-            "body": _fill(_body_template(overlay is not None, bool(embedded)), values),
+            "body": body,
             "data": _fill(_DATA + (_PRESENTATION_DATA if layered else ""), values),
             "script": values["SCRIPT"]}
 
@@ -575,6 +584,8 @@ const terminalIds=new Set(array(scenario.terminal_operation_ids).map(text));
 function terminalPresentation(node){
  const terminal=legacy?node.kind==='end':terminalIds.has(text(node.id));
  if(!terminal)return null;
+ // A shared finalizer does not invent a single business outcome.
+ if(node.outcome_scope==='shared')return {tone:'neutral',label:node.completion_condition?'При завершении: общая обработка разных исходов':'Общее завершение разных ветвей',outcome:'unknown',scope:'shared',conditional:!!node.completion_condition};
  // A dangling operation is not a terminal; names and technical execution status do not determine the business outcome.
  const outcome=Object.prototype.hasOwnProperty.call(outcomeNames,node.outcome)?node.outcome:'unknown';
  const tone=outcome==='success'?'success':['refusal','failure','cancelled'].includes(outcome)?'negative':'neutral';
@@ -781,7 +792,8 @@ function showNode(node){
  field(panel,'Вход',node.input);field(panel,'Результат',node.output);field(panel,'Условие выполнения',node.condition);
  const terminal=legacy?node.kind==='end':array(scenario.terminal_operation_ids).map(text).includes(text(node.id));
  if(node.effect_kind&&(node.effect_kind!=='unknown'||terminal))field(panel,'Что установлено',{decision:'Сформировано решение',recommendation:'Сформирована рекомендация',command:'Отправлена команда',result:'Подтверждён результат',unknown:'Не установлено'}[node.effect_kind]||'Не установлено');
- if(node.outcome&&(node.outcome!=='unknown'||terminal))field(panel,'Исход',outcomeNames[node.outcome]||node.outcome);
+ if(node.outcome_scope==='shared')field(panel,'Завершение','Общая обработка разных бизнес-исходов; единый исход к этому действию не относится.');
+ else if(node.outcome&&(node.outcome!=='unknown'||terminal))field(panel,'Исход',outcomeNames[node.outcome]||node.outcome);
  if(node.join_mode==='all')field(panel,'Готовность к выполнению','Операция ожидает завершения всех предусмотренных входящих ветвей.');
  externalInteractions(panel,node);systemBlock(panel,node);
  codeExplanations(panel,node,true);
@@ -908,7 +920,7 @@ function selectStage(stage){
 function showStage(stage){
  const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
  panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
- field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
+ field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);field(panel,'Граница завершения',stage.boundary);
  const starts=members.filter(n=>array(scenario.entry_operation_ids).map(text).includes(text(n.id)));
  const transitions=(title,list,outer,lead)=>{if(!list.length&&!lead.length)return;const section=el('section','details continuations');section.append(el('h3','',title));
   for(const node of lead){const row=el('article','continuation');relatedButton(row,'Начало сценария: '+(node.name||node.id),()=>selectNode(node,true)).classList.add('continuation-target');section.append(row);}
@@ -1519,8 +1531,8 @@ _PRESENTATION_SCRIPT = _extend(_SCRIPT, _DIAGNOSTIC_PATCHES + (
          "presentationFrameHead(head,item);"),
         ("for(const gap of nodeGaps)field(panel,'Не установлено',gap.description);",
          "for(const gap of nodeGaps)field(panel,'Не установлено',gap.description);presentationNode(panel,node);"),
-        ("field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);",
-         "field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);presentationStage(panel,stage,members);"),
+        ("field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);field(panel,'Граница завершения',stage.boundary);",
+         "field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);field(panel,'Граница завершения',stage.boundary);presentationStage(panel,stage,members);"),
         ("applyZoom(zoom);updateHighlight();if(focus)restoreMapFocus(focus);",
          "applyZoom(zoom);updateHighlight();if(focus)restoreMapFocus(focus);presentationAfterDraw();"),
         ("function draw(){\n", "function draw(){if(presentationHidden())return;\n"),

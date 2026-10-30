@@ -1,30 +1,27 @@
-"""Producer-compatible helpers for the vendored map renderer, without the producer runtime.
+"""Use the current producer contract for action maps and explicit legacy checks.
 
-``map_revision`` is an unchanged copy of producer ``backend/pko/stages/inputs.py::map_revision``.
-``validate_hierarchy`` is the structural part of producer
-``backend/pko/stages/contracts.py::validate_hierarchy``: this side cannot recompute the
-producer's grouping-input and methodology digests, so it checks the exact map revision and
-every reference instead. A hierarchy remains a model proposal either way.
+New-profile map revisions and grouping validation have one implementation in pko.
+Maps with no profile keep the older presentation contract without being relabeled.
 """
 from __future__ import annotations
-
-import hashlib
-import json
 
 
 class HierarchyError(ValueError):
     pass
 
 
-def map_revision(model: dict) -> str:
-    """Digest of what the map asserts about execution; run metadata is excluded."""
-    content = {key: model.get(key) for key in ("schema_version", "scenario", "nodes", "edges")}
-    data = json.dumps(content, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return "sha256:" + hashlib.sha256(data.encode("utf-8")).hexdigest()
+from pko.stages.inputs import ACTION_PROFILE, map_revision
+from pko.stages.contracts import validate_hierarchy as validate_current_hierarchy
 
 
 def validate_hierarchy(hierarchy: dict, model: dict) -> None:
     """Structure and references only; the business meaning of a stage is not proven here."""
+    profile = model.get("semantic_profile")
+    if profile not in (None, "", ACTION_PROFILE):
+        raise HierarchyError("unsupported map semantic profile")
+    if profile == ACTION_PROFILE:
+        validate_current_hierarchy(hierarchy, model)
+        return
     if not isinstance(hierarchy, dict):
         raise HierarchyError("hierarchy must be an object")
     if hierarchy.get("map_revision") != map_revision(model):

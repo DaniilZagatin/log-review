@@ -5,7 +5,7 @@ import unittest
 
 from process_observability.log_discovery import discover_logging
 from process_observability.source_tools import snapshot_repository
-from process_observability.workflow import _emits
+from process_observability.log_discovery import _emits
 
 
 class LoggingDiscoveryTests(unittest.TestCase):

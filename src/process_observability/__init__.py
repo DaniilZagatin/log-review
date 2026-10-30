@@ -1,6 +1,3 @@
-"""Process observability agent: process map, log coverage, logging proposals and metrics.
+"""Scenario onboarding: Belka map, logging, improvements, metrics and report."""
 
-Portable pilot: semantic proposals, deterministic checks and offline reports.
-"""
-
-__version__ = "0.1.0"
+__version__ = "0.2.0"

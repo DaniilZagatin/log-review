@@ -114,10 +114,10 @@ def write_artifacts(output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "logs.jsonl").write_text(
         "".join(json.dumps(row, sort_keys=True, allow_nan=False) + "\n" for row in records),
-        encoding="utf-8",
+        encoding="utf-8", newline="\n",
     )
     (output_dir / "ground_truth.json").write_text(
-        json.dumps(oracle, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8",
+        json.dumps(oracle, indent=2, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8", newline="\n",
     )
 
 

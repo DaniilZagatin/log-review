@@ -9,6 +9,8 @@ from .contracts import strict_json_loads
 from .logging_contracts import LoggingReviewError, canonical, digest, safe_path
 from .redaction import redact_text
 from .upstream_masking import published_text, upstream_text, upstream_sha
+from pko.stages.inputs import ACTION_PROFILE, map_revision
+from pko.scenario_map.schema import OUTCOME_KINDS
 
 
 class MapInputError(LoggingReviewError):
@@ -36,6 +38,11 @@ class MapView:
     def from_dict(cls, value):
         if type(value) is not dict or value.get('schema_version') != '2.0':
             raise MapInputError('Expected a published atomic scenario map, schema_version 2.0')
+        if '_resume' in value:
+            raise MapInputError('A checkpoint is not a published map')
+        profile = value.get('semantic_profile')
+        if profile not in (None, '', ACTION_PROFILE):
+            raise MapInputError('Unsupported map semantic profile')
         nodes, edges = value.get('nodes'), value.get('edges')
         if type(nodes) is not list or type(edges) is not list:
             raise MapInputError('Map nodes and edges must be lists')
@@ -53,6 +60,8 @@ class MapView:
                     or type(node.get('name')) is not str or not node['name'].strip()):
                 raise MapInputError('Invalid or duplicate map node; non-atomic maps are unsupported')
             ids.add(node['id'])
+            if profile == ACTION_PROFILE and node['kind'] != 'operation':
+                raise MapInputError('An action-profile node must be an operation')
             if node['kind'] == 'operation': operations.add(node['id'])
         edge_ids = set()
         for edge in edges:
@@ -60,6 +69,30 @@ class MapView:
                     or edge['id'] in edge_ids or edge.get('source') not in operations or edge.get('target') not in operations):
                 raise MapInputError('Invalid, duplicate or dangling map transition')
             edge_ids.add(edge['id'])
+        if profile == ACTION_PROFILE:
+            scenario = value.get('scenario')
+            if type(scenario) is not dict:
+                raise MapInputError('Action map requires a scenario')
+            for field in ('entry_operation_ids', 'terminal_operation_ids'):
+                boundary = scenario.get(field, [])
+                if (type(boundary) is not list or any(type(x) is not str for x in boundary)
+                        or len(boundary) != len(set(boundary)) or set(boundary) - operations):
+                    raise MapInputError('Invalid scenario boundaries: ' + field)
+            terminals = set(scenario.get('terminal_operation_ids', []))
+            for node in nodes:
+                if node.get('outcome', 'unknown') not in OUTCOME_KINDS:
+                    raise MapInputError('Unknown action outcome')
+                if node.get('outcome_scope', 'branch') not in ('branch', 'shared'):
+                    raise MapInputError('Unknown action outcome scope')
+                if node.get('outcome_scope') == 'shared' and node.get('outcome', 'unknown') != 'unknown':
+                    raise MapInputError('A shared finalizer cannot declare one branch outcome')
+                if node.get('completion_condition') and node['id'] not in terminals:
+                    raise MapInputError('Conditional completion requires a terminal action')
+                outgoing = [edge for edge in edges if edge['source'] == node['id']]
+                if node['id'] in terminals and outgoing and not node.get('completion_condition'):
+                    raise MapInputError('A terminal continuation requires a completion condition')
+                if len(outgoing) > 1 and any(not str(edge.get('condition', '')).strip() for edge in outgoing):
+                    raise MapInputError('Every alternative continuation requires a condition')
         return cls(canonical(value))
 
     @property
@@ -80,8 +113,7 @@ class MapView:
 
     @property
     def revision(self):
-        model = self.original
-        return 'sha256:' + digest({k: model.get(k) for k in ('schema_version', 'scenario', 'nodes', 'edges')})
+        return map_revision(self.original)
 
 
 def load_map(path):
@@ -99,6 +131,9 @@ def load_hierarchy(path, view):
         data = strict_json_loads(read_regular(path))
         if type(data) is not dict or data.get('map_revision') != view.revision:
             raise MapInputError('Hierarchy belongs to a different map revision')
+        if view.original.get('semantic_profile') == ACTION_PROFILE:
+            from pko.stages.contracts import validate_hierarchy
+            validate_hierarchy(data, view.original)
         assigned, group_ids = set(), set()
         membership = data.get('membership', {})
         if type(membership) is not dict or set(membership) - set(view.operation_ids):
@@ -109,6 +144,9 @@ def load_hierarchy(path, view):
             group_ids.add(group['id'])
             members = group.get('operation_ids', [k for k, v in membership.items() if v == group['id']])
             if type(members) is not list: raise MapInputError('Invalid grouped operations')
+            expected = {k for k, v in membership.items() if v == group['id']}
+            if expected and set(members) != expected:
+                raise MapInputError('Grouped operation list conflicts with membership')
             for identifier in members:
                 if identifier not in view.operation_ids or identifier in assigned:
                     raise MapInputError('Foreign or repeated grouped operation')
@@ -119,6 +157,38 @@ def load_hierarchy(path, view):
         return data, []
     except (ValueError, OSError, TypeError, KeyError) as exc:
         return None, ['Группировка отключена: ' + redact_text(str(exc))]
+
+
+
+def snapshot_from_workspace(workspace, *, logging_calls=()):
+    """Adapt Belka's admitted immutable texts; never reopen or rediscover the inputs."""
+    from pko.scenario_map.sources import SourceWorkspace
+    from .source_tools import RepoSnapshot, SourceFile
+    if not isinstance(workspace, SourceWorkspace):
+        raise MapInputError('Expected a prepared Belka source workspace')
+    files, entries = {}, []
+    for path in sorted(workspace.tree.files):
+        text = workspace.tree.read(path)
+        if not isinstance(text, str):
+            raise MapInputError('Admitted source text is unavailable: ' + path)
+        raw = text.encode('utf-8')
+        sha = hashlib.sha256(raw).hexdigest()
+        files[path] = SourceFile(path, sha, published_text(text), text)
+        entries.append({'path': path, 'kind': 'file', 'status': 'eligible',
+                        'sha256': sha, 'bytes': len(raw), 'lines': len(text.splitlines())})
+    omissions = deepcopy(workspace.omissions)
+    scope = {'eligible_files': len(files), 'selected_files': len(files),
+             'selected_chars': sum(len(s.text) for s in files.values()),
+             'excluded_entries': 0, 'partial_input': bool(omissions),
+             'limitations': deepcopy(workspace.notes) if omissions else [],
+             'source_omissions': omissions, 'include_patterns': ['*'],
+             'selection_policy': 'The exact admitted masked Belka workspace; no second traversal'}
+    inventory = {'tool': 'snapshot_inventory/1', 'include_patterns': ['*'],
+                 'max_file_bytes': None, 'allow_partial': bool(omissions), 'partial_input': bool(omissions),
+                 'counts': {'eligible': len(files), 'selected': len(files), 'policy_excluded': 0,
+                            'resource_unsupported': sum(row.get('count', 1) for row in omissions)},
+                 'entries': entries, 'source_omissions': omissions}
+    return RepoSnapshot(files, scope, tuple(logging_calls), inventory)
 
 
 class RepoContext:

@@ -349,3 +349,12 @@ def discover_logging(snapshot, call_names=(), max_sites=300, max_per_file=40, ma
         scope["declaration_filter"] = DECLARATION_FILTER
     return {"tool":"discover_logging/1", "snapshot_id":snapshot.snapshot_id,
             "scope":scope, "sites":sites, "wrappers":wrappers, "config_hints":hints, "limitations":limitations}
+
+
+def _emits(anchor, event_key, candidates):
+    """A static emit candidate inside a cited range: text-level support, never runtime proof."""
+    return any(item["path"] == anchor.path and item.get("start_line", item.get("line")) <= anchor.end_line
+               and item.get("end_line", item.get("line")) >= anchor.start_line
+               and item.get("event_key") == event_key
+               and item.get("key_status", "literal") in {"literal", "resolved_constant"}
+               and item.get("kind") not in {"wrapper_call", "configured_call"} for item in candidates)

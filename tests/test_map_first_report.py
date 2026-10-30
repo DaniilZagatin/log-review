@@ -41,8 +41,7 @@ class ReportTests(unittest.TestCase):
                                       'code': {'unused': 'The code role must not be constructed or read for TLS'}}))
         fake = Scripted(lambda p, n: model_reply(p))
         output = self.root/'review'
-        with patch('process_observability.llm.OpenAICompatibleModel', return_value=fake), \
-             patch('process_observability.workflow.run_analysis', side_effect=AssertionError('No legacy analysis allowed')):
+        with patch('process_observability.llm.OpenAICompatibleModel', return_value=fake):
             code, out, err = self.invoke(['review-logging', '--map', str(self.mapfile), '--repo', str(self.repo),
                                           '--config', str(config), '--out', str(output)])
         self.assertEqual(code, 0, err)
