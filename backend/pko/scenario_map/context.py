@@ -61,6 +61,44 @@ def _rows(model: dict, field: str) -> list[dict]:
     return [row for row in model.get(field, []) if isinstance(row, dict)]
 
 
+def execution_memory(model: dict, take: int = 12, text_limit: int = 400) -> dict:
+    """Expose source-bound relations even after their current graph is mapped.
+
+    The bounded view is navigation, never a replacement for the exact reviews.
+    Relations have operation identities independent of mutable node/edge IDs.
+    """
+    relations, interactions = [], []
+    for review in _rows(model, "execution_reviews"):
+        actions = {action.get("id"): action for action in review.get("operations", [])}
+        common = {"review_id": review.get("id"), "fact_revision": review.get("fact_revision", 1),
+                  "mapping_revision": review.get("mapping_revision", 1)}
+        for route in review.get("route_expectations", []):
+            if not route.get("from_operation_id") or not route.get("to_operation_id"):
+                continue
+            relations.append({**common, **{key: route.get(key, "") for key in
+                ("id", "from_operation_id", "to_operation_id", "mapping_status")},
+                **{key: _short(route.get(key), text_limit) for key in ("condition", "expected_result")},
+                "from_action": _short(actions.get(route["from_operation_id"], {}).get("name"), text_limit),
+                "to_action": _short(actions.get(route["to_operation_id"], {}).get("name"), text_limit)})
+        for action in actions.values():
+            calls = action.get("external_interactions", [])
+            if not calls:
+                continue
+            interactions.append({**common, "operation_id": action.get("id"), "node_id": action.get("node_id", ""),
+                "name": _short(action.get("name"), text_limit),
+                "interactions": [{key: _short(call.get(key), text_limit) for key in
+                                  ("name", "purpose", "direction", "endpoint", "contract")} for call in calls[:3]],
+                "interaction_count": len(calls), "interactions_listed_all": len(calls) <= 3})
+    return {
+        "execution_relations": relations[:take], "execution_relation_count": len(relations),
+        "execution_relations_listed_all": len(relations) <= take,
+        "recover_relations": "inspect_map(section='route_expectations')",
+        "execution_interactions": interactions[:take], "execution_interaction_action_count": len(interactions),
+        "execution_interactions_listed_all": len(interactions) <= take,
+        "recover_interactions": "inspect_map(section='operations')",
+    }
+
+
 def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = None,
                    route_detail: int = 2) -> dict:
     """Keep every existing node ID; never present the graph's tail as its whole.
@@ -125,6 +163,8 @@ def graph_identity(model: dict, *, names: bool = True, frontier: dict | None = N
             # every intermediate operation and displacing the complete registry.
             if node.get("id") in terminals or node.get("outcome") not in (None, "", "unknown"):
                 row.update(outcome=node.get("outcome", "unknown"), effect_kind=node.get("effect_kind", "unknown"))
+            if node.get("outcome_scope") == "shared":
+                row["outcome_scope"] = "shared"
         result["names_complete"] = True
     else:
         result["names_complete"] = False
@@ -169,7 +209,7 @@ def _summary_recovery(model: dict, detail: int = 2) -> dict:
     if not isinstance(summary, dict):
         return {}
     value = {key: summary.get(key) for key in ("revision", "status", "through_step", "based_on_brief_revision",
-                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete", "input_unmapped_actions_complete", "input_unmapped_routes_complete", "normalization")}
+                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete", "input_unmapped_actions_complete", "input_unmapped_routes_complete", "input_execution_relations_complete", "input_execution_interactions_complete", "normalization")}
     value.update(content_complete=detail == 2, recover="inspect_map(section='context_summary')")
     if detail == 2:
         value["summary"] = summary.get("summary", {})
@@ -190,6 +230,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
               ("nodes", "edges", "gaps", "read_coverage",
                "research_history", "research_notes", "research_tasks")}
     rejections = (model.get("run") or {}).get("recent_rejections") or []
+    unresolved = (model.get("run") or {}).get("unresolved_rejections") or []
     result: dict[str, Any] = {
         "counts": counts,
         "unmapped_route_count": sum(not route.get("edge_ids") and not route.get("completion_node_id")
@@ -198,8 +239,14 @@ def _manifest(model: dict, detail: int = 2) -> dict:
         "open_task_count": sum(task.get('status') in UNFINISHED_TASK_STATUSES for task in _rows(model, 'research_tasks')),
         # Unresolved rejections come from harness state: after compaction the
         # agent still sees which case, object and range to fix.
-        "unresolved_rejections": rejections[-3:] if detail else [
+        "unresolved_rejections": unresolved[:3] if detail else [
+            {key: row.get(key, "") for key in ("problem_id", "tool", "code")} for row in unresolved[:3]],
+        "unresolved_rejection_count": len(unresolved),
+        "unresolved_rejections_listed_all": len(unresolved) <= 3,
+        "recent_rejections": rejections[-3:] if detail else [
             {key: row.get(key, "") for key in ("tool", "code")} for row in rejections[-3:]],
+        **execution_memory(model, take=(8 if detail == 2 else 2 if detail else 0),
+                           text_limit=260 if detail == 2 else 100),
         "recovery": {
             "route_expectations": "inspect_map(section='route_expectations'): условия и результаты, найденные независимо от связей карты",
             "execution_reviews": "inspect_map(section='execution_reviews'): найденные действия и ожидаемые маршруты, включая ещё не отображённые; не только существующий граф",
@@ -235,6 +282,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     scope = model.get('scenario') or {}
     result['variant_scope'] = {key: _short(scope.get(key), text_limit) for key in
                                ('variant_context', 'instance_unit', 'start', 'end')}
+    result['variant_scope']['scope_revision'] = scope.get('scope_revision', 1)
     result['variant_scope']['partial'] = True
     pending_actions = [(review.get('id'), action) for review in _rows(model, 'execution_reviews')
                        for action in review.get('operations', []) if not action.get('node_id')]

@@ -74,7 +74,8 @@ def _cycle(signatures: list[str]) -> bool:
 def _rejection_key(function: dict, payload: dict) -> str:
     """Identify the failed invariant, independently from cosmetic argument edits."""
     try:
-        args = json.loads(function.get('arguments') or '{}')
+        raw = function.get('arguments') or '{}'
+        args = json.loads(raw) if isinstance(raw, str) else raw
     except (TypeError, ValueError):
         args = {}
     details = payload.get('details') or {}
@@ -89,36 +90,78 @@ def _rejection_key(function: dict, payload: dict) -> str:
                   'address': address, 'invariant': invariant})
 
 
-class AddressedRejections:
-    """Keep one problem's history across unrelated accepted edits.
+MAX_ADDRESSED_REPAIR_ATTEMPTS = 4
 
-    This feeds the existing recovery/stop guard; it has no retry loop or budget
-    of its own. A new read or meaningful change to the addressed object earns a
-    fresh attempt. Runtime counters are per attempt, as is the existing guard.
+
+class AddressedRejections:
+    """One initial rejection and four local repairs per unchanged basis.
+
+    Diagnostics are normalized once per tool call. Exhausting a local budget
+    defers that problem, not the entire research session. Runtime counters are
+    deliberately not restored on resume; unresolved diagnostics are restored.
     """
 
     def __init__(self):
         self.problems: dict[str, dict] = {}
         self.current: str | None = None
         self.active: set[str] = set()
+        self.newly_exhausted: list[dict] = []
 
     def begin_step(self):
         self.current = None
         self.active.clear()
+        self.newly_exhausted.clear()
 
-    def observe(self, function: dict, payload: dict, state: MapState):
-        if payload.get('ok'):
-            return
+    @staticmethod
+    def _arguments(function):
         try:
-            arguments = json.loads(function.get('arguments') or '{}')
-        except (TypeError, ValueError):
-            return
-        if not isinstance(arguments, dict):
-            return
+            raw = function.get('arguments') or '{}'
+            value = json.loads(raw) if isinstance(raw, str) else raw
+            return value if isinstance(value, dict) else {}
+        except (TypeError, ValueError, RecursionError):
+            return {}
+
+    @staticmethod
+    def _references(value):
+        result = []
+        def collect(item):
+            if isinstance(item, dict):
+                if isinstance(item.get('path'), str):
+                    result.append({key: item[key] for key in ('path', 'line_start', 'line_end') if key in item})
+                for child in item.values():
+                    collect(child)
+            elif isinstance(item, list):
+                for child in item:
+                    collect(child)
+        collect(value)
+        return result
+
+    @staticmethod
+    def _request_ids(arguments):
+        identifiers = set()
+        def collect(value):
+            if isinstance(value, dict):
+                identifiers.update(value[key] for key in ('id', 'node_id', 'edge_id', 'task_id', 'review_id',
+                                                          'operation_id', 'route_id', 'source', 'target')
+                                   if isinstance(value.get(key), str))
+                for key in ('operation_ids', 'route_ids', 'remove_node_ids', 'remove_edge_ids'):
+                    if isinstance(value.get(key), list):
+                        identifiers.update(v for v in value[key] if isinstance(v, str))
+                for child in value.values():
+                    collect(child)
+            elif isinstance(value, list):
+                for child in value:
+                    collect(child)
+        collect(arguments)
+        return identifiers
+
+    def _targets(self, function, payload):
+        """Yield (canonical failure, selector) without expanding case paths."""
+        arguments = self._arguments(function)
+        name = function.get('name', '')
         details = payload.get('details') or {}
-        if function.get('name') == 'patch_fragment' and isinstance(details, dict):
-            # Track the addressed producer, not the whole changing patch. Its
-            # index can move when independent edits are added to a later reply.
+        details = details if isinstance(details, dict) else {}
+        if name == 'patch_fragment':
             handled = False
             for issue in details.get('issues', []):
                 if not isinstance(issue, dict):
@@ -130,90 +173,178 @@ class AddressedRejections:
                 rows = arguments.get(collection, [])
                 if not isinstance(rows, list) or index >= len(rows) or not isinstance(rows[index], dict):
                     continue
-                self.observe({'name': 'upsert_step' if collection == 'steps' else 'upsert_transition',
-                              'arguments': _json(rows[index])},
-                             {'ok': False, 'code': issue.get('code'), 'error': issue.get('problem', ''),
-                              'details': {k: v for k, v in issue.items() if k not in ('field', 'code', 'problem')}}, state)
+                yield from self._targets(
+                    {'name': 'upsert_step' if collection == 'steps' else 'upsert_transition', 'arguments': rows[index]},
+                    {'ok': False, 'code': issue.get('code', payload.get('code')), 'error': issue.get('problem', ''),
+                     'details': {k: v for k, v in issue.items() if k not in ('field', 'code', 'problem')}})
                 handled = True
             if handled:
                 return
-        if function.get('name') == 'review_semantics' and isinstance(details, dict):
+        if name == 'review_semantics':
+            pending = list(details.get('issues', [])) + list(details.get('cases', []))
             handled = False
-            issues = list(details.get('issues', [])) + list(details.get('cases', []))
-            for issue in issues:
+            seen_issues = set()
+            for issue in pending:
                 if not isinstance(issue, dict):
                     continue
-                nested_cases = issue.get('cases', [])
-                if isinstance(nested_cases, list):
-                    issues.extend(part for part in nested_cases if isinstance(part, dict))
+                fingerprint = json.dumps(issue, sort_keys=True, ensure_ascii=False)
+                if fingerprint in seen_issues:
+                    continue
+                seen_issues.add(fingerprint)
+                nested = issue.get('cases', [])
+                if isinstance(nested, list) and nested:
+                    pending.extend(row for row in nested if isinstance(row, dict))
+                    continue  # The wrapper is the same diagnostic, not a third failure.
                 field = str(issue.get('field', ''))
-                ids = {issue[k] for k in ('node_id', 'edge_id') if isinstance(issue.get(k), str)}
-                for k in ('missing_node_ids', 'missing_edge_ids', 'unknown_ids'):
-                    ids.update(v for v in issue.get(k, []) if isinstance(v, str))
                 case_index = issue.get('case_index')
-                case = None
                 cases = arguments.get('route_cases', [])
                 if type(case_index) is int and isinstance(cases, list) and 1 <= case_index <= len(cases):
                     case = cases[case_index-1]
-                    if isinstance(case, dict):
-                        ids.update(v for v in case.get('path', []) if isinstance(v, str))
-                if not ids and field.startswith('checks.'):
-                    check = arguments.get('checks', {}).get(field.split('.')[1], {})
-                    if isinstance(check, dict):
-                        for k in ('node_ids', 'edge_ids'):
-                            ids.update(v for v in check.get(k, []) if isinstance(v, str))
-                for identifier in sorted(ids):
-                    self.observe({'name': 'review_semantics.' + field,
-                                  'arguments': _json({'id': identifier})},
-                                 {'ok': False, 'code': issue.get('code', payload.get('code')),
-                                  'error': issue.get('problem', ''), 'details': {'field': field}}, state)
+                    selector = {'tool': name, 'case_index': case_index, 'field': field}
+                    if field in ('path', 'edge_ids', 'evidence') and isinstance(case, dict):
+                        selector['context_ids'] = sorted({v for key in ('path', 'edge_ids')
+                                                          for v in case.get(key, []) if isinstance(v, str)})
+                    identifiers = {f'case:{case_index}'}
+                    refs = self._references(case)
+                else:
+                    identifiers = {issue[k] for k in ('node_id', 'edge_id') if isinstance(issue.get(k), str)}
+                    for key in ('missing_node_ids', 'missing_edge_ids', 'unknown_ids'):
+                        identifiers.update(v for v in issue.get(key, []) if isinstance(v, str))
+                    if not identifiers:
+                        identifiers = {'check:' + (field or 'review')}
+                    selector = {'tool': name, 'field': field}
+                    refs = self._references(arguments.get('checks', {}).get(field.split('.')[-1], arguments))
+                for identifier in sorted(identifiers):
+                    target = {'name': name + '.' + (field or 'case'), 'arguments': {'id': identifier}}
+                    problem = {'ok': False, 'code': issue.get('code', payload.get('code')),
+                               'error': issue.get('problem', ''), 'details': {'field': field}}
+                    yield target, problem, {**selector, 'object_id': identifier}, refs
                     handled = True
             if handled:
                 return
-        identifiers = {str(value) for owner in (arguments, details) if isinstance(owner, dict)
-                       for key, value in owner.items() if key in ('id', 'node_id', 'edge_id', 'task_id') and isinstance(value, str)}
+        # Contract diagnostics can point to inventory actions/routes before a
+        # graph node exists. Preserve those addresses instead of counting the
+        # entire changing review as one new request on every attempt.
+        if isinstance(details.get('issues'), list):
+            handled = False
+            for issue in details['issues']:
+                if not isinstance(issue, dict):
+                    continue
+                nested = {**details, **issue}
+                nested.pop('issues', None)
+                nested.pop('problem', None)
+                for target in self._targets(function, {
+                        'ok': False, 'code': issue.get('code', payload.get('code')),
+                        'error': issue.get('problem', payload.get('error', '')), 'details': nested}):
+                    yield target
+                    handled = True
+            if handled:
+                return
+        identifiers = {str(details[key]) for key in ('operation_id', 'route_id', 'node_id', 'edge_id', 'task_id')
+                       if isinstance(details.get(key), str)}
+        for key in ('operation_ids', 'route_ids'):
+            identifiers.update(value for value in details.get(key, []) if isinstance(value, str))
         if not identifiers:
-            return
-        evidence_only = payload.get('code') == 'invalid_evidence'
-        references = []
-        def collect_refs(value):
-            if isinstance(value, dict):
-                if isinstance(value.get('path'), str):
-                    references.append({key: value[key] for key in ('path', 'line_start', 'line_end') if key in value})
-                for item in value.values():
-                    collect_refs(item)
-            elif isinstance(value, list):
-                for item in value:
-                    collect_refs(item)
-        if evidence_only:
-            collect_refs(arguments)
-            collect_refs(details)
-        context = self.context(state, identifiers, evidence_only, references)
-        key = _rejection_key(function, payload)
-        previous = self.problems.get(key)
-        if not previous or previous['context'] != context:
-            previous = {'context': context, 'count': 0, 'recovered': False, 'identifiers': identifiers,
-                        'evidence_only': evidence_only, 'references': references}
-            self.problems[key] = previous
-        previous['count'] += 1
-        self.active.add(key)
-        self.current = max(self.active, key=lambda item: self.problems[item]['count'])
-        # Bounded metadata only, not a second source of research facts.
-        if len(self.problems) > 32:
-            evicted = next(iter(self.problems))
-            del self.problems[evicted]
-            self.active.discard(evicted)
-            self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
-        if previous['count'] >= 3:
-            record('addressed_rejection_repeated', tool=function.get('name'),
-                   code=payload.get('code'), object_ids=sorted(identifiers),
-                   count=previous['count'], recovery_used=previous['recovered'])
+            identifiers = {str(value) for owner in (arguments, details)
+                           for key, value in owner.items()
+                           if key in ('id', 'node_id', 'edge_id', 'task_id', 'review_id') and isinstance(value, str)}
+        if not identifiers and name == 'set_scope':
+            identifiers = {'scenario_scope'}
+        for identifier in sorted(identifiers):
+            fields = sorted(set(arguments) - {'id', 'node_id', 'edge_id', 'task_id'})
+            # Prefer the validator's exact field. Otherwise require the whole
+            # submitted semantic repair before treating the invariant as fixed.
+            named_fields = details.get('fields', [])
+            named_fields = named_fields if isinstance(named_fields, list) else []
+            specific = [key for key in named_fields if isinstance(key, str) and key in arguments]
+            field = str(details.get('field', '')).split('.')[0]
+            if field in arguments:
+                specific.append(field)
+            prefix = re.match(r'^([A-Za-z_]+)(?:\.[^: ]+)?\s*:', str(payload.get('error', '')))
+            if prefix and prefix[1] in arguments:
+                specific.append(prefix[1])
+            if specific:
+                fields = sorted(set(specific))
+            elif payload.get('code') == 'invalid_evidence':
+                fields = [key for key in fields if key in ('evidence', 'code_explanations', 'external_interactions')]
+            else:
+                semantic = [key for key in fields if key not in ('name', 'title', 'process_name', 'basis', 'code_explanations')]
+                fields = semantic or fields
+            request_ids = self._request_ids(arguments)
+            selector = {'tool': name, 'object_id': identifier, 'fields': fields,
+                        'request_targets': sorted(request_ids) if identifier not in request_ids else []}
+            target = {'name': name, 'arguments': {**arguments, 'id': identifier}}
+            yield target, payload, selector, self._references([arguments, details])
+
+    @staticmethod
+    def _key(function, payload):
+        # A field-level invariant must not change identity when an error embeds
+        # the current spelling of a bad value. The source authority failure is
+        # already normalized by _rejection_key.
+        details = payload.get('details') or {}
+        if isinstance(details, dict) and details.get('field') and payload.get('code') != 'invalid_evidence':
+            payload = {**payload, 'error': details['field']}
+        return _rejection_key(function, payload)
+
+    def observe(self, function: dict, payload: dict, state: MapState) -> bool:
+        if payload.get('ok'):
+            self.resolve_success(function, state)
+            return False
+        if payload.get('code') == 'retry_budget_exhausted':
+            return False
+        seen = set()
+        for target, problem, selector, references in self._targets(function, payload):
+            key = self._key(target, problem)
+            if key in seen:
+                continue
+            seen.add(key)
+            identifiers = {selector['object_id']}
+            evidence_only = problem.get('code') == 'invalid_evidence'
+            context_ids = set(selector.get('context_ids', [])) or identifiers
+            previous = self.problems.get(key)
+            if not previous:
+                previous = {'context': self.context(state, context_ids, evidence_only, references),
+                            'count': 0, 'identifiers': identifiers,
+                            'evidence_only': evidence_only, 'references': references, 'address': selector,
+                            'context_ids': context_ids,
+                            'problem_id': hashlib.sha256(key.encode()).hexdigest()[:20],
+                            'tool': selector['tool'], 'code': problem.get('code') or '',
+                            'error': str(sanitize(problem.get('error', '')))[:1200]}
+                self.problems[key] = previous
+            else:
+                # Compare against the prior watch set. Merely alternating old
+                # citations/paths must not manufacture newly delivered source.
+                context = self.context(state, previous['context_ids'], evidence_only, previous['references'])
+                if previous['context'] != context:
+                    previous['count'] = 0
+                merged_refs = {json.dumps(ref, sort_keys=True): ref for ref in previous['references'] + references}
+                previous['references'] = list(merged_refs.values())
+                previous['context_ids'].update(context_ids)
+                previous['context'] = self.context(state, previous['context_ids'], evidence_only, previous['references'])
+                selector['request_targets'] = sorted(set(selector.get('request_targets', [])) |
+                                                     set(previous['address'].get('request_targets', [])))
+            previous['count'] += 1
+            previous['address'] = selector
+            self.active.add(key)
+            if previous['count'] == MAX_ADDRESSED_REPAIR_ATTEMPTS + 1:
+                diagnostic = self._diagnostic(previous)
+                pending = state.model['run'].setdefault('unresolved_rejections', [])
+                pending[:] = [row for row in pending if row['problem_id'] != diagnostic['problem_id']]
+                pending.append(diagnostic)
+                self.newly_exhausted.append(diagnostic)
+                record('addressed_rejection_exhausted', **diagnostic)
+        self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
+        return bool(seen)
+
+    @staticmethod
+    def _diagnostic(row):
+        return {'problem_id': row['problem_id'], 'tool': row['tool'], 'object_ids': sorted(row['identifiers']),
+                'code': row['code'], 'error': row['error'], 'repair_attempts': MAX_ADDRESSED_REPAIR_ATTEMPTS,
+                'status': 'open', 'address': copy.deepcopy(row['address'])}
 
     @staticmethod
     def context(state: MapState, identifiers: set[str], evidence_only=False, references=()) -> str:
         if evidence_only:
-            # Editing output/conditions cannot repair a citation to unread lines.
-            # Only newly delivered requested source lines earn another attempt.
             coverage = []
             for ref in references:
                 lines = state._reads.get(ref['path'], {})
@@ -222,39 +353,116 @@ class AddressedRejections:
                 coverage.append((ref['path'], visible))
             if not references:
                 coverage = [(path, sorted(lines)) for path, lines in sorted(state._reads.items())]
-            # Evidence order and duplicate references do not deliver new lines.
             coverage = sorted({(path, tuple(lines)) for path, lines in coverage})
             return hashlib.sha256(_json(coverage).encode()).hexdigest()
         model = state.model
         related = {}
         for field in ('nodes', 'edges', 'research_tasks', 'execution_reviews'):
-            related[field] = [state._fingerprint(row) for row in model.get(field, [])
-                              if row.get('id') in identifiers]
-        # A transition repair can change a node's valid continuation without
-        # changing the node itself. Treat that as relevant progress too.
+            related[field] = [state._fingerprint(row) for row in model.get(field, []) if row.get('id') in identifiers]
+        inventory = [item for review in model.get('execution_reviews', [])
+                     for field in ('operations', 'route_expectations')
+                     for item in review.get(field, []) if item.get('id') in identifiers]
+        related['inventory'] = [state._fingerprint(item) for item in inventory]
+        bindings = {value for item in inventory for key in ('node_id', 'completion_node_id')
+                    if isinstance(value := item.get(key), str)}
+        bindings.update(value for item in inventory for value in item.get('edge_ids', []))
+        related['inventory_projection'] = [state._fingerprint(item) for field in ('nodes', 'edges')
+                                           for item in model.get(field, []) if item.get('id') in bindings]
+        if 'scenario_scope' in identifiers:
+            related['scope'] = {key: value for key, value in model.get('scenario', {}).items()
+                                if key not in ('title', 'process_name')}
         related['incident_edges'] = [state._fingerprint(row) for row in model.get('edges', [])
                                      if row.get('source') in identifiers or row.get('target') in identifiers]
-        related['read_lines'] = sum(len(lines) for lines in state._reads.values())
+        paths = {ref['path'] for ref in references}
+        paths.update(ref['path'] for item in inventory for ref in item.get('evidence', []))
+        paths.update(ref['path'] for field in ('nodes', 'edges', 'research_tasks', 'execution_reviews')
+                     for row in model.get(field, []) if row.get('id') in identifiers
+                     for ref in row.get('evidence', []))
+        related['read_lines'] = [(path, sorted(state._reads.get(path, {}))) for path in sorted(paths)]
         return hashlib.sha256(_json(related).encode()).hexdigest()
 
     def refresh(self, state: MapState):
-        # A later tool in the same reply may have actually repaired the object.
-        for key in tuple(self.active):
-            row = self.problems[key]
-            if row['context'] != self.context(state, row['identifiers'], row['evidence_only'], row['references']):
+        # New grounds permit another bounded attempt; they do not establish that
+        # the unresolved problem has actually been corrected.
+        for key, row in self.problems.items():
+            context = self.context(state, row['context_ids'], row['evidence_only'], row['references'])
+            if row['context'] != context:
+                row.update(context=context, count=0)
+                self.active.discard(key)
+        self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
+
+    @classmethod
+    def _matches(cls, selector, function, *, resolving=False):
+        name = function.get('name', '')
+        arguments = cls._arguments(function)
+        if name == 'patch_fragment' and selector.get('tool') != name:
+            return any(cls._matches(selector, {'name': tool, 'arguments': item}, resolving=resolving)
+                       for field, tool in (('steps', 'upsert_step'), ('transitions', 'upsert_transition'))
+                       for item in (arguments.get(field) if isinstance(arguments.get(field), list) else [])
+                       if isinstance(item, dict))
+        if name != selector.get('tool'):
+            return False
+        if 'case_index' in selector:
+            cases = arguments.get('route_cases', [])
+            return isinstance(cases, list) and selector['case_index'] <= len(cases)
+        if name == 'review_semantics':
+            field = selector.get('field', '')
+            return (field == 'route_cases' and 'route_cases' in arguments or
+                    field.startswith('checks.') and field.split('.')[1] in arguments.get('checks', {}) or not field)
+        identifiers = cls._request_ids(arguments)
+        addressed = (selector.get('object_id') == 'scenario_scope' or
+                     selector.get('object_id') in identifiers or
+                     bool(set(selector.get('request_targets', [])) & identifiers))
+        fields = set(selector.get('fields', []))
+        matching_fields = fields.issubset(arguments) if resolving else bool(fields & set(arguments))
+        return addressed and (not fields or matching_fields)
+
+
+    def blocked(self, function, state):
+        if function.get('name') in READ_NAMES | {'inspect_map', 'finish'}:
+            return None
+        self.refresh(state)
+        exhausted = [self._diagnostic(row) for row in self.problems.values()
+                     if row['count'] >= MAX_ADDRESSED_REPAIR_ATTEMPTS + 1 and self._matches(row['address'], function)]
+        if not exhausted:
+            return None
+        return {'ok': False, 'code': 'retry_budget_exhausted',
+                'error': 'Четыре адресные попытки исправления исчерпаны; этот вызов при прежних основаниях не применяется. '
+                         'Продолжи независимый участок, получи новые основания либо заверши частичную карту через finish.',
+                'details': {'repair_attempts': MAX_ADDRESSED_REPAIR_ATTEMPTS, 'unresolved': exhausted}}
+
+    def resolve_success(self, function, state):
+        arguments = self._arguments(function)
+        name = function.get('name')
+        withdrawn = set()
+        if name == 'remove_element' and isinstance(arguments.get('id'), str):
+            withdrawn.add(arguments['id'])
+        if name == 'patch_fragment':
+            for field in ('remove_node_ids', 'remove_edge_ids'):
+                withdrawn.update(value for value in arguments.get(field, []) if isinstance(value, str))
+        if name == 'review_execution':
+            for field in ('discard_operations', 'discard_route_expectations'):
+                withdrawn.update(row['id'] for row in arguments.get(field, [])
+                                 if isinstance(row, dict) and isinstance(row.get('id'), str))
+        def resolved_address(address):
+            # A successful whole-map semantic review has validated every case
+            # that remains, even when a formerly invalid case was removed.
+            return (name == 'review_semantics' and address.get('tool') == name or
+                    address.get('object_id') in withdrawn or self._matches(address, function, resolving=True))
+        pending = state.model['run'].get('unresolved_rejections', [])
+        resolved = {row['problem_id'] for row in pending if resolved_address(row.get('address', {}))}
+        for key, row in tuple(self.problems.items()):
+            if resolved_address(row['address']):
+                resolved.add(row['problem_id'])
                 del self.problems[key]
-                self.active.remove(key)
+                self.active.discard(key)
+        if resolved:
+            state.model['run']['unresolved_rejections'] = [row for row in pending if row['problem_id'] not in resolved]
+            record('addressed_rejection_resolved', problem_ids=sorted(resolved), tool=function.get('name'))
         self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
 
     def stalled(self) -> bool:
-        return bool(self.current and self.problems[self.current]['count'] >= 3)
-
-    def recovered(self) -> bool:
-        return bool(self.current and self.problems[self.current]['recovered'])
-
-    def mark_recovery(self):
-        if self.current:
-            self.problems[self.current].update(count=0, recovered=True)
+        return bool(self.current and self.problems[self.current]['count'] >= MAX_ADDRESSED_REPAIR_ATTEMPTS + 1)
 
 
 def _brief(state: MapState) -> str:
@@ -694,15 +902,23 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                                 "role": "tool", "tool_call_id": c.get("id", ""),
                                 "content": _json({"ok": False, "error": "Исследование уже остановлено."})}, toolkit, call)
                         else:
-                            answer = trace_tool_call(lambda owner, c: owner.answer(c), toolkit, call)
+                            blocked = addressed_rejections.blocked(call.get('function') or {}, state)
+                            if blocked:
+                                def deferred_answer(owner, c):
+                                    record('scenario_tool', name=proposed_name,
+                                           arguments=(c.get('function') or {}).get('arguments'), result=blocked)
+                                    return {'role': 'tool', 'tool_call_id': c.get('id', ''), 'content': _json(blocked)}
+                                answer = trace_tool_call(deferred_answer, toolkit, call)
+                            else:
+                                answer = trace_tool_call(lambda owner, c: owner.answer(c), toolkit, call)
                         messages.append(answer)
                         function = call.get("function") or {}
                         payload = json.loads(answer["content"])
                         name = function.get("name", "")
                         if mutation_before is not None:
                             record_mutation(mutation_before, state.model, name, payload)
+                        addressed_failure = addressed_rejections.observe(function, payload, state)
                         if not payload.get("ok"):
-                            addressed_rejections.observe(function, payload, state)
                             # Keep the address of the problem (code, case, object,
                             # needed ranges): a bare message made the model resend
                             # the same rejected arguments.
@@ -714,12 +930,15 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             recent_errors.append(rejection)
                             recent_errors = recent_errors[-3:]
                             state.model["run"]["recent_rejections"] = copy.deepcopy(recent_errors)
-                            failed_calls += 1
-                            rejected_signatures.append(_rejection_key(function, payload))
-                            rejected_signatures = rejected_signatures[-12:]
-                        signature = _tool_signature(function, payload)
-                        signatures.append(signature)
-                        signatures = signatures[-12:]
+                            # Local failures get the full four repair attempts;
+                            # the generic three-repeat guard must not cut them short.
+                            if not addressed_failure:
+                                failed_calls += 1
+                                rejected_signatures.append(_rejection_key(function, payload))
+                                rejected_signatures = rejected_signatures[-12:]
+                        if not addressed_failure:
+                            signatures.append(_tool_signature(function, payload))
+                            signatures = signatures[-12:]
                         if name == "finish" and payload.get("ok"):
                             accepted_finish = True
                             state.model["run"]["stop_kind"] = "finish"
@@ -756,13 +975,21 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         messages.append({"role": "user", "content": frontier_message})
                         record("graph_frontier_guidance", step=step, nodes=len(state.model.get("nodes", [])),
                                edges=len(state.model.get("edges", [])))
-                    addressed_stall = addressed_rejections.stalled()
-                    if _cycle(signatures) or _cycle(rejected_signatures) or idle >= 24 or failed_calls >= 8 or addressed_stall:
-                        if not loop_recovery_used and loop_recoveries < 3 and not (addressed_stall and addressed_rejections.recovered()):
+                    open_problems = {row['problem_id'] for row in state.model['run'].get('unresolved_rejections', [])}
+                    deferred = [row for row in addressed_rejections.newly_exhausted if row['problem_id'] in open_problems]
+                    if deferred:
+                        messages.append({'role': 'user', 'content':
+                            'Четыре адресные попытки исправления исчерпаны. Принятая карта сохранена; '
+                            'нерешённые проблемы остаются в validation и требуют partial. '
+                            'Продолжи независимый участок; к проблемному действию можно вернуться с новыми основаниями. '
+                            'Если доступная работа завершена, вызови finish. Адреса: ' +
+                            _json(deferred)})
+                    local_repair_pending = any(addressed_rejections.problems[key]['count'] <= MAX_ADDRESSED_REPAIR_ATTEMPTS
+                                               for key in addressed_rejections.active)
+                    if not local_repair_pending and (_cycle(signatures) or _cycle(rejected_signatures) or idle >= 24 or failed_calls >= 8):
+                        if not loop_recovery_used and loop_recoveries < 3:
                             loop_recovery_used = True
                             loop_recoveries += 1
-                            if addressed_stall:
-                                addressed_rejections.mark_recovery()
                             state.model["run"]["loop_recovery_attempted"] = True
                             state.model["run"]["loop_recoveries"] = loop_recoveries
                             messages.append({"role": "user", "content":

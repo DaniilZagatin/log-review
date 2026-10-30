@@ -12,7 +12,7 @@ LIMITATION = ("Сопоставление по основаниям — орие
               "Неоднозначные соответствия не выбираются автоматически. Исходники и модель не запускаются.")
 MUTATIONS = frozenset({"set_scope", "upsert_step", "upsert_transition", "patch_fragment",
                       "review_execution", "review_semantics", "add_gap", "save_research_task", "save_research_brief"})
-NODE_FIELDS = ("name", "description", "input", "output", "condition", "outcome", "effect_kind",
+NODE_FIELDS = ("name", "description", "input", "output", "condition", "outcome", "outcome_scope", "effect_kind",
                "continuation_mode", "join_mode", "completion_condition", "external_interactions", "evidence")
 
 

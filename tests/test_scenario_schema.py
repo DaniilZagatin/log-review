@@ -122,6 +122,21 @@ class ScenarioMapTests(unittest.TestCase):
         if payload['operations']:self.good('review_execution',**payload)
         self.good('review_semantics',**semantic_payload(self.state))
 
+    def record_fixture_alternatives(self):
+        # The fixture owns these routes; this supplies the independent contract
+        # for structural completion tests, not a live-model semantic oracle.
+        self.review_current_operations()
+        review = self.state.model['execution_reviews'][0]
+        actions = {op['node_id']: op['id'] for op in review['operations']}
+        nodes = {n['id']: n for n in self.state.model['nodes']}
+        payload = self.review_payload()
+        payload['route_expectations'] = [
+            {'from_operation_id': actions[e['source']], 'to_operation_id': actions[e['target']],
+             'condition': e['condition'], 'expected_result': 'Продолжить обработку обращения',
+             'evidence': e['evidence'], 'edge_ids': [e['id']]}
+            for e in self.state.model['edges'] if nodes[e['source']]['continuation_mode'] == 'choice']
+        self.good('review_execution', **payload)
+
     def test_unread_quote_is_rejected_and_failed_mutation_is_atomic(self):
         before = self.state.snapshot()
         response = self.state.dispatch("upsert_step", {"name": "Получение обращения", "evidence_status": "observed",
@@ -180,6 +195,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.assertIn("условий на всех выходах", rejected["error"])
         edge = next(e for e in self.state.model["edges"] if e["id"] == retry)
         self.good("upsert_transition", **{**edge, "condition": "Временная ошибка; повтор разрешён"})
+        self.record_fixture_alternatives()
         self.assertEqual(self.good("finish", summary="Подписаны исходы")["status"], "completed")
 
     def test_only_masked_literal_exact_window_is_accepted(self):
@@ -240,6 +256,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.edge(operation, decision)
         self.edge(decision, operation, "retry", condition="Временный отказ; повтор разрешён")
         self.edge(decision, last, "branch", condition="Выпуск завершён")
+        self.record_fixture_alternatives()
         self.assertEqual(self.good("finish", summary="Повтор имеет выход")["status"], "completed")
 
 
@@ -484,7 +501,15 @@ class ScenarioMapTests(unittest.TestCase):
         self.assertEqual(page["items"][0]["id"], operation["id"])
         self.assertIn("effect", page["items"][0])
         self.assertNotIn("quote", page["items"][0]["evidence"][0])
-        self.good("remove_element", kind="execution_review", id=self.state.model["execution_reviews"][0]["id"])
+        review = self.state.model['execution_reviews'][0]
+        self.assertFalse(self.state.dispatch('remove_element', {'kind': 'execution_review', 'id': review['id']})['ok'])
+        response = self.state.dispatch('review_execution', {
+            'id': review['id'], 'name': review['name'], 'evidence': review['evidence'], 'operations': [],
+            'discard_operations': [{'id': op['id'], 'reason': 'Ошибочное обнаружение в данном участке', 'evidence': op['evidence']}
+                                   for op in review['operations']],
+            'checks': {key: {'status': 'not_found', 'explanation': 'Прежнее обнаружение снято по основаниям'} for key in EXECUTION_CHECKS}})
+        self.assertTrue(response['ok'], response)
+        self.good("remove_element", kind="execution_review", id=review['id'])
         self.good("remove_element", kind="step", id=operation["node_id"])
 
 

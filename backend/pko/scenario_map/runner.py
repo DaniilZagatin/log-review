@@ -19,6 +19,7 @@ from pko.scenario_map.agent import DEFAULT_MAX_SECONDS, DEFAULT_MAX_STEPS, DEFAU
 from pko.scenario_map.config import researcher_spec
 from pko.scenario_map.checkpoint import load_checkpoint, checkpoint_scenario
 from pko.scenario_map.sources import build_workspace, read_process_description
+from pko.scenario_map.public_summary import apply_public_summary
 from pko.stages import grouping
 from pko.stages.contracts import HierarchyError
 from pko.stages.inputs import map_revision
@@ -110,6 +111,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                     journal.outcome = model['run']['status']
                     # A failed local journal must be visible in the result, not only on stderr.
                     _refresh_audit_status(model)
+                    apply_public_summary(model)
                     run_span.set_attribute("pko.run.status", model["run"]["status"])
                     run_span.set_attribute("pko.model.mode", model['run'].get('model_mode', 'provider_default'))
                     with trace_span("render_map"):

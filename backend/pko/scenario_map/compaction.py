@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from pko.audit import record, sanitize
 from pko.scenario_map.context import (_blocks, _brief_recovery, _size, compact_context,
-                                      without_thinking, UNFINISHED_TASK_STATUSES)
+                                      without_thinking, UNFINISHED_TASK_STATUSES, execution_memory)
 
 SUMMARY_FIELDS = ("project_and_scenario", "completed_work", "key_findings", "open_questions", "next_actions", "references")
 # Handoff fields: the area in progress, rejected attempts and work not to repeat.
@@ -72,7 +72,7 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
     payload = {
         "previous_summary": _public(snapshot.get("context_summary")),
         "current_state": {
-            "scenario": bounded(snapshot.get("scenario", {})),
+            "scenario": bounded(_public(snapshot.get("scenario", {}))),
             **_brief_recovery(snapshot, 1),
             "counts": {key: len(snapshot.get(key, [])) for key in ("nodes", "edges", "gaps")},
             "open_notes": bounded([_public(note) for note in open_notes[:12]]),
@@ -88,10 +88,14 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             "unmapped_route_count": len(pending_routes),
             "unmapped_routes_listed_all": len(pending_routes) <= 12,
             "recover_routes": "inspect_map(section='route_expectations')",
+            **execution_memory(snapshot),
             "coverage_status": snapshot.get("research_coverage", {}).get("status", "unknown"),
             # Taken from harness state, not from model prose: the summary must
             # not drop a rejection that is still unresolved.
             "recent_rejections": bounded(snapshot.get("run", {}).get("recent_rejections", [])),
+            "unresolved_rejections": bounded(snapshot.get("run", {}).get("unresolved_rejections", [])[:12]),
+            "unresolved_rejection_count": len(snapshot.get("run", {}).get("unresolved_rejections", [])),
+            "unresolved_rejections_listed_all": len(snapshot.get("run", {}).get("unresolved_rejections", [])) <= 12,
         },
         "completed_exchanges": history,
         "omitted_exchange_count": 0,
@@ -230,6 +234,8 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
             "input_open_tasks_complete": input_metadata["current_state"]["open_tasks_listed_all"],
             "input_unmapped_actions_complete": input_metadata["current_state"]["unmapped_actions_listed_all"],
             "input_unmapped_routes_complete": input_metadata["current_state"]["unmapped_routes_listed_all"],
+            "input_execution_relations_complete": input_metadata["current_state"]["execution_relations_listed_all"],
+            "input_execution_interactions_complete": input_metadata["current_state"]["execution_interactions_listed_all"],
             "summary": summary,
             "normalization": normalization,
         }

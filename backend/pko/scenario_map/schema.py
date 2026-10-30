@@ -20,6 +20,7 @@ from pko.audit import sanitize
 from pko.scenario_map.research_memory import ResearchMemory
 from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
 from pko.scenario_map.code_references import code_only
+from pko.scenario_map.execution_contracts import ExecutionContracts, ExecutionContractError
 
 SCHEMA_VERSION = "2.0"
 SEMANTIC_PROFILE = "variant-actions-v1"
@@ -80,7 +81,7 @@ def _choice(value: Any, field: str, choices: tuple[str, ...]) -> str:
     return value
 
 
-class MapState(ResearchQuality):
+class MapState(ExecutionContracts, ResearchQuality):
     """Agent-facing state; JSON is deliberately independent from ProgressModel."""
 
     def __init__(self, workspace: Any, scenario_description: str):
@@ -301,13 +302,13 @@ class MapState(ResearchQuality):
             return {"ok": False, "error": "Аргументы должны быть объектом JSON"}
         args = args or {}
         allowed = {
-            "set_scope": {"title", "process_name", "variant_context", "instance_unit", "variant_factors", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
-            "patch_fragment": {"steps", "transitions", "remove_node_ids", "remove_edge_ids", "entry_operation_ids", "terminal_operation_ids", "gap_updates"},
-            "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "outcome", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
+            "set_scope": {"title", "process_name", "variant_context", "instance_unit", "variant_factors", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids", "amendment"},
+            "patch_fragment": {"steps", "transitions", "remove_node_ids", "remove_edge_ids", "entry_operation_ids", "terminal_operation_ids", "gap_updates", "operation_mappings", "route_mappings"},
+            "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "outcome", "outcome_scope", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
             "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis", "code_explanations"},
             "add_gap": {"description", "node_ids", "edge_ids", "task_ids", "category", "evidence"},
             "review_source": {"source_id", "disposition", "reason"},
-            "review_execution": {"id", "name", "evidence", "operations", "checks", "route_expectations", "discard_operations", "discard_route_expectations"},
+            "review_execution": {"id", "name", "evidence", "operations", "checks", "route_expectations", "discard_operations", "discard_route_expectations", "amendment"},
             "save_research_task": {"id", "kind", "target", "status", "resolution", "evidence", "node_ids", "gap_ids", "child_task_ids", "exclusion"},
             "review_semantics": {"checks", "route_cases"},
             "save_research_note": {"id", "kind", "status", "finding", "next_action", "evidence"},
@@ -337,6 +338,14 @@ class MapState(ResearchQuality):
             errors = [] if getattr(self, '_patch_in_progress', False) else self._reference_errors()
             if errors:
                 raise MapValidationError("; ".join(errors))
+            if not getattr(self, '_patch_in_progress', False) and name in ('upsert_step', 'upsert_transition', 'patch_fragment', 'review_execution'):
+                previous_issues = {json.dumps(issue, sort_keys=True, ensure_ascii=False)
+                                   for review in original['execution_reviews'] for issue in self._projection_issues_for_model(original, review)}
+                issues = [issue for review in self.model['execution_reviews'] for issue in self._projection_issues(review)
+                          if json.dumps(issue, sort_keys=True, ensure_ascii=False) not in previous_issues]
+                if issues:
+                    raise ExecutionContractError('Правка нарушает сохранённое исполнение; пакет не применён. '
+                                                 + '; '.join(issue['problem'] for issue in issues[:8]), issues=issues[:20])
             if name != "finish":
                 self.model["run"].update(status="running", reason="")
             hints = self._hints(name, result)
@@ -416,7 +425,8 @@ class MapState(ResearchQuality):
                              "исходы выражаются переходами к операциям, формирующим результат.")
         if name in ("set_scope", "upsert_step"):
             unresolved = [identifier for identifier in sorted(terminals) if identifier in nodes
-                          and nodes[identifier].get('outcome', 'unknown') == 'unknown']
+                          and nodes[identifier].get('outcome', 'unknown') == 'unknown'
+                          and nodes[identifier].get('outcome_scope', 'branch') != 'shared']
             if unresolved:
                 hints.append("Уточните бизнес-исход конечных операций по их основаниям: " + ", ".join(unresolved)
                              + ". Если он не установлен, сохраните outcome=unknown и адресный пробел; название не доказывает исход.")
@@ -637,9 +647,17 @@ class MapState(ResearchQuality):
         return self._put("research_notes", item)
 
     def _set_scope(self, args: dict[str, Any]) -> dict[str, Any]:
+        previous = deepcopy(self.model['scenario'])
+        changed = [key for key in ('start', 'end', 'instance_unit', 'exclusions')
+                   if previous.get(key) and key in args and args[key] != previous[key]]
+        amendment = args.get('amendment')
+        if changed and self.model['nodes'] and not amendment:
+            raise MapValidationError('Изменение установленной границы требует amendment с причиной и основаниями',
+                                     'scope_amendment_required', fields=changed)
+        reason, refs = self._grounded_amendment(amendment) if amendment is not None else ('', [])
         self.model["scenario"].update({
             "title": _text(args.get("title"), "title", required=True, limit=300),
-            "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
+            "process_name": _text(args.get("process_name", previous.get('process_name', '')), "process_name", limit=300),
             **{key: _text(args.get(key, self.model['scenario'].get(key, '')), key)
                for key in ('variant_context', 'instance_unit')},
             "variant_factors": _strings(args.get('variant_factors', self.model['scenario'].get('variant_factors', [])), 'variant_factors'),
@@ -647,10 +665,16 @@ class MapState(ResearchQuality):
             "start": self.business_text(args.get("start"), "start", MAX_TEXT),
             "end": self.business_text(args.get("end"), "end", MAX_TEXT),
             "exclusions": [self.business_text(value, "exclusions", 1000)
-                           for value in _strings(args.get("exclusions", []), "exclusions")],
-            "assumptions": _strings(args.get("assumptions", []), "assumptions"),
+                           for value in _strings(args.get("exclusions", previous.get('exclusions', [])), "exclusions")],
+            "assumptions": _strings(args.get("assumptions", previous.get('assumptions', [])), "assumptions"),
             **{key: _strings(args.get(key, self.model["scenario"][key]), key, limit=MAX_NODES) for key in ("entry_operation_ids", "terminal_operation_ids")},
         })
+        self.model['scenario']['scope_revision'] = previous.get('scope_revision', 1) + int(bool(changed))
+        history = deepcopy(previous.get('scope_changes', []))
+        if changed and amendment:
+            history.append({'revision': self.model['scenario']['scope_revision'], 'reason': reason,
+                            'evidence': refs, 'fields': changed})
+        self.model['scenario']['scope_changes'] = history[-30:]
         return {"scenario": deepcopy(self.model["scenario"])}
 
     def _upsert_step(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -660,6 +684,7 @@ class MapState(ResearchQuality):
                 "kind": _choice(args.get("kind", "operation"), "kind", STEP_KINDS),
                 "evidence_status": status, "evidence": evidence,
                 "outcome": _choice(args.get("outcome") or "unknown", "outcome", OUTCOME_KINDS),
+                "outcome_scope": _choice(args.get('outcome_scope', 'branch'), 'outcome_scope', ('branch', 'shared')),
                 "effect_kind": _choice(args.get("effect_kind", "unknown"), "effect_kind", EFFECT_KINDS),
                 "continuation_mode": _choice(args.get("continuation_mode", "sequence"), "continuation_mode", ("sequence", "choice", "all")),
                 "join_mode": _choice(args.get("join_mode", "any"), "join_mode", ("any", "all"))}
@@ -671,6 +696,8 @@ class MapState(ResearchQuality):
         item["code_explanations"] = self.code_explanations(args.get("code_explanations", []), evidence)
         item["completion_condition"] = self.business_text(args["completion_condition"], "completion_condition") if args.get("completion_condition") else ""
         item["external_interactions"] = self.external_interactions(args.get("external_interactions", []), evidence)
+        if item['outcome_scope'] == 'shared' and item['outcome'] != 'unknown':
+            raise MapValidationError('Общий финализатор разных исходов имеет outcome=unknown; исходы сохраняются в ветвях')
         systems = {row["name"].casefold() for row in item["external_interactions"]}
         if len(systems) > 1:
             raise MapValidationError("Одна операция — вызов одной внешней системы: вызовы разных систем и их частичный успех "
@@ -736,6 +763,12 @@ class MapState(ResearchQuality):
         identifier = _text(args.get("id"), "id", required=True)
         if not any(row["id"] == identifier for row in self.model[collection]):
             raise MapValidationError(f"Объект {identifier} не найден")
+        if kind == 'execution_review':
+            review = next(row for row in self.model[collection] if row['id'] == identifier)
+            if review['operations'] or review.get('route_expectations'):
+                raise MapValidationError('Обзор содержит найденные действия или условия: исправьте их адресно через '
+                                         'discard_operations/discard_route_expectations с основаниями; удаляется только пустой обзор',
+                                         'fact_amendment_required', review_id=identifier)
         # Never silently delete incident transitions or children. The caller can
         # amend them first, and failed removals leave all data untouched.
         self.model[collection] = [row for row in self.model[collection] if row["id"] != identifier]
@@ -743,8 +776,9 @@ class MapState(ResearchQuality):
 
     def _patch_fragment(self, args: dict[str, Any]) -> dict[str, Any]:
         """Validate a candidate final graph; dispatch supplies the full rollback."""
+        before_mappings = {review['id']: deepcopy(self._execution_mapping(review)) for review in self.model['execution_reviews']}
         rows = {}
-        for key in ('steps', 'transitions', 'remove_node_ids', 'remove_edge_ids', 'gap_updates'):
+        for key in ('steps', 'transitions', 'remove_node_ids', 'remove_edge_ids', 'gap_updates', 'operation_mappings', 'route_mappings'):
             value = args.get(key, [])
             if not isinstance(value, list):
                 raise MapValidationError(f'{key}: требуется список')
@@ -873,6 +907,10 @@ class MapState(ResearchQuality):
                     check['edge_ids'] = [e for e in check['edge_ids'] if e not in remove_edges]
             for task in self.model['research_tasks']:
                 task['node_ids'] = [n for n in task['node_ids'] if n not in remove_nodes]
+            mapped_reviews = self._apply_execution_mappings(args, local_ids, local_kinds)
+            for review in self.model['execution_reviews']:
+                if before_mappings[review['id']] != self._execution_mapping(review):
+                    review['mapping_revision'] = review.get('mapping_revision', 1) + 1
         finally:
             self._patch_in_progress = False
         known = {n['id'] for n in self.model['nodes']}
@@ -884,6 +922,10 @@ class MapState(ResearchQuality):
                                      'unknown_id', issues=problems)
         return {**results, 'local_ids': local_ids, 'removed_node_ids': sorted(remove_nodes), 'removed_edge_ids': sorted(remove_edges),
                 'updated_gap_ids': updated_gaps,
+                'mapped_review_ids': mapped_reviews,
+                'open_action_ids': [op['id'] for r in self.model['execution_reviews'] for op in r['operations'] if not op['node_id']],
+                'open_route_ids': [r['id'] for review in self.model['execution_reviews'] for r in review.get('route_expectations', [])
+                                   if not r['edge_ids'] and not r['completion_node_id']],
                 'boundaries': {key: list(self.model['scenario'][key]) for key in boundaries}}
 
     @staticmethod
@@ -919,7 +961,7 @@ class MapState(ResearchQuality):
             result.append({'id': identifier, 'reason': _text(row['reason'], f'{field}.reason', required=True), 'evidence': refs})
         return result
 
-    def _review_routes(self, rows, old, evidence, identifier, discards):
+    def _review_routes(self, rows, old, evidence, identifier, discards, operations, aliases):
         if not isinstance(rows, list) or len(rows) > 100:
             raise MapValidationError('route_expectations: ожидается до 100 найденных условий и результатов')
         previous = {r['id']: r for r in old.get('route_expectations', [])}
@@ -929,7 +971,7 @@ class MapState(ResearchQuality):
         result, seen = [], set()
         for index, row in enumerate(rows):
             field = f'route_expectations[{index}]'
-            if not isinstance(row, dict) or set(row) - {'id', 'condition', 'expected_result', 'evidence', 'edge_ids', 'completion_node_id'}:
+            if not isinstance(row, dict) or set(row) - {'id', 'condition', 'expected_result', 'evidence', 'edge_ids', 'completion_node_id', 'from_operation_id', 'to_operation_id'}:
                 raise MapValidationError(f'{field}: неверная структура')
             refs = self._evidence(row.get('evidence', []), field+'.evidence')
             if not refs:
@@ -937,11 +979,25 @@ class MapState(ResearchQuality):
             self.require_coverage(field, 'evidence', refs, evidence)
             item = {key: self.business_text(row.get(key), field+'.'+key) for key in ('condition', 'expected_result')}
             item['evidence'] = refs
+            prior = previous.get(row.get('id'), {})
+            for key in ('from_operation_id', 'to_operation_id'):
+                value = _text(row.get(key, prior.get(key, '')), field+'.'+key)
+                if value.startswith('$'):
+                    if value[1:] not in aliases:
+                        raise MapValidationError(f'{field}.{key}: неизвестный local_ref действия')
+                    value = aliases[value[1:]]
+                if value and value not in {op['id'] for op in operations}:
+                    raise MapValidationError(f'{field}.{key}: нужен ID найденного действия этого обзора')
+                item[key] = value
+            if bool(item['from_operation_id']) != bool(item['to_operation_id']):
+                raise MapValidationError(f'{field}: для порядка укажите оба from_operation_id и to_operation_id')
             route_id = row.get('id')
             if route_id and route_id not in previous:
                 raise MapValidationError(f'{field}.id: используйте ID из обновляемого обзора')
             if not route_id:
-                route_id = identifier + '/route-' + self._fingerprint(item)[:16]
+                # Preserve the former ID for unanchored expectations.
+                identity = {k: v for k, v in item.items() if k not in ('from_operation_id', 'to_operation_id') or v}
+                route_id = identifier + '/route-' + self._fingerprint(identity)[:16]
             if route_id in seen or route_id in discarded:
                 raise MapValidationError(f'{field}.id: повтор или одновременное удаление ожидания')
             seen.add(route_id)
@@ -993,9 +1049,10 @@ class MapState(ResearchQuality):
                                                 {r['id']: r for r in old.get('route_expectations', [])}, evidence, 'discard_route_expectations')
         used_nodes: set[str] = set()
         used_actions: set[str] = set()
+        aliases = {}
         operations = []
         for raw in raw_operations:
-            if not isinstance(raw, dict) or set(raw) - {"id", "node_id", "name", "kind", "action", "effect", "failure", "condition", "evidence"}:
+            if not isinstance(raw, dict) or set(raw) - {"id", "node_id", "name", "kind", "action", "effect", "failure", "condition", "evidence", "external_interactions", "local_ref"}:
                 raise MapValidationError("operations: неверная структура операции")
             node_id = _text(raw.get("node_id") or "", "operations.node_id")
             if node_id and node_id not in nodes:
@@ -1027,6 +1084,11 @@ class MapState(ResearchQuality):
             if action_id in used_actions or action_id in discarded_ids:
                 raise MapValidationError('operations.id: повтор действия в обзоре')
             used_actions.add(action_id)
+            alias = raw.get('local_ref')
+            if alias is not None:
+                if not isinstance(alias, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', alias) or alias in aliases:
+                    raise MapValidationError('operations.local_ref: уникальное локальное имя действия')
+                aliases[alias] = action_id
             operation = {"id": action_id, "node_id": node_id, "mapping_status": "mapped" if node_id else "unmapped",
                          "kind": _choice(raw.get("kind"), "operations.kind", OPERATION_KINDS),
                          "evidence": citations}
@@ -1034,6 +1096,8 @@ class MapState(ResearchQuality):
                 operation[field] = _text(raw.get(field), f"operations.{field}", required=True,
                                         limit=300 if field == "name" else MAX_TEXT)
             operation["condition"] = _text(raw.get("condition", ""), "operations.condition")
+            operation['external_interactions'] = self.external_interactions(
+                raw.get('external_interactions', old_actions.get(action_id, {}).get('external_interactions', [])), citations)
             operations.append(operation)
         retained = [deepcopy(op) for op in old_actions.values() if op['id'] not in used_actions | discarded_ids]
         for op in retained:
@@ -1041,7 +1105,7 @@ class MapState(ResearchQuality):
         operations.extend(retained)
         if len(operations) > 100:
             raise MapValidationError('operations: лимит 100, уточните обзор без потери найденных действий')
-        routes = self._review_routes(args.get('route_expectations', []), old, evidence, identifier, discarded_routes)
+        routes = self._review_routes(args.get('route_expectations', []), old, evidence, identifier, discarded_routes, operations, aliases)
         raw_checks = args.get("checks")
         if not isinstance(raw_checks, dict) or set(raw_checks) != set(EXECUTION_CHECKS):
             raise MapValidationError("checks должен содержать branches, failures, integrations, state_changes, computations")
@@ -1099,8 +1163,10 @@ class MapState(ResearchQuality):
                 "discarded_route_expectations_omitted": routes_omitted,
                 "node_fingerprints": {n: self._fingerprint(nodes[n]) for n in related_nodes if n in nodes},
                 "edge_fingerprints": {e: self._fingerprint(edge_index[e]) for e in related_edges if e in edge_index}}
+        self._execution_revisions(old, item, args.get('amendment'))
         result = self._put("execution_reviews", item)
         return {**result, "operations": [{"id": op["id"], "node_id": op["node_id"]} for op in operations],
+                'local_ids': aliases, 'fact_revision': item['fact_revision'], 'mapping_revision': item['mapping_revision'],
                 "route_expectations": [{key: row[key] for key in ('id', 'mapping_status', 'edge_ids', 'completion_node_id')} for row in routes],
                 "retained_operation_ids": [op['id'] for op in retained]}
 
@@ -1184,11 +1250,31 @@ class MapState(ResearchQuality):
         for identifier in sorted(required - mapped):
             errors.append(f"{identifier}: операция не сопоставлена с записью review_execution")
         for review in reviews:
+            for issue in self._projection_issues(review):
+                address = issue.get('route_id', issue.get('operation_id', review['id']))
+                errors.append(f"{address}: {issue['problem']}")
             for route in review.get('route_expectations', []):
                 if not route['edge_ids'] and not route['completion_node_id']:
                     errors.append(f"{route['id']}: найденное условие ещё не сопоставлено с продолжением или завершением")
                 if route['completion_node_id'] and route['completion_node_id'] not in self.model['scenario']['terminal_operation_ids']:
                     errors.append(f"{route['id']}: ожидаемое завершение не объявлено конечным действием")
+            # A drawn choice alone is not an independent inventory of its
+            # alternatives. Missing discoveries remain coverage work, never a
+            # finish-blocking demand to invent an expected route.
+            discovered = {op['id']: op for op in review['operations']}
+            for op in review['operations']:
+                if nodes.get(op['node_id'], {}).get('continuation_mode') != 'choice':
+                    continue
+                for edge in edges.values():
+                    if edge['source'] != op['node_id'] or edge['kind'] == 'data':
+                        continue
+                    matched = any(route.get('from_operation_id') == op['id']
+                                  and route.get('to_operation_id') in discovered
+                                  and route['edge_ids'] and route['edge_ids'][0] == edge['id']
+                                  for route in review.get('route_expectations', []))
+                    if not matched:
+                        errors.append(f"{edge['id']}: альтернатива не сопоставлена с независимым ожиданием исполнения; "
+                                      'зафиксируйте найденные действия и условие либо оставьте покрытие частичным')
             review_nodes = set(review['node_fingerprints'])
             incident = [edge for edge in edges.values() if edge["source"] in review_nodes or edge["target"] in review_nodes]
             incident_ids = {edge["id"] for edge in incident}
@@ -1238,7 +1324,7 @@ class MapState(ResearchQuality):
         return {
             'branches': any(sum(e['source']==n and e['kind']!='data' for e in outgoing)>1 for n in reviewed) or any(e['kind']=='branch' for e in outgoing),
             'failures': 'error_handling' in kinds or any(e['kind'] in ('error','retry') for e in outgoing),
-            'integrations': bool(kinds.intersection({'integration','publish'})) or any(
+            'integrations': bool(kinds.intersection({'integration','publish'})) or any(op.get('external_interactions') for op in review['operations']) or any(
                 e['kind'] in ('call','event','return') for e in outgoing) or any(
                 nodes.get(identifier, {}).get('external_interactions') for identifier in reviewed),
             'state_changes': 'write' in kinds,
@@ -1386,6 +1472,9 @@ class MapState(ResearchQuality):
         structural = list(dict.fromkeys(structural))
         all_issues = self._finish_errors()
         coverage = [issue for issue in all_issues if issue not in structural]
+        for issue in self.model['run'].get('unresolved_rejections', []):
+            if issue.get('status', 'open') == 'open':
+                coverage.append(f"{issue.get('problem_id', 'repair')}: исчерпаны четыре адресные попытки; {issue.get('error', '')}")
         for row in self.research_coverage()['tasks']:
             if row['status'] == 'partial':
                 coverage.append(f"{row['task_id']}: неполное покрытие; участки: {', '.join(row['incomplete_task_ids'])}")
