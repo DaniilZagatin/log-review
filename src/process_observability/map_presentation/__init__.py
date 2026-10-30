@@ -1,7 +1,6 @@
-"""Vendored presentation of the first agent's scenario map; no producer runtime is imported.
+"""Integrated presentation over the bundled Belka contracts and logging overlays.
 
-``scenario_map.py`` is the producer renderer with only its import lines changed (see
-PROVENANCE.md); ``theme.py`` and ``compat.py`` hold the minimal helpers it needs.
+The product ships both pko and process_observability; no external checkout is needed.
 """
 from .compat import HierarchyError, map_revision, validate_hierarchy
 from .scenario_map import EMBED_HEADER_SLOT, EMBED_PANELS_SLOT, render_scenario_map, scenario_map_parts

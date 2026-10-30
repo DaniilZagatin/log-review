@@ -76,6 +76,18 @@ def _candidates(data, facts):
                            cohort='Завершённые экземпляры с обеими сопоставленными границами',
                            open_case_policy='Незавершённые случаи показываются отдельно; отсутствующий интервал не заменяется нулём'))
     nodes = {op['id']: op for op in MapView.from_dict(model).operations}
+    outgoing = {identifier: [] for identifier in nodes}
+    for edge in model.get('edges', []):
+        if edge.get('source') in nodes and edge.get('target') in nodes:
+            outgoing[edge['source']].append(edge['target'])
+    cyclic = set()
+    for identifier in nodes:
+        frontier = list(outgoing[identifier]); seen = set()
+        while frontier:
+            current = frontier.pop()
+            if current == identifier: cyclic.add(identifier); break
+            if current not in seen:
+                seen.add(current); frontier.extend(outgoing[current])
     for outcome in ('success', 'refusal', 'failure', 'cancelled', 'deferred', 'no_decision'):
         selected = [i for i in terminals if nodes[i].get('outcome') == outcome and nodes[i].get('outcome_scope') != 'shared']
         if selected:
@@ -90,6 +102,11 @@ def _candidates(data, facts):
                            cohort='Подтверждённые выполнения выбранного действия',
                            repeat_policy='Бизнес-повторы учитываются отдельно от технических попыток и дубликатов доставки',
                            open_case_policy='Неподтверждённые выполнения показываются отдельно'))
+        if op['id'] in cyclic:
+            result.append(item(_id('action-repeat', op['id']), 'Экземпляры с повтором действия «' + op['name'] + '»',
+                               '100 × число экземпляров с несколькими бизнес-выполнениями действия / число экземпляров в популяции',
+                               [op['id']], cohort='Экземпляры сценария выбранной популяции',
+                               repeat_policy='Повтор означает новое бизнес-выполнение; технические попытки и дубликаты доставки исключаются'))
     return result
 
 

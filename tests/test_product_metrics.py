@@ -100,3 +100,13 @@ class MetricTests(unittest.TestCase):
         model = Provider(); result = build_metrics(fixture(), model)
         self.assertEqual(model.count, 1)
         self.assertEqual(result['status'], 'partial')
+
+    def test_cycle_has_repeat_definition_without_counting_technical_retries(self):
+        data = fixture(); data['map']['edges'] = [{'id':'retry','source':'save','target':'save','condition':'Повторить обработку'}]
+        data['map_content_sha256'] = MapView.from_dict(data['map']).sha256
+        data['map_revision'] = MapView.from_dict(data['map']).revision
+        catalog = build_metrics(data)
+        repeated = [m for m in catalog['metrics'] if m['id'].startswith('action-repeat-')]
+        self.assertEqual(len(repeated), 1)
+        self.assertIn('технические попытки', repeated[0]['repeat_policy'])
+        self.assertIsNone(repeated[0]['value'])
