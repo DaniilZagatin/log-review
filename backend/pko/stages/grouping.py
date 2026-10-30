@@ -13,7 +13,7 @@ from copy import deepcopy
 from pko.audit import record
 from pko.scenario_map.quality import QualityError, ResearchQuality
 from pko.stages.contracts import HIERARCHY_VERSION, OPERATIONS_HIERARCHY_VERSION, validate_hierarchy
-from pko.stages.inputs import (ACTION_PROFILE, METHODOLOGY, STAGE, build_payload, grouping_stage, hierarchy_kind,
+from pko.stages.inputs import (ACTION_PROFILE, CURRENT_INPUT_VERSION, METHODOLOGY, STAGE, build_payload, grouping_stage, hierarchy_kind,
                                input_fingerprint, map_revision, methodology,
                                payload_fingerprint)
 from pko.stages.model import PacketTooLarge, StageModel
@@ -148,6 +148,10 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
                               if operation in owners and owners[operation] != stage["id"]]
                     if previous and set(previous["operation_ids"]) != set(stage["operation_ids"]):
                         conflicts.append(f"{stage['id']}: состав ранее принятого этапа нельзя менять при исправлении")
+                    elif previous and any(stage.get(field) != previous.get(field)
+                                          for field in ("name", "goal", "result", "boundary", "note")):
+                        conflicts.append(f"{stage['id']}: смысл ранее принятой группы нельзя менять при исправлении; "
+                                         "повторите её без изменений")
                     elif stolen:
                         conflicts.append(f"{stage['id']}: операции уже приняты в других этапах: " + ", ".join(
                             f"{operation} ({owners[operation]})" for operation in stolen[:8]))
@@ -239,5 +243,6 @@ def _hierarchy(model: dict, records: list, membership: dict, reasons: dict, stat
                  "status": status, "provenance": "model_proposal", "authority_status": "proposed", "budget": budget}
     if action_profile:
         hierarchy["semantic_profile"] = ACTION_PROFILE
+        hierarchy["input_version"] = CURRENT_INPUT_VERSION
     validate_hierarchy(hierarchy, model)
     return hierarchy

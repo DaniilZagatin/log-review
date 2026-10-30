@@ -13,6 +13,8 @@ OPERATIONS_STAGE = "business_operations"
 ACTION_PROFILE = "variant-actions-v1"
 METHODOLOGY = Path(__file__).with_name("methodology")
 INPUT_MODES = ("full", "compact")
+CURRENT_INPUT_VERSION = "2"
+LEGACY_INPUT_VERSION = "1"
 
 
 def grouping_stage(model: dict) -> str:
@@ -32,14 +34,39 @@ def _short(value, limit: int) -> str:
     return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
-def build_payload(model: dict, compact: bool = False) -> dict:
+def _research_findings(model: dict) -> list[dict]:
+    """Keep missing work legible without making it a member of the map.
+
+    Public findings come from the existing execution inventory. They do not
+    carry source quotes and cannot supply operations or transitions to grouping.
+    Like transition conditions, their meaning must survive compact input.
+    """
+    findings = []
+    for review in model.get("execution_reviews") or []:
+        actions = [{key: deepcopy(action[key]) for key in (
+            "id", "name", "kind", "action", "effect", "failure", "condition") if key in action}
+            for action in review.get("operations") or [] if not action.get("node_id")]
+        routes = [{key: deepcopy(route[key]) for key in (
+            "id", "condition", "expected_result", "edge_ids", "completion_node_id", "mapping_status") if key in route}
+            for route in review.get("route_expectations") or []]
+        if actions or routes:
+            findings.append({"review_id": review.get("id"), "name": review.get("name", ""),
+                             "unmapped_actions": actions, "route_expectations": routes})
+    return findings
+
+
+def build_payload(model: dict, compact: bool = False, *, input_version: str | None = None) -> dict:
     """Keep execution semantics intact; compact mode omits only optional context.
 
     Conditions, results and operation descriptions are not shortened: removing
     their end can turn an exception into an unconditional result. If even the
     compact packet does not fit, the caller keeps the atomic map instead.
     """
-    grouping_stage(model)
+    stage = grouping_stage(model)
+    if input_version is None:
+        input_version = CURRENT_INPUT_VERSION if stage == OPERATIONS_STAGE else LEGACY_INPUT_VERSION
+    if input_version not in (LEGACY_INPUT_VERSION, CURRENT_INPUT_VERSION) or (stage == STAGE and input_version != LEGACY_INPUT_VERSION):
+        raise ValueError("unsupported grouping input version")
     dominators = immediate_dominators(operation_graph(model))
     scenario = model.get("scenario") or {}
     terminals = set(scenario.get("terminal_operation_ids") or [])
@@ -66,6 +93,10 @@ def build_payload(model: dict, compact: bool = False) -> dict:
     if model.get("semantic_profile") == ACTION_PROFILE:
         payload["semantic_profile"] = ACTION_PROFILE
         payload["hierarchy_kind"] = OPERATIONS_STAGE
+        if input_version == CURRENT_INPUT_VERSION:
+            payload["input_version"] = CURRENT_INPUT_VERSION
+            payload["map_revision"] = map_revision(model)
+            payload["research_findings"] = _research_findings(model)
         # Keep the variant and its instance distinct, in both packet modes.
         for key in ("process_name", "coverage", "variant_context", "instance_unit", "variant_factors"):
             if key in scenario:
@@ -89,10 +120,10 @@ def build_payload(model: dict, compact: bool = False) -> dict:
     return payload
 
 
-def input_fingerprint(model: dict, mode: str) -> str:
+def input_fingerprint(model: dict, mode: str, *, input_version: str | None = None) -> str:
     if mode not in INPUT_MODES:
         raise ValueError("unknown business-stage input mode")
-    return payload_fingerprint(build_payload(model, compact=mode == "compact"))
+    return payload_fingerprint(build_payload(model, compact=mode == "compact", input_version=input_version))
 
 
 def payload_fingerprint(payload: dict) -> str:

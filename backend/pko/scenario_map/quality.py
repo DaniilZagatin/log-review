@@ -226,6 +226,11 @@ class ResearchQuality:
                         e not in edges or self._fingerprint(edges[e]) != fp for e, fp in review['edge_fingerprints'].items())
                     if stale: issues.append(f"{review['id']}: обзор участка устарел")
                     actions.extend(op for op in review['operations'] if any(self._overlap(a, b) for a in op['evidence'] for b in scope))
+                    pending_routes = [r for r in review.get('route_expectations', [])
+                                      if not r['edge_ids'] and not r['completion_node_id']
+                                      and any(self._overlap(a, b) for a in r['evidence'] for b in scope)]
+                    if pending_routes:
+                        issues.append('не все найденные условия отображены: ' + ', '.join(r['id'] for r in pending_routes))
                 if any(not op.get('node_id') or op['node_id'] not in nodes for op in actions):
                     issues.append('не все найденные действия отображены')
                 if not actions and not children:
@@ -351,56 +356,81 @@ class ResearchQuality:
         checks = args.get('checks')
         if not isinstance(checks, dict) or set(checks) != set(SEMANTIC_CHECKS):
             raise QualityError('checks: нужны outcomes, order, routing, atomicity, dependencies')
-        normalized = {}
+        normalized, problems = {}, []
+
+        def problem(field, message, **details):
+            problems.append({'field': field, 'problem': message, **details})
+
         for name, row in checks.items():
-            if not isinstance(row, dict) or set(row) - {'status','explanation','evidence','node_ids','edge_ids','gap_ids'}:
-                raise QualityError(f'{name}: неверная структура смысловой проверки')
-            if row.get('status') not in ('reviewed', 'uncertain'):
-                raise QualityError(f'{name}: status reviewed или uncertain')
-            refs = self._evidence(row.get('evidence', []))
-            if not refs:
-                raise QualityError(f'{name}: нужны прочитанные основания проверки')
-            value = {"status": row['status'], "explanation": text(row.get('explanation'), name), "evidence": refs}
-            for key, collection in (('node_ids','nodes'),('edge_ids','edges'),('gap_ids','gaps')):
-                value[key] = ids(row.get(key, []), key, [x['id'] for x in self.model[collection]])
-            if row['status'] == 'uncertain' and not value['gap_ids']:
-                raise QualityError(f'{name}: неустановленное поведение требует gap_ids')
-            normalized[name] = value
+            try:
+                if not isinstance(row, dict) or set(row) - {'status','explanation','evidence','node_ids','edge_ids','gap_ids'}:
+                    raise QualityError(f'{name}: неверная структура смысловой проверки')
+                if row.get('status') not in ('reviewed', 'uncertain'):
+                    raise QualityError(f'{name}: status reviewed или uncertain')
+                refs = self._evidence(row.get('evidence', []))
+                if not refs:
+                    raise QualityError(f'{name}: нужны прочитанные основания проверки')
+                value = {"status": row['status'], "explanation": text(row.get('explanation'), name), "evidence": refs}
+                for key, collection in (('node_ids','nodes'),('edge_ids','edges'),('gap_ids','gaps')):
+                    value[key] = ids(row.get(key, []), key, [x['id'] for x in self.model[collection]])
+                if row['status'] == 'uncertain' and not value['gap_ids']:
+                    raise QualityError(f'{name}: неустановленное поведение требует gap_ids')
+                normalized[name] = value
+            except ValueError as exc:
+                problem('checks.'+name, str(exc), **getattr(exc, 'details', {}))
         ends = set(self.model['scenario'].get('terminal_operation_ids', []))
-        if not ends.issubset(normalized['outcomes']['node_ids']):
-            raise QualityError('outcomes должен рассмотреть каждый конечный узел', missing_node_ids=sorted(ends-set(normalized['outcomes']['node_ids'])))
+        if 'outcomes' in normalized and not ends.issubset(normalized['outcomes']['node_ids']):
+            problem('checks.outcomes', 'outcomes должен рассмотреть каждый конечный узел', missing_node_ids=sorted(ends-set(normalized['outcomes']['node_ids'])))
         required_nodes = self._reviewable_operations()
-        if required_nodes - set(normalized['atomicity']['node_ids']):
-            raise QualityError('atomicity должен рассмотреть каждую операцию', missing_node_ids=sorted(required_nodes-set(normalized['atomicity']['node_ids'])))
+        if 'atomicity' in normalized and required_nodes - set(normalized['atomicity']['node_ids']):
+            problem('checks.atomicity', 'atomicity должен рассмотреть каждую операцию', missing_node_ids=sorted(required_nodes-set(normalized['atomicity']['node_ids'])))
         dependency_gaps = {g for task in self.model['research_tasks'] if task['status']=='gap' for g in task['gap_ids']}
-        if dependency_gaps and (normalized['dependencies']['status'] != 'uncertain' or dependency_gaps-set(normalized['dependencies']['gap_ids'])):
-            raise QualityError('dependencies: нераскрытые зависимости требуют uncertain и всех адресных gap_ids')
+        if 'dependencies' in normalized and dependency_gaps and (normalized['dependencies']['status'] != 'uncertain' or dependency_gaps-set(normalized['dependencies']['gap_ids'])):
+            problem('checks.dependencies', 'dependencies: нераскрытые зависимости требуют uncertain и всех адресных gap_ids')
         edges = {e['id']: e for e in self.model['edges'] if e['kind'] != 'data'}
-        routing = normalized['routing']
-        missing = set(edges) - set(routing['edge_ids'])
-        addressed = {e for g in self.model['gaps'] if g['id'] in routing['gap_ids'] for e in g.get('edge_ids', [])}
-        if missing - addressed:
-            raise QualityError('routing должен рассмотреть каждый переход либо адресовать его gap', missing_edge_ids=sorted(missing-addressed))
-        cases = self._route_cases(args.get('route_cases', []))
-        covered_edges = {identifier for case in cases for identifier in case['edge_ids']}
-        fanout = {e['source'] for e in edges.values() if sum(x['source']==e['source'] for x in edges.values()) > 1}
-        uncovered = [e['id'] for e in edges.values() if e['source'] in fanout and
-                     e['id'] not in covered_edges and e['id'] not in addressed]
-        if uncovered:
-            raise QualityError('route_cases: разберите конкретные случаи для всех исходящих ветвей', missing_edge_ids=uncovered)
-        for node in self.model['nodes']:
-            if node['id'] not in ends or not node.get('completion_condition'):
-                continue
-            addressed_node = any(g['id'] in routing['gap_ids'] and node['id'] in g['node_ids'] for g in self.model['gaps'])
-            if addressed_node:
-                if routing['status'] != 'uncertain':
-                    raise QualityError('routing: неизвестное продолжение условного завершения требует uncertain')
-                continue
-            stops = any(case['path'][-1] == node['id'] for case in cases)
-            continues = any(node['id'] in case['path'][:-1] for case in cases)
-            has_outgoing = any(e['source']==node['id'] for e in edges.values())
-            if not has_outgoing or not stops or not continues:
-                raise QualityError('route_cases: условное завершение требует отдельного случая остановки и случая продолжения либо адресного gap', node_id=node['id'])
+        routing = normalized.get('routing')
+        addressed = set()
+        if routing is not None:
+            missing = set(edges) - set(routing['edge_ids'])
+            addressed = {e for g in self.model['gaps'] if g['id'] in routing['gap_ids'] for e in g.get('edge_ids', [])}
+            if missing - addressed:
+                problem('checks.routing', 'routing должен рассмотреть каждый переход либо адресовать его gap', missing_edge_ids=sorted(missing-addressed))
+        cases = None
+        try:
+            cases = self._route_cases(args.get('route_cases', []))
+        except ValueError as exc:
+            problem('route_cases', str(exc), **getattr(exc, 'details', {}))
+        # Invalid cases or routing references cause one primary diagnostic, not
+        # a cascade of uncovered-path errors built from an incomplete parse.
+        if cases is not None and routing is not None:
+            covered_edges = {identifier for case in cases for identifier in case['edge_ids']}
+            fanout = {e['source'] for e in edges.values() if sum(x['source']==e['source'] for x in edges.values()) > 1}
+            uncovered = [e['id'] for e in edges.values() if e['source'] in fanout and e['id'] not in covered_edges and e['id'] not in addressed]
+            if uncovered:
+                problem('route_cases', 'route_cases: разберите конкретные случаи для всех исходящих ветвей', missing_edge_ids=uncovered)
+            for node in self.model['nodes']:
+                if node['id'] not in ends or not node.get('completion_condition'):
+                    continue
+                addressed_node = any(g['id'] in routing['gap_ids'] and node['id'] in g['node_ids'] for g in self.model['gaps'])
+                if addressed_node:
+                    if routing['status'] != 'uncertain':
+                        problem('checks.routing', 'routing: неизвестное продолжение условного завершения требует uncertain', node_id=node['id'])
+                    continue
+                stops = any(case['path'][-1] == node['id'] for case in cases)
+                continues = any(node['id'] in case['path'][:-1] for case in cases)
+                has_outgoing = any(e['source']==node['id'] for e in edges.values())
+                if not has_outgoing or not stops or not continues:
+                    problem('route_cases', 'route_cases: условное завершение требует отдельного случая остановки и случая продолжения либо адресного gap', node_id=node['id'])
+        if problems:
+            # Keep the established detail keys for consumers of a single issue;
+            # callers can now fix all independent issues in one resubmission.
+            details = {}
+            for row in problems:
+                for key, value in row.items():
+                    if key not in ('field', 'problem') and key not in details:
+                        details[key] = value
+            details.update(issues=problems[:30], problem_count=len(problems))
+            raise QualityError('; '.join(p['problem'] for p in problems[:20]), **details)
         self.model['semantic_review'] = {"checks": normalized, "route_cases": cases, "status": "model_reviewed_not_verified",
             "signature": self.quality_signature(), "brief_revision": (self.model['research_brief'] or {}).get('revision')}
         return {"status": "model_reviewed_not_verified", "semantic_verification": False}

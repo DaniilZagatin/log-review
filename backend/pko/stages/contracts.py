@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import re
 
-from pko.stages.inputs import (ACTION_PROFILE, INPUT_MODES, METHODOLOGY, STAGE, grouping_stage,
+from pko.stages.inputs import (ACTION_PROFILE, CURRENT_INPUT_VERSION, LEGACY_INPUT_VERSION, INPUT_MODES, METHODOLOGY, STAGE, grouping_stage,
                                hierarchy_kind, input_fingerprint, map_revision, methodology)
 
 HIERARCHY_VERSION = "1.1"
 OPERATIONS_HIERARCHY_VERSION = "1.2"
+# Exact rules shipped with unversioned action-profile hierarchy 1.2. This digest
+# permits reading an old proposal, never generating new proposals with old rules.
+_LEGACY_OPERATION_METHODOLOGY = "48b2712e1d0e9ef0c4840cc427e03ee4a73747dd3205ca020f082efc6cf6179d"
 _STAGE_ID = re.compile(r"stage-[1-9]\d{0,2}")
 
 
@@ -33,6 +36,14 @@ def validate_hierarchy(hierarchy: dict, model: dict) -> None:
             raise HierarchyError("hierarchy uses another semantic profile")
     elif hierarchy.get("hierarchy_kind", STAGE) != STAGE or hierarchy.get("semantic_profile"):
         raise HierarchyError("legacy map requires business-stage semantics")
+    input_version = hierarchy.get("input_version", LEGACY_INPUT_VERSION)
+    if input_version not in (LEGACY_INPUT_VERSION, CURRENT_INPUT_VERSION) or (not action_profile and input_version != LEGACY_INPUT_VERSION):
+        raise HierarchyError("unsupported grouping input version")
+    if action_profile and input_version == LEGACY_INPUT_VERSION and any(
+            review.get("route_expectations") for review in model.get("execution_reviews") or []):
+        # Version 1 never bound these findings. Do not present an old partition
+        # as a proposal over newly recorded alternatives that it did not see.
+        raise HierarchyError("legacy grouping input does not cover route expectations")
     if hierarchy.get("map_revision") != map_revision(model):
         raise HierarchyError("hierarchy belongs to another map revision")
     # Only a hierarchy that proposes nothing may lack an input: building that input is what failed.
@@ -41,9 +52,11 @@ def validate_hierarchy(hierarchy: dict, model: dict) -> None:
                and (hierarchy.get("status") or {}).get("result") == "none")
     if not unbuilt and hierarchy.get("input_mode") not in INPUT_MODES:
         raise HierarchyError("unknown business-stage input mode")
-    if not unbuilt and hierarchy.get("input_sha256") != input_fingerprint(model, hierarchy["input_mode"]):
+    if not unbuilt and hierarchy.get("input_sha256") != input_fingerprint(model, hierarchy["input_mode"], input_version=input_version):
         raise HierarchyError("hierarchy belongs to another grouping input")
-    if hierarchy.get("methodology_sha256") != methodology(grouping_stage(model), METHODOLOGY)["sha256"]:
+    expected_methodology = (_LEGACY_OPERATION_METHODOLOGY if action_profile and input_version == LEGACY_INPUT_VERSION
+                            else methodology(grouping_stage(model), METHODOLOGY)["sha256"])
+    if hierarchy.get("methodology_sha256") != expected_methodology:
         raise HierarchyError("hierarchy uses another grouping methodology")
     if hierarchy.get("authority_status") != "proposed":
         raise HierarchyError("business stages stay a proposal")

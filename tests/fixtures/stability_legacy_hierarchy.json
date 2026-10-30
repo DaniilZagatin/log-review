@@ -1,0 +1,184 @@
+{
+  "description": "Synthetic published hierarchy 1.2 with the original unversioned input fingerprint; no external source data.",
+  "model": {
+    "schema_version": "2.0",
+    "nodes": [
+      {
+        "id": "step-1",
+        "name": "Приём платежа",
+        "kind": "operation",
+        "output": "Результат операции"
+      },
+      {
+        "id": "step-2",
+        "name": "Поиск договора по реквизитам платежа",
+        "kind": "operation",
+        "output": "Результат операции"
+      },
+      {
+        "id": "step-3",
+        "name": "Проверка, найден ли договор",
+        "kind": "operation",
+        "output": "Результат операции"
+      },
+      {
+        "id": "step-4",
+        "name": "Зачисление платежа на договор",
+        "kind": "operation",
+        "output": "Результат операции"
+      },
+      {
+        "id": "step-5",
+        "name": "Уведомление клиента о зачислении",
+        "kind": "operation",
+        "output": "Результат операции",
+        "outcome": "success"
+      },
+      {
+        "id": "step-6",
+        "name": "Передача платежа специалисту",
+        "kind": "operation",
+        "output": "Результат операции",
+        "outcome": "deferred"
+      }
+    ],
+    "edges": [
+      {
+        "id": "transition-1",
+        "source": "step-1",
+        "target": "step-2",
+        "kind": "sequence",
+        "condition": "",
+        "evidence_status": "observed"
+      },
+      {
+        "id": "transition-2",
+        "source": "step-2",
+        "target": "step-3",
+        "kind": "sequence",
+        "condition": "",
+        "evidence_status": "observed"
+      },
+      {
+        "id": "transition-3",
+        "source": "step-3",
+        "target": "step-4",
+        "kind": "sequence",
+        "condition": "Договор найден",
+        "evidence_status": "observed"
+      },
+      {
+        "id": "transition-4",
+        "source": "step-3",
+        "target": "step-6",
+        "kind": "sequence",
+        "condition": "Договор не найден",
+        "evidence_status": "observed"
+      },
+      {
+        "id": "transition-5",
+        "source": "step-4",
+        "target": "step-5",
+        "kind": "sequence",
+        "condition": "",
+        "evidence_status": "observed"
+      }
+    ],
+    "run": {
+      "id": "run-1",
+      "status": "partial",
+      "reason": "Продолжение не исследовано"
+    },
+    "scenario": {
+      "title": "Зачисление платежа",
+      "description": "Платёж клиента по кредитному договору.",
+      "entry_operation_ids": [
+        "step-1"
+      ],
+      "terminal_operation_ids": [
+        "step-5",
+        "step-6"
+      ],
+      "variant_context": "Зачисление внешнего платежа",
+      "instance_unit": "Один платёж",
+      "variant_factors": [
+        "Платёж по кредитному договору"
+      ]
+    },
+    "semantic_profile": "variant-actions-v1",
+    "research_coverage": {
+      "status": "partial",
+      "unmapped_actions": [
+        "action-7"
+      ]
+    }
+  },
+  "hierarchy": {
+    "hierarchy_version": "1.2",
+    "hierarchy_kind": "business_operations",
+    "map_revision": "sha256:e1211288b9e9cf8205a2530ce4ed7e35c05330092d07b713d59bcecfb33edf08",
+    "run_id": null,
+    "map_run_id": "run-1",
+    "input_sha256": "e7865781e8dce162983d11a3074040711a5e5c7fa3bac8fac35e65df969e6c54",
+    "input_mode": "full",
+    "methodology_sha256": "48b2712e1d0e9ef0c4840cc427e03ee4a73747dd3205ca020f082efc6cf6179d",
+    "stages": [
+      {
+        "id": "stage-1",
+        "name": "Определение договора по платежу",
+        "goal": "Установить, к какому договору относится платёж.",
+        "result": "Договор найден либо не найден.",
+        "note": "",
+        "boundary": "Результат установлен либо сформировано решение о невозможности продолжения.",
+        "collapsible": true,
+        "entry_operation_id": "step-1",
+        "collapse_reason": ""
+      },
+      {
+        "id": "stage-2",
+        "name": "Зачисление платежа",
+        "goal": "Зачислить платёж на найденный договор.",
+        "result": "Платёж зачислен, клиент уведомлён.",
+        "note": "",
+        "boundary": "Результат установлен либо сформировано решение о невозможности продолжения.",
+        "collapsible": true,
+        "entry_operation_id": "step-4",
+        "collapse_reason": ""
+      },
+      {
+        "id": "stage-3",
+        "name": "Передача случая специалисту",
+        "goal": "Передать платёж без договора на ручной разбор.",
+        "result": "Задача передана специалисту; её выполнение не показано.",
+        "note": "",
+        "boundary": "Результат установлен либо сформировано решение о невозможности продолжения.",
+        "collapsible": true,
+        "entry_operation_id": "step-6",
+        "collapse_reason": ""
+      }
+    ],
+    "membership": {
+      "step-1": "stage-1",
+      "step-2": "stage-1",
+      "step-3": "stage-1",
+      "step-4": "stage-2",
+      "step-5": "stage-2",
+      "step-6": "stage-3"
+    },
+    "unassigned": [],
+    "status": {
+      "result": "complete",
+      "reasons": []
+    },
+    "provenance": "model_proposal",
+    "authority_status": "proposed",
+    "budget": {
+      "max_requests": 4,
+      "used_requests": 1,
+      "by_stage": {
+        "business_operations": 1
+      }
+    },
+    "semantic_profile": "variant-actions-v1"
+  }
+}

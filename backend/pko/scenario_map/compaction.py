@@ -63,6 +63,12 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
         for review in snapshot.get("execution_reviews", [])
         for action in review.get("operations", []) if not action.get("node_id")
     ]
+    pending_routes = [
+        {"review_id": review.get("id"), **_public(route)}
+        for review in snapshot.get("execution_reviews", [])
+        for route in review.get("route_expectations", [])
+        if not route.get("edge_ids") and not route.get("completion_node_id")
+    ]
     payload = {
         "previous_summary": _public(snapshot.get("context_summary")),
         "current_state": {
@@ -78,6 +84,10 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             "unmapped_action_count": len(pending_actions),
             "unmapped_actions_listed_all": len(pending_actions) <= 12,
             "recover_actions": "inspect_map(section='operations')",
+            "unmapped_routes": bounded(pending_routes[:12]),
+            "unmapped_route_count": len(pending_routes),
+            "unmapped_routes_listed_all": len(pending_routes) <= 12,
+            "recover_routes": "inspect_map(section='route_expectations')",
             "coverage_status": snapshot.get("research_coverage", {}).get("status", "unknown"),
             # Taken from harness state, not from model prose: the summary must
             # not drop a rejection that is still unresolved.
@@ -131,7 +141,7 @@ def _summary_json(text: str) -> str:
     return text[start:end + 1] if 0 <= start < end else text
 
 
-def _bounded_summary(result: dict) -> dict:
+def _bounded_summary(result: dict, normalization: dict | None = None) -> dict:
     """Trim list tails until the summary fits; the trimming is recorded, never silent."""
     dropped = 0
     while len(json.dumps(result, ensure_ascii=False)) > SUMMARY_MAX_CHARS:
@@ -143,10 +153,12 @@ def _bounded_summary(result: dict) -> dict:
         dropped += 1
     if dropped:
         record("context_summary_trimmed", dropped_items=dropped, limit=SUMMARY_MAX_CHARS)
+        if normalization is not None:
+            normalization["size_dropped_items"] = dropped
     return result
 
 
-def validate_summary(text: str, state) -> dict:
+def validate_summary(text: str, state, *, normalization: dict | None = None) -> dict:
     if not isinstance(text, str) or len(text) > SUMMARY_MAX_CHARS * 3:
         raise ValueError("Слишком большой ответ суммаризации")
     value = json.loads(_summary_json(text))
@@ -163,16 +175,24 @@ def validate_summary(text: str, state) -> dict:
               "current_focus": line("current_focus", value.get("current_focus", ""), allow_empty=True)}
     for field in SUMMARY_LIST_FIELDS:
         parts = value.get(field, [])
-        if not isinstance(parts, list) or len(parts) > 12:
-            raise ValueError(f"{field}: ожидается список до 12 пунктов")
-        result[field] = [line(field, part) for part in parts]
+        if not isinstance(parts, list):
+            raise ValueError(f"{field}: ожидается список строк")
+        # Validate every item before truncating: malformed/injected values are
+        # not laundered by dropping the tail. Exact open work lives in state.
+        validated = [line(field, part) for part in parts]
+        result[field] = validated[:12]
+        if len(validated) > 12:
+            dropped = len(validated) - 12
+            record("context_summary_list_normalized", field=field, dropped_items=dropped, limit=12)
+            if normalization is not None:
+                normalization.setdefault("list_dropped_items", {})[field] = dropped
     # The summary cannot create new citation authority. Validate optional
     # references against precisely the lines actually delivered to the agent.
     if not isinstance(value["references"], list):
         raise ValueError("references: ожидается список прочитанных диапазонов")
     result["references"] = [{key: part for key, part in ref.items() if key != "quote"}
                             for ref in state._evidence(value["references"])]
-    return _bounded_summary(result)
+    return _bounded_summary(result, normalization)
 
 
 def compact_research_context(messages: list[dict], state, budget: int, *,
@@ -197,7 +217,8 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
             raise ValueError("Ответ суммаризации оборван по лимиту выхода")
         if response.tool_calls:
             raise ValueError("Суммаризация не может вызывать инструменты")
-        summary = validate_summary(response.text, state)
+        normalization = {}
+        summary = validate_summary(response.text, state, normalization=normalization)
         state.model["context_summary"] = {
             "revision": (previous or {}).get("revision", 0) + 1,
             "status": "public_summary_not_evidence",
@@ -208,7 +229,9 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
             "input_open_notes_complete": input_metadata["current_state"]["open_notes_listed_all"],
             "input_open_tasks_complete": input_metadata["current_state"]["open_tasks_listed_all"],
             "input_unmapped_actions_complete": input_metadata["current_state"]["unmapped_actions_listed_all"],
+            "input_unmapped_routes_complete": input_metadata["current_state"]["unmapped_routes_listed_all"],
             "summary": summary,
+            "normalization": normalization,
         }
         accepted = True
     except Exception as exc:

@@ -109,6 +109,21 @@ ROUTE_CASES = {"type": "array", "maxItems": 500, "items": {
                    "evidence": _evidence("Строки, подтверждающие входную ситуацию и ожидаемый результат; основания пройденных переходов код подставит сам")},
     "required": ["name", "input", "path", "expected_result", "evidence"]}}
 
+REVIEW_DISCARDS = {"type": "array", "maxItems": 100, "items": {
+    "type": "object", "additionalProperties": False,
+    "properties": {"id": _string("ID ранее обнаруженного элемента этого обзора"),
+                   "reason": _string("Почему прежнее обнаружение оказалось ошибочным; не отсутствие времени на исследование"),
+                   "evidence": EVIDENCE}, "required": ["id", "reason", "evidence"]}}
+ROUTE_EXPECTATIONS = {"type": "array", "maxItems": 100, "items": {
+    "type": "object", "additionalProperties": False,
+    "properties": {"id": _string("ID из ответа review_execution для уточнения найденного условия"),
+                   "condition": _string("Самостоятельное условие продолжения, прочитанное в коде, даже если связи ещё нет"),
+                   "expected_result": _string("Какое продолжение или результат подтверждает код при этом условии"),
+                   "evidence": EVIDENCE,
+                   "edge_ids": _list("Соответствующие переходы, когда отображены; иначе опусти"),
+                   "completion_node_id": _string("Действие, завершающее экземпляр при условии; только если подтверждено")},
+    "required": ["condition", "expected_result", "evidence"]}}
+
 TOOLS = [
     _tool("save_research_task", "Зарегистрировать или обновить единицу работы: функцию, ветвь, вложенный исполнитель или промпт. "
           "Задачи, найденные автоматически, видны в inspect_map(section='research_tasks'). open/read/analyzed — работа не закончена; "
@@ -204,12 +219,18 @@ TOOLS = [
           "node_id опусти для ещё не отображённого действия. "
           "Область evidence задавай по обследованному коду независимо от карты; до 100 ссылок. Пустой перечень допустим, если участок только делегирует и не содержит собственных действий. "
           "Основания сопоставленных действий можно переиспользовать из узлов. "
-          "При правке по id обзор передаётся целиком. Обзор устаревает, если у его действий меняются описание, вход, результат, условия, "
+          "При правке по id передавай актуальный обзор. Пропущенные прежние действия остаются неотображёнными; "
+          "ошибочное обнаружение снимай через discard_operations с причиной и основаниями. "
+          "route_expectations сохраняет найденные условия и ожидаемые продолжения независимо от нарисованных связей; "
+          "неотображённые ожидания остаются открытыми, ошибочное обнаружение снимается через discard_route_expectations. "
+          "Обзор устаревает, если у его действий меняются описание, вход, результат, условия, "
           "исходы, основания или переходы; правка названия, basis и code_explanations его не сбрасывает. "
           "Код проверяет покрытие перечня, но не полноту обнаружения.",
           {"id": _string("ID существующего обзора для замены; для нового опусти"),
            "name": _string("Обследованный участок исполнения"), "evidence": {**EVIDENCE, "maxItems": 100},
            "operations": {"type": "array", "items": OPERATION, "minItems": 0, "maxItems": 100},
+           "route_expectations": ROUTE_EXPECTATIONS,
+           "discard_operations": REVIEW_DISCARDS, "discard_route_expectations": REVIEW_DISCARDS,
            "checks": {"type": "object", "additionalProperties": False,
                       "properties": {name: EXECUTION_CHECK for name in EXECUTION_CHECKS}, "required": list(EXECUTION_CHECKS)}},
           ["name", "evidence", "operations", "checks"]),
@@ -235,11 +256,22 @@ _step_patch = deepcopy(next(t["function"]["parameters"] for t in TOOLS if t["fun
 _step_patch["properties"]["evidence"] = EVIDENCE
 _step_patch["properties"]["local_ref"] = _string("Локальное имя нового действия в этом пакете; переход ссылается на него как $имя. Не совмещать с id.")
 _edge_patch = deepcopy(next(t["function"]["parameters"] for t in TOOLS if t["function"]["name"] == "upsert_transition"))
+_edge_patch["properties"]["local_ref"] = _string("Уникальное локальное имя нового перехода в пакете; gap_updates.edge_ids ссылается на него как $имя. Не совмещать с id.")
 TOOLS.append(_tool("patch_fragment",
     "Согласованно заменить связанный фрагмент: действия, переходы и удаления принимаются целиком либо отклоняются. "
-    "До 100 изменений. Для новых действий можно задать local_ref, для их source/target использовать $имя. "
+    "До 100 изменений. Для новых действий можно задать local_ref, для их source/target и границ использовать $имя. "
+    "При замене первого или последнего действия обновляй entry_operation_ids/terminal_operation_ids в этом же пакете. "
+    "gap_updates явно переносит адреса существующих пробелов на заменяющие действия/переходы; описание, основания и ссылки на задачи сохраняются. "
     "Удаляй старый обход при вставке проверки; не выдумывай ID. Ответ содержит назначенные ID.",
     {"steps": {"type": "array", "items": _step_patch, "maxItems": 100},
      "transitions": {"type": "array", "items": _edge_patch, "maxItems": 100},
      "remove_node_ids": _list("Ошибочные действия для удаления после замены ссылок"),
-     "remove_edge_ids": _list("Прежние переходы, заменённые фрагментом")}, []))
+     "remove_edge_ids": _list("Прежние переходы, заменённые фрагментом"),
+     "gap_updates": {"type": "array", "maxItems": 100, "items": {
+         "type": "object", "additionalProperties": False,
+         "properties": {"id": _string("ID существующего пробела"),
+                        "node_ids": _list("Полный новый список действий пробела; допускает $local_ref действия"),
+                        "edge_ids": _list("Полный новый список переходов пробела; допускает $local_ref перехода")},
+         "required": ["id"]}},
+     "entry_operation_ids": _list("Полный новый список первых действий; если не передан, сохраняется"),
+     "terminal_operation_ids": _list("Полный новый список конечных действий; если не передан, сохраняется")}, []))

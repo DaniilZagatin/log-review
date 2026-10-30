@@ -22,6 +22,7 @@ from pko.scenario_map.tools import TOOLS
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
 from pko.scenario_map.context import compact_context, context_budget, UNFINISHED_TASK_STATUSES
 from pko.scenario_map.compaction import compact_research_context
+from pko.scenario_map.stability import MUTATIONS, mutation_snapshot, record_mutation
 from pko.scenario_map.checkpoint import (CheckpointError, compatibility, make_checkpoint,
                                          validate_compatibility, checkpoint_scenario)
 
@@ -77,11 +78,183 @@ def _rejection_key(function: dict, payload: dict) -> str:
     except (TypeError, ValueError):
         args = {}
     details = payload.get('details') or {}
-    address = {key: details[key] for key in ('node_id', 'edge_id', 'task_id', 'field') if key in details}
-    if not address and isinstance(args, dict):
-        address = {key: args[key] for key in ('id', 'node_id', 'edge_id', 'task_id') if key in args}
+    address = {key: args[key] for key in ('id', 'node_id', 'edge_id', 'task_id') if isinstance(args, dict) and key in args}
+    if isinstance(details, dict):
+        address.update({key: details[key] for key in ('node_id', 'edge_id', 'task_id', 'field') if key in details})
+    # Changing the unread line number or quoted text is still the same citation
+    # authority failure. A newly delivered required range changes its context.
+    invariant = ('read_evidence_required' if payload.get('code') == 'invalid_evidence' else
+                 payload.get('error', payload.get('errors', '')))
     return _json({'tool': function.get('name'), 'code': payload.get('code'),
-                  'address': address, 'invariant': payload.get('error', payload.get('errors', ''))})
+                  'address': address, 'invariant': invariant})
+
+
+class AddressedRejections:
+    """Keep one problem's history across unrelated accepted edits.
+
+    This feeds the existing recovery/stop guard; it has no retry loop or budget
+    of its own. A new read or meaningful change to the addressed object earns a
+    fresh attempt. Runtime counters are per attempt, as is the existing guard.
+    """
+
+    def __init__(self):
+        self.problems: dict[str, dict] = {}
+        self.current: str | None = None
+        self.active: set[str] = set()
+
+    def begin_step(self):
+        self.current = None
+        self.active.clear()
+
+    def observe(self, function: dict, payload: dict, state: MapState):
+        if payload.get('ok'):
+            return
+        try:
+            arguments = json.loads(function.get('arguments') or '{}')
+        except (TypeError, ValueError):
+            return
+        if not isinstance(arguments, dict):
+            return
+        details = payload.get('details') or {}
+        if function.get('name') == 'patch_fragment' and isinstance(details, dict):
+            # Track the addressed producer, not the whole changing patch. Its
+            # index can move when independent edits are added to a later reply.
+            handled = False
+            for issue in details.get('issues', []):
+                if not isinstance(issue, dict):
+                    continue
+                match = re.fullmatch(r'(steps|transitions)\[(\d+)\](?:\..*)?', str(issue.get('field', '')))
+                if not match:
+                    continue
+                collection, index = match[1], int(match[2])
+                rows = arguments.get(collection, [])
+                if not isinstance(rows, list) or index >= len(rows) or not isinstance(rows[index], dict):
+                    continue
+                self.observe({'name': 'upsert_step' if collection == 'steps' else 'upsert_transition',
+                              'arguments': _json(rows[index])},
+                             {'ok': False, 'code': issue.get('code'), 'error': issue.get('problem', ''),
+                              'details': {k: v for k, v in issue.items() if k not in ('field', 'code', 'problem')}}, state)
+                handled = True
+            if handled:
+                return
+        if function.get('name') == 'review_semantics' and isinstance(details, dict):
+            handled = False
+            issues = list(details.get('issues', [])) + list(details.get('cases', []))
+            for issue in issues:
+                if not isinstance(issue, dict):
+                    continue
+                nested_cases = issue.get('cases', [])
+                if isinstance(nested_cases, list):
+                    issues.extend(part for part in nested_cases if isinstance(part, dict))
+                field = str(issue.get('field', ''))
+                ids = {issue[k] for k in ('node_id', 'edge_id') if isinstance(issue.get(k), str)}
+                for k in ('missing_node_ids', 'missing_edge_ids', 'unknown_ids'):
+                    ids.update(v for v in issue.get(k, []) if isinstance(v, str))
+                case_index = issue.get('case_index')
+                case = None
+                cases = arguments.get('route_cases', [])
+                if type(case_index) is int and isinstance(cases, list) and 1 <= case_index <= len(cases):
+                    case = cases[case_index-1]
+                    if isinstance(case, dict):
+                        ids.update(v for v in case.get('path', []) if isinstance(v, str))
+                if not ids and field.startswith('checks.'):
+                    check = arguments.get('checks', {}).get(field.split('.')[1], {})
+                    if isinstance(check, dict):
+                        for k in ('node_ids', 'edge_ids'):
+                            ids.update(v for v in check.get(k, []) if isinstance(v, str))
+                for identifier in sorted(ids):
+                    self.observe({'name': 'review_semantics.' + field,
+                                  'arguments': _json({'id': identifier})},
+                                 {'ok': False, 'code': issue.get('code', payload.get('code')),
+                                  'error': issue.get('problem', ''), 'details': {'field': field}}, state)
+                    handled = True
+            if handled:
+                return
+        identifiers = {str(value) for owner in (arguments, details) if isinstance(owner, dict)
+                       for key, value in owner.items() if key in ('id', 'node_id', 'edge_id', 'task_id') and isinstance(value, str)}
+        if not identifiers:
+            return
+        evidence_only = payload.get('code') == 'invalid_evidence'
+        references = []
+        def collect_refs(value):
+            if isinstance(value, dict):
+                if isinstance(value.get('path'), str):
+                    references.append({key: value[key] for key in ('path', 'line_start', 'line_end') if key in value})
+                for item in value.values():
+                    collect_refs(item)
+            elif isinstance(value, list):
+                for item in value:
+                    collect_refs(item)
+        if evidence_only:
+            collect_refs(arguments)
+            collect_refs(details)
+        context = self.context(state, identifiers, evidence_only, references)
+        key = _rejection_key(function, payload)
+        previous = self.problems.get(key)
+        if not previous or previous['context'] != context:
+            previous = {'context': context, 'count': 0, 'recovered': False, 'identifiers': identifiers,
+                        'evidence_only': evidence_only, 'references': references}
+            self.problems[key] = previous
+        previous['count'] += 1
+        self.active.add(key)
+        self.current = max(self.active, key=lambda item: self.problems[item]['count'])
+        # Bounded metadata only, not a second source of research facts.
+        if len(self.problems) > 32:
+            evicted = next(iter(self.problems))
+            del self.problems[evicted]
+            self.active.discard(evicted)
+            self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
+        if previous['count'] >= 3:
+            record('addressed_rejection_repeated', tool=function.get('name'),
+                   code=payload.get('code'), object_ids=sorted(identifiers),
+                   count=previous['count'], recovery_used=previous['recovered'])
+
+    @staticmethod
+    def context(state: MapState, identifiers: set[str], evidence_only=False, references=()) -> str:
+        if evidence_only:
+            # Editing output/conditions cannot repair a citation to unread lines.
+            # Only newly delivered requested source lines earn another attempt.
+            coverage = []
+            for ref in references:
+                lines = state._reads.get(ref['path'], {})
+                low, high = ref.get('line_start'), ref.get('line_end')
+                visible = sorted(n for n in lines if not (type(low) is int and type(high) is int) or low <= n <= high)
+                coverage.append((ref['path'], visible))
+            if not references:
+                coverage = [(path, sorted(lines)) for path, lines in sorted(state._reads.items())]
+            # Evidence order and duplicate references do not deliver new lines.
+            coverage = sorted({(path, tuple(lines)) for path, lines in coverage})
+            return hashlib.sha256(_json(coverage).encode()).hexdigest()
+        model = state.model
+        related = {}
+        for field in ('nodes', 'edges', 'research_tasks', 'execution_reviews'):
+            related[field] = [state._fingerprint(row) for row in model.get(field, [])
+                              if row.get('id') in identifiers]
+        # A transition repair can change a node's valid continuation without
+        # changing the node itself. Treat that as relevant progress too.
+        related['incident_edges'] = [state._fingerprint(row) for row in model.get('edges', [])
+                                     if row.get('source') in identifiers or row.get('target') in identifiers]
+        related['read_lines'] = sum(len(lines) for lines in state._reads.values())
+        return hashlib.sha256(_json(related).encode()).hexdigest()
+
+    def refresh(self, state: MapState):
+        # A later tool in the same reply may have actually repaired the object.
+        for key in tuple(self.active):
+            row = self.problems[key]
+            if row['context'] != self.context(state, row['identifiers'], row['evidence_only'], row['references']):
+                del self.problems[key]
+                self.active.remove(key)
+        self.current = max(self.active, key=lambda item: self.problems[item]['count'], default=None)
+
+    def stalled(self) -> bool:
+        return bool(self.current and self.problems[self.current]['count'] >= 3)
+
+    def recovered(self) -> bool:
+        return bool(self.current and self.problems[self.current]['recovered'])
+
+    def mark_recovery(self):
+        if self.current:
+            self.problems[self.current].update(count=0, recovered=True)
 
 
 def _brief(state: MapState) -> str:
@@ -352,6 +525,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     state.model['run']['model_mode'] = 'reasoning' if mode is True else 'standard' if mode is False else 'provider_default'
     toolkit = ResearchTools(state, workspace)
     state.model["run"].update(bundle)
+    state.model["run"]["reproducibility"] = copy.deepcopy(contract)
     record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
            context_window=spec.context_window or DEFAULT_CONTEXT_WINDOW, max_steps=max_steps, max_seconds=max_seconds,
            semantic_profile=state.model.get('semantic_profile'), **bundle)
@@ -370,6 +544,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
     recent_errors: list[dict] = copy.deepcopy(previous.get('recent_rejections', []))[-3:]
     failed_calls = 0
     failure_guidance_used = False
+    addressed_rejections = AddressedRejections()
     next_compaction_step = 1
     window = spec.context_window or DEFAULT_CONTEXT_WINDOW
     summary_tokens = min(summary_max_tokens, max(512, window // 4))
@@ -510,7 +685,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                     empty = 0
                     before = (_progress(state), len(toolkit.discovery_results))
                     accepted_finish = False
+                    addressed_rejections.begin_step()
                     for call in calls:
+                        proposed_name = (call.get("function") or {}).get("name", "")
+                        mutation_before = mutation_snapshot(state.model) if proposed_name in MUTATIONS else None
                         if accepted_finish or time.monotonic() - started >= max_seconds:
                             answer = trace_tool_call(lambda owner, c: {
                                 "role": "tool", "tool_call_id": c.get("id", ""),
@@ -521,7 +699,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         function = call.get("function") or {}
                         payload = json.loads(answer["content"])
                         name = function.get("name", "")
+                        if mutation_before is not None:
+                            record_mutation(mutation_before, state.model, name, payload)
                         if not payload.get("ok"):
+                            addressed_rejections.observe(function, payload, state)
                             # Keep the address of the problem (code, case, object,
                             # needed ranges): a bare message made the model resend
                             # the same rejected arguments.
@@ -553,14 +734,16 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                                               "edges": len(state.model.get("edges", []))})
                     # Only new successful discovery content, read lines or
                     # accepted research changes can clear the failure history.
+                    addressed_rejections.refresh(state)
                     changed = before != (_progress(state), len(toolkit.discovery_results))
                     idle = 0 if changed else idle + 1
                     cleanup_changed = bool(recent_errors or failed_calls or failure_guidance_used or loop_recovery_used)
                     if changed:
                         signatures.clear()
                         rejected_signatures.clear()
-                        recent_errors.clear()
-                        state.model["run"]["recent_rejections"] = []
+                        if addressed_rejections.current is None:
+                            recent_errors.clear()
+                            state.model["run"]["recent_rejections"] = []
                         failed_calls = 0
                         failure_guidance_used = False
                         loop_recovery_used = False
@@ -573,10 +756,13 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         messages.append({"role": "user", "content": frontier_message})
                         record("graph_frontier_guidance", step=step, nodes=len(state.model.get("nodes", [])),
                                edges=len(state.model.get("edges", [])))
-                    if _cycle(signatures) or _cycle(rejected_signatures) or idle >= 24 or failed_calls >= 8:
-                        if not loop_recovery_used and loop_recoveries < 3:
+                    addressed_stall = addressed_rejections.stalled()
+                    if _cycle(signatures) or _cycle(rejected_signatures) or idle >= 24 or failed_calls >= 8 or addressed_stall:
+                        if not loop_recovery_used and loop_recoveries < 3 and not (addressed_stall and addressed_rejections.recovered()):
                             loop_recovery_used = True
                             loop_recoveries += 1
+                            if addressed_stall:
+                                addressed_rejections.mark_recovery()
                             state.model["run"]["loop_recovery_attempted"] = True
                             state.model["run"]["loop_recoveries"] = loop_recoveries
                             messages.append({"role": "user", "content":

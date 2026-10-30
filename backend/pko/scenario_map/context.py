@@ -169,7 +169,7 @@ def _summary_recovery(model: dict, detail: int = 2) -> dict:
     if not isinstance(summary, dict):
         return {}
     value = {key: summary.get(key) for key in ("revision", "status", "through_step", "based_on_brief_revision",
-                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete", "input_unmapped_actions_complete")}
+                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete", "input_unmapped_actions_complete", "input_unmapped_routes_complete", "normalization")}
     value.update(content_complete=detail == 2, recover="inspect_map(section='context_summary')")
     if detail == 2:
         value["summary"] = summary.get("summary", {})
@@ -192,13 +192,17 @@ def _manifest(model: dict, detail: int = 2) -> dict:
     rejections = (model.get("run") or {}).get("recent_rejections") or []
     result: dict[str, Any] = {
         "counts": counts,
+        "unmapped_route_count": sum(not route.get("edge_ids") and not route.get("completion_node_id")
+                                    for review in _rows(model, "execution_reviews")
+                                    for route in review.get("route_expectations", [])),
         "open_task_count": sum(task.get('status') in UNFINISHED_TASK_STATUSES for task in _rows(model, 'research_tasks')),
         # Unresolved rejections come from harness state: after compaction the
         # agent still sees which case, object and range to fix.
         "unresolved_rejections": rejections[-3:] if detail else [
             {key: row.get(key, "") for key in ("tool", "code")} for row in rejections[-3:]],
         "recovery": {
-            "execution_reviews": "inspect_map(section='execution_reviews'): найденные действия, включая ещё не отображённые; не только существующие узлы",
+            "route_expectations": "inspect_map(section='route_expectations'): условия и результаты, найденные независимо от связей карты",
+            "execution_reviews": "inspect_map(section='execution_reviews'): найденные действия и ожидаемые маршруты, включая ещё не отображённые; не только существующий граф",
             "scenario": "inspect_map(section='scenario'): выбранный вариант и единица его исполнения",
             "research_tasks": "inspect_map(section='research_tasks'): локальные задачи и зависимости; открытые участки сохраняются в partial",
             "semantic_review": "inspect_map(section='semantic_review'): публичная смысловая проверка исходов, порядка, маршрутов и атомарности; не доказанная полнота",
@@ -239,6 +243,14 @@ def _manifest(model: dict, detail: int = 2) -> dict:
                                   for rid, action in pending_actions[:take]]
     result['unmapped_action_count'] = len(pending_actions)
     result['unmapped_actions_listed_all'] = len(pending_actions) <= take
+    pending_routes = [(review.get('id'), route) for review in _rows(model, 'execution_reviews')
+                      for route in review.get('route_expectations', [])
+                      if not route.get('edge_ids') and not route.get('completion_node_id')]
+    result['unmapped_routes'] = [{'review_id': rid, 'id': route.get('id'),
+                                 'condition': _short(route.get('condition'), text_limit),
+                                 'expected_result': _short(route.get('expected_result'), text_limit)}
+                                for rid, route in pending_routes[:take]]
+    result['unmapped_routes_listed_all'] = len(pending_routes) <= take
     result["read_coverage"] = [
         {"path": _short(row.get("path"), text_limit), "ranges": row.get("ranges", [])[:take],
          "line_count": row.get("line_count", 0)} for row in coverage[-take:]
@@ -271,7 +283,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
 
 def _minimal_manifest() -> dict:
     return {"recover_with": "inspect_map",
-            "sections": ["scenario", "execution_reviews", "operations", "research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
+            "sections": ["scenario", "execution_reviews", "operations", "route_expectations", "research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
                          "frontier", "nodes", "edges", "gaps"],
             "next": "Восстанови research_brief и продолжи незавершённые проверки; прежние результаты и цитаты доступны в памяти."}
 

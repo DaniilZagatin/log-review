@@ -228,7 +228,9 @@ def _validate_model(state, model, counters):
 
     action_ids = set()
     for review in model['execution_reviews']:
-        _object(review, {'id', 'name', 'evidence', 'operations', 'checks', 'node_fingerprints', 'edge_fingerprints'})
+        _object(review, {'id', 'name', 'evidence', 'operations', 'checks', 'node_fingerprints', 'edge_fingerprints'},
+                {'route_expectations', 'discarded_operations', 'discarded_route_expectations',
+                 'discarded_operations_omitted', 'discarded_route_expectations_omitted'})
         _list(review['operations'], 'operations', 100)
         _object(review['checks'], EXECUTION_CHECKS)
         for key, prefix in (('node_fingerprints', 'step'), ('edge_fingerprints', 'edge')):
@@ -247,6 +249,41 @@ def _validate_model(state, model, counters):
             _choice(action['kind'], OPERATION_KINDS, 'operations.kind')
             if action['mapping_status'] != ('mapped' if action['node_id'] else 'unmapped'):
                 _fail('противоречивое сопоставление действия')
+        route_ids = set()
+        for route in review.get('route_expectations', []):
+            _object(route, {'id', 'condition', 'expected_result', 'evidence', 'edge_ids', 'completion_node_id', 'mapping_status'})
+            if (not isinstance(route['id'], str) or not route['id'].startswith(review['id'] + '/route-')
+                    or route['id'] in route_ids):
+                _fail('некорректный ID ожидаемого маршрута')
+            route_ids.add(route['id'])
+            if not isinstance(route['evidence'], list) or not route['evidence']:
+                _fail('ожидаемый маршрут требует прочитанных оснований')
+            for field in ('condition', 'expected_result'):
+                if not isinstance(route[field], str) or not route[field].strip():
+                    _fail('ожидаемый маршрут не содержит ' + field)
+            _strings(route['edge_ids'], 'route.edge_ids', 1500)
+            for eid in route['edge_ids']:
+                if eid not in {edge['id'] for edge in model['edges']}:
+                    _fail('ожидаемый маршрут ссылается на неизвестный переход')
+            terminal = route['completion_node_id']
+            if not isinstance(terminal, str) or (terminal and terminal not in {node['id'] for node in model['nodes']}):
+                _fail('ожидаемый маршрут ссылается на неизвестное действие')
+            if route['mapping_status'] != ('mapped' if route['edge_ids'] or terminal else 'unmapped'):
+                _fail('противоречивое сопоставление ожидаемого маршрута')
+        for field in ('route_expectations', 'discarded_operations', 'discarded_route_expectations'):
+            _list(review.get(field, []), field, 100)
+        for field in ('discarded_operations', 'discarded_route_expectations'):
+            omitted = review.get(field + '_omitted', 0)
+            if type(omitted) is not int or omitted < 0:
+                _fail('некорректный счётчик сокращённой истории обзора')
+            discarded_ids = set()
+            for row in review.get(field, []):
+                _object(row, {'id', 'reason', 'evidence'})
+                if not isinstance(row['id'], str) or row['id'] in discarded_ids or not isinstance(row['reason'], str) or not row['reason'].strip():
+                    _fail('некорректное основание пересмотра обзора')
+                discarded_ids.add(row['id'])
+                if not row['evidence']:
+                    _fail('пересмотр обзора требует основания')
         for check in review['checks'].values():
             _object(check, {'status', 'explanation', 'evidence', 'node_ids', 'edge_ids', 'gap_ids'})
             _choice(check['status'], ('present', 'not_found', 'unknown'), 'check.status')
@@ -291,10 +328,21 @@ def _validate_model(state, model, counters):
     if summary is not None:
         _object(summary, {'revision', 'status', 'through_step', 'based_on_brief_revision', 'input_omitted_exchanges',
                           'input_truncated_fields', 'input_open_notes_complete', 'input_open_tasks_complete', 'summary'},
-                         {'input_unmapped_actions_complete'})
+                         {'input_unmapped_actions_complete', 'input_unmapped_routes_complete', 'normalization'})
         _choice(summary['status'], ('public_summary_not_evidence',), 'summary.status')
         from pko.scenario_map.compaction import validate_summary
-        validate_summary(json.dumps(summary['summary'], ensure_ascii=False), state)
+        normalization = {}
+        validate_summary(json.dumps(summary['summary'], ensure_ascii=False), state, normalization=normalization)
+        if normalization:
+            _fail('сохранённая сводка не нормализована')
+        metadata = summary.get('normalization', {})
+        _object(metadata, set(), {'list_dropped_items', 'size_dropped_items'})
+        dropped = metadata.get('list_dropped_items', {})
+        from pko.scenario_map.compaction import SUMMARY_LIST_FIELDS
+        if not isinstance(dropped, dict) or set(dropped) - set(SUMMARY_LIST_FIELDS):
+            _fail('некорректная диагностика сокращения сводки')
+        if any(type(n) is not int or n < 0 for n in [*dropped.values(), metadata.get('size_dropped_items', 0)]):
+            _fail('некорректный счётчик сокращения сводки')
     semantics = model['semantic_review']
     if semantics is not None:
         _object(semantics, {'checks', 'route_cases', 'status', 'signature', 'brief_revision'})
