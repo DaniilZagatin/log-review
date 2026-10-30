@@ -47,3 +47,18 @@ class ProductReportTests(unittest.TestCase):
         self.assertIn('Бизнес-операции', parts['body'])
         self.assertIn('id="result-lifecycle"', parts['body'])
         self.assertIn('Лимит', parts['body'])
+    def test_manifest_cannot_hide_partial_artifacts_or_export_private_fields(self):
+        import json
+        data = fixture(); metrics = build_metrics(data)
+        manifest = {'status': 'completed', 'stages': {'logging': {'status': 'completed'}},
+                    'reasoning_content': 'PRIVATE_MARKER', 'reason': '<think>HIDDEN_MARKER</think>'}
+        page = build_product_html(data, metrics, manifest)
+        self.assertIn('частичный результат', page)
+        self.assertNotIn('PRIVATE_MARKER', page)
+        self.assertNotIn('HIDDEN_MARKER', page)
+        with tempfile.TemporaryDirectory() as root:
+            write_product_report(data, metrics, Path(root)/'export', manifest)
+            stored = json.loads(Path(root, 'export', 'product_run.json').read_text(encoding='utf-8'))
+            self.assertEqual(stored['status'], 'partial')
+            self.assertEqual(stored['stages']['logging']['status'], data['status'])
+            self.assertNotIn('reasoning_content', stored)

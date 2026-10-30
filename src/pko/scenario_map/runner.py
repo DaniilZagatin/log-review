@@ -36,7 +36,7 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                  summary_max_tokens: int = 8192, summary_mode: str = "standard",
                  stages: bool = True, on_event=None, demo: bool = False,
                  resume_checkpoint: dict | None = None,
-                 prepared_workspace: SourceWorkspace | None = None) -> dict:
+                 prepared_workspace: SourceWorkspace | None = None, on_checkpoint_saved=None) -> dict:
     if prepared_workspace is not None and not isinstance(prepared_workspace, SourceWorkspace):
         raise PkoError("Подготовленный снимок должен быть SourceWorkspace.")
     scenario = scenario.strip()
@@ -100,6 +100,8 @@ def run_scenario(scenario: str, sources: list, out_dir: Path, *, spec=None,
                         with trace_span("save_checkpoint", step=model["run"].get("steps")):
                             write_outputs(out_dir, {"checkpoint": ("scenario_map.checkpoint.json",
                                           json.dumps(model, ensure_ascii=False, indent=2))})
+                            if on_checkpoint_saved is not None:
+                                on_checkpoint_saved(out_dir / "scenario_map.checkpoint.json")
 
                     research_deadline = time.monotonic() + max_seconds
                     model = run_agent(workspace, scenario, spec, client=client,

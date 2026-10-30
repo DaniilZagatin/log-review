@@ -1,6 +1,8 @@
 """One durable pipeline: Belka -> logging and changes -> metric definitions -> HTML."""
 from __future__ import annotations
 import hashlib
+import asyncio
+from datetime import datetime, timezone
 import html
 import json
 import math
@@ -13,6 +15,7 @@ from dataclasses import replace
 from .contracts import strict_json_loads
 from .logging_contracts import canonical
 from .map_input import MapView, load_map, load_hierarchy, read_regular
+from .product_state import verify_resume, record_artifact, ALLOWED_ARTIFACTS
 
 SCHEMA = 'scenario-product/1'
 
@@ -49,53 +52,103 @@ def _safe_destination(out, sources=()):
     return out
 
 
+class RunHalt(BaseException):
+    """Host control flow; model-level error recovery must never consume this signal."""
+    def __init__(self, category):
+        self.category = category
+        super().__init__(category)
+
+
 class RunBudget:
     def __init__(self, limit, seconds, manifest, save):
         if type(limit) is not int or limit < 1 or not math.isfinite(seconds) or seconds <= 0:
             raise ValueError('Positive finite request and time limits required')
         self.limit, self.deadline = limit, time.monotonic() + seconds
-        self.manifest, self.save = manifest, save
+        self.manifest, self._save, self.halted = manifest, save, None
+
+    def halt(self, category):
+        if self.halted is None: self.halted = RunHalt(category)
+        raise self.halted
+
+    def durable(self, action):
+        if self.halted is not None and self.halted.category == 'checkpoint_error':
+            raise self.halted
+        try:
+            return action()
+        except Exception:
+            self.halted = RunHalt('checkpoint_error')
+            raise self.halted from None
+
+    def persist(self):
+        return self.durable(self._save)
 
     def reserve(self, stage):
-        from .llm import LLMError
-        if len(self.manifest['requests']) >= self.limit:
-            raise LLMError('Product request budget exhausted', category='request_budget')
-        if time.monotonic() >= self.deadline:
-            raise LLMError('Product time budget exhausted', category='request_budget')
-        row = {'attempt': len(self.manifest['requests']) + 1, 'stage': stage, 'status': 'started'}
+        if self.halted is not None: raise self.halted
+        if len(self.manifest['requests']) >= self.limit: self.halt('request_budget')
+        if time.monotonic() >= self.deadline: self.halt('time_limit')
+        row = {'attempt': len(self.manifest['requests']) + 1, 'stage': stage, 'status': 'started',
+               'started_at': datetime.now(timezone.utc).isoformat()}
         self.manifest['requests'].append(row)
-        self.save()  # no network call if durable reservation fails
+        self.persist()
         return row
+
+    def sleep(self, seconds):
+        if self.halted is not None: raise self.halted
+        if time.monotonic() + seconds >= self.deadline: self.halt('time_limit')
+        time.sleep(seconds)
 
 
 class ProductTransport:
     def __init__(self, budget, timeout):
         self.budget, self.timeout, self.stage = budget, timeout, 'map'
 
-    def __call__(self, url, payload, headers, tls):
+    async def _request(self, url, payload, headers, tls):
         from .llm import LLMError, TransportResponse, MAX_RESPONSE_BYTES
         import httpx
-        row = self.budget.reserve(self.stage)
+        async with httpx.AsyncClient(verify=tls if tls is not None else True, follow_redirects=False,
+                                     timeout=self.timeout) as client:
+            async with client.stream('POST', url, json=payload, headers=headers) as response:
+                chunks, size = [], 0
+                async for chunk in response.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_RESPONSE_BYTES:
+                        raise LLMError('Response size limit exceeded', category='response_too_large')
+                    chunks.append(chunk)
+                return TransportResponse(response.status_code, b''.join(chunks))
+
+    async def _bounded(self, *args):
         remaining = self.budget.deadline - time.monotonic()
         try:
-            with httpx.Client(verify=tls if tls is not None else True, follow_redirects=False,
-                              timeout=min(self.timeout, max(.01, remaining))) as client:
-                with client.stream('POST', url, json=payload, headers=headers) as response:
-                    chunks, size = [], 0
-                    for chunk in response.iter_bytes():
-                        size += len(chunk)
-                        if size > MAX_RESPONSE_BYTES or time.monotonic() >= self.budget.deadline:
-                            raise LLMError('Response limit exceeded', category='request_budget')
-                        chunks.append(chunk)
-                    result = TransportResponse(response.status_code, b''.join(chunks))
+            return await asyncio.wait_for(self._request(*args), timeout=min(self.timeout, max(.001, remaining)))
+        except TimeoutError:
+            if remaining <= self.timeout: self.budget.halt('time_limit')
+            raise
+
+    def __call__(self, url, payload, headers, tls):
+        from .llm import LLMError
+        row = self.budget.reserve(self.stage)
+        row['request_sha256'] = _digest(payload)
+        self.budget.persist()
+        started = time.monotonic()
+        try:
+            result = asyncio.run(self._bounded(url, payload, headers, tls))
             row.update(status='received', http_status=result.status)
-        except Exception as exc:
-            row.update(status='failed', error_type=type(exc).__name__)
-            self.budget.save()
-            if isinstance(exc, LLMError):
-                raise
+            try:
+                body = strict_json_loads(result.body.decode('utf-8'))
+                row['usage'] = {k:v for k,v in (body.get('usage') or {}).items() if type(v) is int}
+            except (ValueError, AttributeError, TypeError):
+                pass
+        except (RunHalt, KeyboardInterrupt, Exception) as exc:
+            row.update(status='failed', error_type=type(exc).__name__, elapsed_seconds=round(time.monotonic()-started,6))
+            self.budget.persist()
+            if isinstance(exc, (RunHalt, KeyboardInterrupt)): raise
+            if isinstance(exc, TimeoutError) and time.monotonic() >= self.budget.deadline:
+                self.budget.halt('time_limit')
+            if isinstance(exc, LLMError): raise
             raise LLMError('Product transport failed', category='connection') from None
-        self.budget.save()
+        finally:
+            row['elapsed_seconds'] = round(time.monotonic() - started, 6)
+        self.budget.persist()
         return result
 
 
@@ -143,8 +196,11 @@ def _publish(out, manifest, logging=None, metrics=None, model_map=None, hierarch
     with temp.open('x', encoding='utf-8', newline='\n') as stream:
         stream.write(document)
     temp.replace(path)
+    manifest['artifact_hashes'] = {}
+    for name in ALLOWED_ARTIFACTS:
+        if (out / name).is_file(): record_artifact(manifest, out, name)
     _write(out / 'product_run.json', manifest)
-    names = ['product_run.json', 'report.html'] + [n for n in ('scenario_map.json', 'map_hierarchy.json', 'logging_review.json', 'metric_catalog.json') if (out / n).is_file()]
+    names = ['product_run.json', 'report.html'] + [n for n in ('scenario_map.json', 'map_hierarchy.json', 'logging_review.json', 'metric_catalog.json', 'logging_contracts.json') if (out / n).is_file()]
     sums = {name: hashlib.sha256((out / name).read_bytes()).hexdigest() for name in names}
     _write(out / 'product_checksums.json', sums)
     return {'status': manifest['status'], 'report': str(path), 'manifest': str(out / 'product_run.json'), 'interrupted': manifest.get('interrupted', False)}
@@ -172,7 +228,9 @@ def run_product(args, *, belka_runner=None, logging_model=None):
         if previous_dir.is_file(): previous_dir = previous_dir.parent
         previous = _read(previous_dir / 'product_run.json')
         if previous.get('schema_version') != SCHEMA: raise ValueError('Unsupported product checkpoint')
+        verify_resume(previous_dir, previous)
         sources = sources or previous['source_paths']
+    log_calls = list(args.log_call or (previous or {}).get('log_calls', []))
     if not sources: raise ValueError('At least one source directory or ZIP is required')
     if getattr(args, 'inventory_only', False) and not (getattr(args, 'map', None) or previous):
         raise ValueError('Inventory mode requires an existing map')
@@ -191,19 +249,27 @@ def run_product(args, *, belka_runner=None, logging_model=None):
                 'limits': {'max_requests': args.max_requests, 'max_seconds': args.max_seconds},
                 'stages': {k: {'status': 'pending'} for k in ('map', 'logging', 'changes', 'metrics')},
                 'model_config_hash': _digest(config.to_dict()) if config else 'inventory',
-                'semantic_verification': False}
-    def save(): _write(out / 'product_run.json', manifest)
-    budget = RunBudget(args.max_requests, args.max_seconds, manifest, save)
+                'semantic_verification': False, 'log_calls': log_calls, 'artifact_hashes': {}}
+    budget = RunBudget(args.max_requests, args.max_seconds, manifest, lambda: _write(out / 'product_run.json', manifest))
+    save = budget.persist
+    def published(path):
+        budget.durable(lambda: record_artifact(manifest, out, Path(path).relative_to(out).as_posix()))
+        save()
+    def checkpoint(data):
+        budget.durable(lambda: _write(out / 'logging_review.checkpoint.json', data))
+        published(out / 'logging_review.checkpoint.json')
     transport = ProductTransport(budget, args.model_timeout)
-    model = logging_model or (OpenAICompatibleModel(config, transport=transport) if config else None)
-    save()
+    model = logging_model or (OpenAICompatibleModel(config, transport=transport, sleeper=budget.sleep) if config else None)
+    try: save()
+    except RunHalt:
+        raise OSError('Product manifest could not be saved') from None
     map_data = hierarchy = logging_data = metrics = None
     stage = 'map'
     try:
         workspace = build_workspace(sources, out / '_sources')
         manifest['sources'] = workspace.sources
         from .map_input import snapshot_from_workspace
-        snapshot = snapshot_from_workspace(workspace, logging_calls=args.log_call)
+        snapshot = snapshot_from_workspace(workspace, logging_calls=log_calls)
         manifest['source_fingerprint'] = _digest(snapshot.fingerprints)
         if previous and previous['source_fingerprint'] != manifest['source_fingerprint']:
             raise ValueError('Source snapshot changed; start a new run instead of resuming')
@@ -212,7 +278,9 @@ def run_product(args, *, belka_runner=None, logging_model=None):
         prior_checkpoint = None
         if previous and (previous_dir / 'scenario_map.json').is_file():
             candidate = load_map(previous_dir / 'scenario_map.json')
-            if candidate.original['run'].get('stop_kind') == 'finish' or previous['stages']['map'].get('reused'):
+            regroup = (model is not None and candidate.original['run'].get('grouping_status') == 'cancelled'
+                       and (previous_dir / 'belka' / 'scenario_map.checkpoint.json').is_file())
+            if (candidate.original['run'].get('stop_kind') == 'finish' or previous['stages']['map'].get('reused')) and not regroup:
                 saved_map = str(previous_dir / 'scenario_map.json')
             elif (previous_dir / 'belka' / 'scenario_map.checkpoint.json').is_file():
                 from pko.scenario_map.checkpoint import load_checkpoint
@@ -244,18 +312,22 @@ def run_product(args, *, belka_runner=None, logging_model=None):
             map_data = (belka_runner or run_scenario)(scenario, sources, out / 'belka', spec=spec,
                 client=BelkaClient(model), prepared_workspace=workspace, max_steps=args.max_steps,
                 max_seconds=max(.01, budget.deadline - time.monotonic()), model_timeout=args.model_timeout,
-                resume_checkpoint=prior_checkpoint)
+                resume_checkpoint=prior_checkpoint, on_checkpoint_saved=published)
             view = MapView.from_dict(map_data)
             hierarchy, warnings = load_hierarchy(out / 'belka' / 'map_hierarchy.json', view)
             manifest['presentation_warnings'] = warnings
         _write(out / 'scenario_map.json', map_data)
-        if hierarchy is not None: _write(out / 'map_hierarchy.json', hierarchy)
+        if hierarchy is not None:
+            _write(out / 'map_hierarchy.json', hierarchy)
+            record_artifact(manifest, out, 'map_hierarchy.json')
+        record_artifact(manifest, out, 'scenario_map.json')
         manifest['scenario'] = scenario or map_data.get('scenario', {}).get('title', '')
         manifest['map_revision'] = view.revision
         manifest['stages']['map']['status'] = map_data['run']['status']; save()
-        if map_data['run'].get('grouping_status') == 'cancelled':
+        if not saved_map and map_data['run'].get('grouping_status') == 'cancelled':
             raise InterruptedError('Map grouping cancelled')
-        if map_data['run'].get('stop_kind') in ('cancelled', 'checkpoint_error'):
+        if map_data['run'].get('stop_kind') == 'checkpoint_error': budget.halt('checkpoint_error')
+        if not saved_map and map_data['run'].get('stop_kind') == 'cancelled':
             raise InterruptedError('Map stopped: ' + map_data['run']['stop_kind'])
         if not view.operation_ids: raise ValueError('Map has no actions to review')
         if time.monotonic() >= budget.deadline: raise TimeoutError('Product time budget exhausted')
@@ -265,16 +337,20 @@ def run_product(args, *, belka_runner=None, logging_model=None):
         if previous:
             prior_log = next((p for p in (previous_dir/'logging_review.json', previous_dir/'logging_review.checkpoint.json') if p.is_file()), None)
             if prior_log: resume = _read(prior_log)
-        contracts, _ = load_logging_contracts(Path(saved_map).parent if saved_map else out/'belka')
+        contracts, _ = load_logging_contracts(previous_dir if previous else Path(saved_map).parent if saved_map else out/'belka')
+        from .logging_contracts import CONTRACTS_SCHEMA
+        _write(out / 'logging_contracts.json', {'schema_version': CONTRACTS_SCHEMA, 'contracts': contracts})
+        published(out / 'logging_contracts.json')
         options = ReviewOptions(max_requests=max(1, args.max_requests - len(manifest['requests'])),
             request_chars=args.request_chars, max_navigation_turns=args.max_navigation_turns,
             max_context_lines=args.max_context_lines, stop_on_failed_repair=getattr(args, 'stop_on_failed_repair', False))
         logging_data = review_logging(view, snapshot, model, options=options,
             source_roots={s['id']: s['id'] for s in workspace.sources}, artifacts=Path(saved_map).parent if saved_map else out/'belka',
-            resume=resume, on_checkpoint=lambda data: _write(out/'logging_review.checkpoint.json', data), logging_contracts=contracts)
+            resume=resume, on_checkpoint=checkpoint, logging_contracts=contracts)
         logging_data['hierarchy'] = hierarchy
         logging_data['presentation_warnings'] = manifest.get('presentation_warnings', [])
         _write(out / 'logging_review.json', logging_data)
+        published(out / 'logging_review.json')
         manifest['stages']['logging']['status'] = logging_data['status']
         manifest['stages']['changes']['status'] = logging_data['status']; save()
         if logging_data.get('interrupted'): raise InterruptedError('Logging interrupted')
@@ -283,13 +359,16 @@ def run_product(args, *, belka_runner=None, logging_model=None):
         metrics = build_metrics(logging_data, model=model,
             max_requests=min(2, max(0, args.max_requests - len(manifest['requests']))), request_chars=args.request_chars)
         _write(out / 'metric_catalog.json', metrics)
+        published(out / 'metric_catalog.json')
         manifest['stages']['metrics']['status'] = metrics['status']
         manifest['status'] = 'partial' if any(s['status'] != 'completed' for s in manifest['stages'].values()) else 'completed'
-    except (KeyboardInterrupt, Exception) as exc:
+    except (RunHalt, KeyboardInterrupt, Exception) as exc:
+        if isinstance(exc, RunHalt) and exc.category == 'checkpoint_error':
+            raise OSError('Product persistence failed; preserved last durable checkpoint; no further model calls') from None
         # Never publish provider bodies/credentials or silently proceed after a failed stage.
         manifest['interrupted'] = isinstance(exc, (KeyboardInterrupt, InterruptedError))
         manifest['status'] = 'partial' if map_data else 'failed'
-        manifest['stop_reason'] = type(exc).__name__ + (': ' + str(exc) if isinstance(exc, (InterruptedError, TimeoutError)) else '')
+        manifest['stop_reason'] = (exc.category if isinstance(exc, RunHalt) else type(exc).__name__) + (': ' + str(exc) if isinstance(exc, (InterruptedError, TimeoutError)) else '')
         manifest['stages'][stage]['status'] = 'partial' if (map_data if stage == 'map' else logging_data) else 'failed'
         for state in manifest['stages'].values():
             if state['status'] == 'pending': state['status'] = 'skipped'
@@ -301,7 +380,7 @@ def export_product(run, out):
     source = Path(run)
     if source.is_file(): source = source.parent
     checksums = _read(source/'product_checksums.json')
-    allowed = {'product_run.json', 'report.html', 'scenario_map.json', 'map_hierarchy.json', 'logging_review.json', 'metric_catalog.json'}
+    allowed = {'product_run.json', 'report.html', 'scenario_map.json', 'map_hierarchy.json', 'logging_review.json', 'metric_catalog.json', 'logging_contracts.json'}
     if not {'product_run.json', 'report.html'} <= set(checksums) or set(checksums) - allowed:
         raise ValueError('Invalid product export manifest')
     for name, expected in checksums.items():

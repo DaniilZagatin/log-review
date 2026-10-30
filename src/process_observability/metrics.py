@@ -7,7 +7,7 @@ from copy import deepcopy
 import hashlib
 import json
 
-from .logging_contracts import LoggingReviewError, canonical, digest
+from .logging_contracts import LoggingReviewError, canonical, digest, text as public_text
 from .map_input import MapView
 
 SCHEMA = 'metric-catalog/1'
@@ -116,19 +116,34 @@ def _validate_proposal(reply, candidates):
     expected = {m['id']: m for m in candidates}
     if len(reply['metrics']) != len(expected): raise LoggingReviewError('Metric proposal must retain all candidate IDs')
     seen = set()
-    for metric in reply['metrics']:
+    result = deepcopy(reply['metrics'])
+    for metric in result:
         if type(metric) is not dict or metric.get('id') not in expected or metric['id'] in seen:
             raise LoggingReviewError('Unknown or duplicate metric ID')
         seen.add(metric['id']); base = expected[metric['id']]
         if set(metric) != set(base): raise LoggingReviewError('Unexpected metric fields')
-        for key in ('operation_ids', 'dependencies'):
+        for key in ('operation_ids', 'dependencies', 'counting_unit'):
             if metric[key] != base[key]: raise LoggingReviewError('Model cannot change fact references')
         for key in ('purpose', 'formula_text', *POLICIES):
             value = metric[key]
             if value is not None and (type(value) is not str or not value.strip() or len(value) > 8000):
                 raise LoggingReviewError('Metric definitions must be bounded strings or null')
+            if value is not None:
+                metric[key] = public_text(value, 'metric ' + key, maximum=8000)
         if not metric['purpose'] or not metric['formula_text']: raise LoggingReviewError('Metric purpose and formula are required')
-    return deepcopy(reply['metrics'])
+    return result
+
+
+def _readiness(metric, logging_data, facts):
+    blockers = ['Данные исполнения, идентификаторы экземпляров и полнота доставки не проверены',
+                'Формула и правила расчёта требуют согласования']
+    blockers.extend('Не определено: ' + POLICY_LABELS[key] for key in POLICIES if metric.get(key) is None)
+    if logging_data.get('status') != 'completed' or (logging_data['map'].get('run') or {}).get('status') != 'completed':
+        blockers.append('Карта или проверка логирования частичны')
+    dependencies = [f for f in facts if f['id'] in metric['dependencies']]
+    if any(f['logging_state'] != 'C' for f in dependencies):
+        blockers.append('Не все необходимые действия имеют достаточное покрытие логами по коду')
+    return {'primary': 'design_only', 'blockers': blockers}
 
 
 def build_metrics(logging_data, model=None, *, max_requests=2, request_chars=180000):
@@ -137,6 +152,8 @@ def build_metrics(logging_data, model=None, *, max_requests=2, request_chars=180
     validate_report(logging_data)
     if type(max_requests) is not int or not 0 <= max_requests <= 2:
         raise ValueError('Metric request budget must be between zero and two')
+    if type(request_chars) is not int or request_chars <= 0:
+        raise ValueError('Metric context limit must be a positive integer')
     facts = _facts(logging_data); candidates = _candidates(logging_data, facts)
     definitions = candidates; errors = []; requests = 0
     if model is not None and candidates:
@@ -148,6 +165,9 @@ def build_metrics(logging_data, model=None, *, max_requests=2, request_chars=180
             requests += 1
             try:
                 reply = model.complete_json(SYSTEM, user)
+            except OSError:
+                # A failed durable reservation/publication must stop the owning run.
+                raise
             except Exception as exc:
                 # LLMError also subclasses ValueError: keep provider errors outside validation.
                 errors = ['Запрос метрик не завершён: ' + type(exc).__name__]; break
@@ -159,15 +179,7 @@ def build_metrics(logging_data, model=None, *, max_requests=2, request_chars=180
                 packet['repair_errors'] = errors
         if not requests and not errors: errors = ['Бюджет запросов метрик исчерпан']
     for metric in definitions:
-        blockers = ['Данные исполнения, идентификаторы экземпляров и полнота доставки не проверены',
-                    'Формула и правила расчёта требуют согласования']
-        blockers.extend('Не определено: ' + POLICY_LABELS[key] for key in POLICIES if metric.get(key) is None)
-        if logging_data.get('status') != 'completed' or (logging_data['map'].get('run') or {}).get('status') != 'completed':
-            blockers.append('Карта или проверка логирования частичны')
-        dependencies = [f for f in facts if f['id'] in metric['dependencies']]
-        if any(f['logging_state'] != 'C' for f in dependencies):
-            blockers.append('Не все необходимые действия имеют достаточное покрытие логами по коду')
-        metric.update(readiness={'primary': 'design_only', 'blockers': blockers}, value=None,
+        metric.update(readiness=_readiness(metric, logging_data, facts), value=None,
                       value_reason='Статический анализ готовит определение; фактическое значение не вычислялось')
     result = {'schema_version': SCHEMA, 'map_revision': MapView.from_dict(logging_data['map']).revision,
               'logging_sha256': digest(logging_data), 'facts': facts, 'metrics': definitions,
@@ -183,6 +195,11 @@ def validate_metrics(catalog, logging_data):
         raise LoggingReviewError('Unknown metric catalog schema')
     if catalog.get('map_revision') != MapView.from_dict(logging_data['map']).revision or catalog.get('logging_sha256') != digest(logging_data):
         raise LoggingReviewError('Metric catalog belongs to another map or logging review')
+    if set(catalog) != {'schema_version', 'map_revision', 'logging_sha256', 'facts', 'metrics', 'status', 'errors',
+                        'model_requests', 'method', 'semantic_verification'}:
+        raise LoggingReviewError('Unexpected metric catalog fields')
+    if type(catalog.get('model_requests')) is not int or not 0 <= catalog['model_requests'] <= 2:
+        raise LoggingReviewError('Invalid metric request count')
     expected_facts = _facts(logging_data)
     if catalog.get('facts') != expected_facts: raise LoggingReviewError('Metric facts do not match source-bound logging review')
     candidates = _candidates(logging_data, expected_facts)
@@ -195,6 +212,10 @@ def validate_metrics(catalog, logging_data):
             raise LoggingReviewError('Invalid metric ID')
         if metric['id'] not in expected: raise LoggingReviewError('Unknown metric definition')
         ids.add(metric['id'])
+        if set(metric) != set(expected[metric['id']]) | {'readiness', 'value', 'value_reason'}:
+            raise LoggingReviewError('Unexpected metric definition fields')
+        if metric.get('counting_unit') != expected[metric['id']]['counting_unit']:
+            raise LoggingReviewError('Metric counting unit differs from the map-owned definition')
         if metric.get('dependencies') != expected[metric['id']]['dependencies']:
             raise LoggingReviewError('Metric dependencies changed')
         dependencies = metric.get('dependencies')
@@ -204,17 +225,24 @@ def validate_metrics(catalog, logging_data):
             raise LoggingReviewError('Metric operations disagree with its required facts')
         if metric.get('value') is not None: raise LoggingReviewError('Static metric catalogs cannot contain numeric values')
         readiness = metric.get('readiness')
-        if type(readiness) is not dict or readiness.get('primary') != 'design_only' or not readiness.get('blockers'):
+        if readiness != _readiness(metric, logging_data, expected_facts):
             raise LoggingReviewError('Metric calculation is not validated by static analysis')
         for key in ('purpose', 'formula_text', 'value_reason'):
             if type(metric.get(key)) is not str or not metric[key].strip(): raise LoggingReviewError('Incomplete metric definition')
+            if public_text(metric[key], 'metric ' + key, maximum=8000) != metric[key]:
+                raise LoggingReviewError('Metric public text requires redaction')
         for key in POLICIES:
             if key not in metric or (metric[key] is not None and (type(metric[key]) is not str or not metric[key].strip())):
                 raise LoggingReviewError('Invalid metric policy')
+            if metric[key] is not None and public_text(metric[key], 'metric ' + key, maximum=8000) != metric[key]:
+                raise LoggingReviewError('Metric policy requires redaction')
     if type(catalog.get('metrics')) is not list or catalog.get('status') not in ('completed', 'partial'):
         raise LoggingReviewError('Invalid metric catalog state')
     if type(catalog.get('errors')) is not list or any(type(e) is not str for e in catalog['errors']):
         raise LoggingReviewError('Invalid metric diagnostics')
+    for error in catalog['errors']:
+        if public_text(error, 'metric diagnostic', maximum=8000) != error:
+            raise LoggingReviewError('Metric diagnostic requires redaction')
     if catalog['status'] != ('partial' if catalog['errors'] else 'completed'):
         raise LoggingReviewError('Metric status disagrees with diagnostics')
     if catalog.get('method') not in ('model_proposal', 'template_proposal') or catalog.get('semantic_verification') is not False:

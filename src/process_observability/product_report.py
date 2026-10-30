@@ -4,7 +4,7 @@ import hashlib
 import html
 from pathlib import Path
 
-from .logging_contracts import LoggingReviewError, canonical
+from .logging_contracts import LoggingReviewError, canonical, safe_public
 from . import logging_report as logging
 from .map_presentation import EMBED_HEADER_SLOT, EMBED_PANELS_SLOT, scenario_map_parts
 from .metrics import POLICIES, validate_metrics
@@ -16,7 +16,7 @@ STATES = {'pending': 'ожидает запуска', 'running': 'выполня
           'partial': 'частичный результат', 'failed': 'ошибка', 'skipped': 'пропущен',
           'cancelled': 'остановлен пользователем', 'not_requested': 'не запускался'}
 STAGES = {'map': 'Карта', 'belka': 'Карта', 'logging': 'Логирование', 'improvements': 'Доработки',
-          'metrics': 'Метрики', 'report': 'HTML'}
+          'metrics': 'Метрики', 'changes': 'Доработки', 'report': 'HTML'}
 CSS = '''
 .product-status{margin:8px 0;padding:10px 14px;background:var(--bg-subtle);border-radius:var(--radius-md);font-size:13px}
 .product-status p{margin:3px 0;overflow-wrap:anywhere}.product-status ul{display:flex;flex-wrap:wrap;gap:8px 24px;margin:6px 0;padding-left:18px}
@@ -59,7 +59,7 @@ def _e(value):
 
 
 def _status(manifest, map_data):
-    manifest = manifest or {}; scenario = (map_data or {}).get('scenario') or {}
+    manifest = safe_public(manifest or {}); scenario = (map_data or {}).get('scenario') or {}
     stages = manifest.get('stages') or {}
     if type(stages) is not dict: stages = {}
     parts = []
@@ -75,6 +75,28 @@ def _status(manifest, map_data):
             '<p>Единица экземпляра: ' + _e(scenario.get('instance_unit') or 'не установлена') + '</p>'
             + ('<ul>' + ''.join(parts) + '</ul>' if parts else '')
             + ('<p>' + _e(reason) + '</p>' if reason else '') + '</section>')
+
+
+def _public_manifest(manifest, logging_data=None, metrics=None):
+    """Render observed stage states; metadata cannot upgrade an incomplete artifact."""
+    result = safe_public(deepcopy(manifest or {}))
+    if logging_data is not None:
+        observed = {'map': (logging_data['map'].get('run') or {}).get('status', 'partial'),
+                    'logging': logging_data['status'], 'changes': logging_data['status']}
+        if metrics is not None: observed['metrics'] = metrics['status']
+        stages = result.get('stages')
+        if type(stages) is not dict: stages = {}
+        for key, status in observed.items():
+            row = stages.get(key)
+            row = dict(row) if type(row) is dict else {}
+            row['status'] = status
+            stages[key] = row
+        result['stages'] = stages
+        if not result.get('status'): result['status'] = 'completed'
+        if any(status != 'completed' for status in observed.values()) and result.get('status') == 'completed':
+            result['status'] = 'partial'
+            result.setdefault('reason', 'Часть результатов не завершена; состояния определены по сохранённым артефактам')
+    return result
 
 
 def _metric_tab():
@@ -116,6 +138,7 @@ def _document(parts, body, scripts):
 def build_product_html(logging_data, metrics, manifest=None):
     view = logging.validate_report(logging_data)
     validate_metrics(metrics, logging_data)
+    manifest = _public_manifest(manifest, logging_data, metrics)
     model = logging_data['map']
     hierarchy, notes = logging._presentation_hierarchy(logging_data.get('hierarchy'), model)
     parts = scenario_map_parts(model, hierarchy, overlay=logging.logging_overlay(logging_data, view), embedded=True)
@@ -147,6 +170,7 @@ def build_pending_html(map_data=None, hierarchy=None, manifest=None):
 
 def write_product_report(logging_data, metrics, output, manifest=None):
     """Export to a new portable directory; all input objects remain unchanged."""
+    manifest = _public_manifest(manifest, logging_data, metrics)
     page = build_product_html(logging_data, metrics, manifest)
     output = Path(output).absolute()
     if output.exists() or any(p.is_symlink() for p in (output, *output.parents)):

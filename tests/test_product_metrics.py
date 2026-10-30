@@ -110,3 +110,52 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(len(repeated), 1)
         self.assertIn('технические попытки', repeated[0]['repeat_policy'])
         self.assertIsNone(repeated[0]['value'])
+
+    def test_storage_failure_escapes_without_repair(self):
+        class Storage:
+            count = 0
+            def complete_json(self, system, user):
+                self.count += 1
+                raise OSError('checkpoint failed')
+        model = Storage()
+        with self.assertRaises(OSError): build_metrics(fixture(), model)
+        self.assertEqual(model.count, 1)
+
+    def test_private_fields_or_edited_host_blockers_are_rejected(self):
+        data = fixture(); original = build_metrics(data)
+        for change in ('top_reasoning', 'metric_reasoning', 'prose_reasoning', 'blockers', 'unit'):
+            catalog = deepcopy(original)
+            if change == 'top_reasoning': catalog['reasoning_content'] = 'private'
+            elif change == 'metric_reasoning': catalog['metrics'][0]['thinking'] = 'private'
+            elif change == 'prose_reasoning': catalog['metrics'][0]['purpose'] = '<think>private</think>'
+            elif change == 'blockers': catalog['metrics'][0]['readiness']['blockers'] = ['Just a warning']
+            else: catalog['metrics'][0]['counting_unit'] = 'Другая единица'
+            with self.subTest(change=change), self.assertRaises(ValueError): validate_metrics(catalog, data)
+
+    def test_private_reasoning_reply_is_not_saved_or_repeated_to_model(self):
+        import json
+        class Model:
+            calls = []
+            def complete_json(self, system, user):
+                self.calls.append(user)
+                rows = json.loads(user)['candidates']
+                rows[0]['purpose'] = '<think>PRIVATE_SECRET_MARKER</think>'
+                return {'metrics': rows}
+        model = Model(); result = build_metrics(fixture(), model)
+        self.assertEqual(len(model.calls), 2)
+        self.assertNotIn('PRIVATE_SECRET_MARKER', json.dumps(result))
+        self.assertNotIn('PRIVATE_SECRET_MARKER', model.calls[1])
+        self.assertEqual(result['status'], 'partial')
+
+    def test_model_cannot_invent_an_unknown_counting_unit(self):
+        import json
+        data = fixture(); data['map']['scenario']['instance_unit'] = None
+        data['map_content_sha256'] = MapView.from_dict(data['map']).sha256
+        data['map_revision'] = MapView.from_dict(data['map']).revision
+        class Model:
+            def complete_json(self, system, user):
+                rows = json.loads(user)['candidates']; rows[0]['counting_unit'] = 'Платёж'
+                return {'metrics': rows}
+        result = build_metrics(data, Model())
+        self.assertEqual(result['status'], 'partial')
+        self.assertIsNone(result['metrics'][0]['counting_unit'])
