@@ -255,7 +255,10 @@ class OperationMethodologyQualityTests(unittest.TestCase):
         ref={'path':'source-1/Manager.java','line_start':1,'line_end':5}
         node=self.node(evidence=[ref])
         result=self.state.dispatch('save_research_task',self.task_args(parent,evidence=[ref],status='mapped',node_ids=[node],resolution='Крупный родительский шаг'))
-        self.assertFalse(result['ok']);self.assertIn('дочерние',result['error'])
+        self.assertTrue(result['ok'], result)
+        coverage=next(row for row in self.state.research_coverage()['tasks'] if row['task_id']==parent['id'])
+        self.assertEqual(coverage['status'], 'partial')
+        self.assertTrue(coverage['dependency_ids'])
 
     def test_parent_builder_maps_through_verified_children_without_wrapper_node(self):
         tasks=self.parent_tasks();parent=tasks['Manager.createAgent']
@@ -270,9 +273,11 @@ class OperationMethodologyQualityTests(unittest.TestCase):
             status='mapped',child_task_ids=child_ids,resolution='Исполнение раскрыто дочерними операциями'))
         self.assertTrue(result['ok'],result)
         mapped=next(t for t in self.state.model['research_tasks'] if t['id']==parent['id'])
-        self.assertEqual(set(mapped['node_ids']),set(node_ids));self.assertEqual(len(self.state.model['nodes']),2)
+        self.assertEqual(mapped['node_ids'], []);self.assertEqual(len(self.state.model['nodes']),2)
+        self.assertEqual(set(mapped['child_task_ids']), set(child_ids))
         self.state.model['research_tasks'][1]['status']='analyzed'
-        self.assertTrue(any(parent['id'] in e for e in self.state.quality_errors()))
+        coverage=next(row for row in self.state.research_coverage()['tasks'] if row['task_id']==parent['id'])
+        self.assertEqual(coverage['status'], 'partial')
 
     def test_same_named_class_in_other_package_cannot_close_dependency(self):
         w=workspace(1)

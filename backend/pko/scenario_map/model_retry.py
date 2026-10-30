@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 import math
+import json
 import random
 import ssl
 import time
@@ -64,8 +65,11 @@ def retry_delay(error: Exception, attempt: int) -> float | None:
     return delay
 
 
-def call_model(client, messages, *, deadline: float, before_retry=None, before_attempt=None, on_event=None, **kwargs):
+def call_model(client, messages, *, deadline: float, before_retry=None, before_attempt=None,
+               on_event=None, recovery_max_tokens: int | None = None, context_window: int | None = None, **kwargs):
     """Retry one unchanged conversation turn inside its existing trace and budget."""
+    recovered = False
+    options = dict(kwargs)
     for attempt in range(1, MAX_MODEL_ATTEMPTS + 1):
         if time.monotonic() >= deadline:
             raise ModelDeadlineExceeded('Достигнут лимит времени исследования при обращении к модели.')
@@ -75,8 +79,53 @@ def call_model(client, messages, *, deadline: float, before_retry=None, before_a
             before_attempt()
         try:
             with trace_span('model_attempt', attempt=attempt, max_attempts=MAX_MODEL_ATTEMPTS):
-                return client.chat(messages, **kwargs)
+                result = client.chat(messages, **options)
+                reason = getattr(result, 'finish_reason', '')
+                if hasattr(result, 'text') and not result.text and not getattr(result, 'tool_calls', None):
+                    error = LlmError('Модель вернула пустой ответ.')
+                    error.finish_reason = reason or 'stop'
+                    error.usage = getattr(result, 'usage', {})
+                    raise error
+                invalid_call = False
+                for call in getattr(result, 'tool_calls', None) or []:
+                    try:
+                        arguments = (call.get('function') or {}).get('arguments', '{}')
+                        parsed = json.loads(arguments) if isinstance(arguments, str) else arguments
+                        if not isinstance(parsed, dict):
+                            invalid_call = True
+                    except (TypeError, ValueError):
+                        invalid_call = True
+                if reason == 'length' or invalid_call:
+                    error = LlmError('Ответ модели оборван или содержит неполный вызов инструмента.')
+                    error.finish_reason = 'length' if reason == 'length' else 'invalid_tool_arguments'
+                    error.usage = getattr(result, 'usage', {})
+                    raise error
+                return result
         except Exception as exc:
+            # One recovery shares the four physical attempts with transport retries.
+            # Rejected output never enters history and no proposed tool is executed.
+            reason = getattr(exc, 'finish_reason', None)
+            can_recover = (isinstance(exc, LlmError) and reason in ('length', 'stop', 'invalid_tool_arguments')
+                           and recovery_max_tokens is not None and not recovered
+                           and attempt < MAX_MODEL_ATTEMPTS)
+            if can_recover:
+                current = int(options.get('max_tokens') or 0)
+                target = min(recovery_max_tokens, max(current * 2, current + 1024))
+                usage = getattr(exc, 'usage', {}) or {}
+                if context_window and isinstance(usage, dict) and isinstance(usage.get('prompt_tokens'), int):
+                    target = min(target, context_window - usage['prompt_tokens'] - 512)
+                if target > 0 and (target > current or (target == current and reason != 'length')):
+                    recovered = True
+                    options['max_tokens'] = target
+                    if before_retry:
+                        before_retry()
+                    data = {'attempt': attempt, 'next_attempt': attempt + 1,
+                            'finish_reason': reason, 'max_tokens': target,
+                            'max_attempts': MAX_MODEL_ATTEMPTS}
+                    record('model_output_recovery', **data)
+                    if on_event:
+                        on_event('model_output_recovery', data)
+                    continue
             delay = retry_delay(exc, attempt)
             if delay is None:
                 raise

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import OrderedDict
 from copy import deepcopy
 from typing import Any
@@ -70,6 +71,86 @@ class ResearchMemory:
     @property
     def cache_chars(self) -> int:
         return self._cache_chars
+
+    def checkpoint(self) -> dict:
+        """Private persistence format; request digests never enter public recall."""
+        return {
+            "version": 1,
+            "limits": {"max_observations": self._max_observations,
+                       "max_cache_chars": self._max_cache_chars,
+                       "max_payload_chars": self._max_payload_chars},
+            "sequence": self._sequence, "evicted_metadata_count": self._evicted_metadata_count,
+            "records": [{"request_digest": key, "record": deepcopy(record)}
+                        for key, record in self._records.items()],
+            "cache": [{"observation_id": key, "payload": json.loads(value)}
+                      for key, value in self._cache.items()],
+        }
+
+    @classmethod
+    def from_checkpoint(cls, value: dict) -> "ResearchMemory":
+        """Restore a bounded public cache without issuing an observation again."""
+        if not isinstance(value, dict) or set(value) != {
+                "version", "limits", "sequence", "evicted_metadata_count", "records", "cache"} or value['version'] != 1:
+            raise ValueError("Unsupported research-memory checkpoint")
+        limits = value['limits']
+        caps = {"max_observations": MAX_OBSERVATIONS, "max_cache_chars": MAX_CACHE_CHARS,
+                "max_payload_chars": MAX_PAYLOAD_CHARS}
+        if (not isinstance(limits, dict) or set(limits) != set(caps) or
+                any(type(limits[k]) is not int or not 0 <= limits[k] <= cap for k, cap in caps.items())):
+            raise ValueError("Invalid research-memory checkpoint limits")
+        result = cls(**limits)
+        for key in ('sequence', 'evicted_metadata_count'):
+            if type(value[key]) is not int or not 0 <= value[key] <= 1_000_000_000:
+                raise ValueError("Invalid research-memory counter")
+        records, cache = value['records'], value['cache']
+        if not isinstance(records, list) or len(records) > result._max_observations or not isinstance(cache, list) or len(cache) > len(records):
+            raise ValueError("Research-memory checkpoint exceeds limits")
+        identifiers = set()
+        fields = {'observation_id', 'name', 'arguments', 'ok', 'preview', 'repeat_count', 'content_truncated'}
+        for row in records:
+            if not isinstance(row, dict) or set(row) != {'request_digest', 'record'}:
+                raise ValueError("Invalid observation record")
+            key, record = row['request_digest'], row['record']
+            if not isinstance(key, str) or not re.fullmatch(r'[a-f0-9]{64}', key) or key in result._records:
+                raise ValueError("Invalid observation identity")
+            if not isinstance(record, dict) or not fields <= set(record) or set(record) - fields - {'arguments_truncated'}:
+                raise ValueError("Invalid observation metadata")
+            identifier = record['observation_id']
+            if (not isinstance(identifier, str) or not re.fullmatch(r'obs-[1-9][0-9]*', identifier) or
+                    int(identifier[4:]) > value['sequence'] or identifier in identifiers):
+                raise ValueError("Invalid observation sequence")
+            if (not isinstance(record['name'], str) or len(record['name']) > 120 or
+                    not isinstance(record['arguments'], dict) or len(_serialize(record['arguments'])) > MAX_ARGUMENT_CHARS or
+                    not isinstance(record['preview'], str) or len(record['preview']) > MAX_PREVIEW_CHARS or
+                    type(record['repeat_count']) is not int or record['repeat_count'] < 0 or
+                    any(type(record[k]) is not bool for k in ('ok', 'content_truncated'))):
+                raise ValueError("Invalid observation metadata values")
+            identifiers.add(identifier)
+            public = sanitize(record)
+            # Preview is compact JSON rendered as a string. Preserve its bytes
+            # when a second sanitization only changes JSON whitespace.
+            try:
+                if json.loads(public['preview']) == json.loads(record['preview']):
+                    public['preview'] = record['preview']
+            except (ValueError, TypeError):
+                pass
+            result._records[key] = public
+        for row in cache:
+            if not isinstance(row, dict) or set(row) != {'observation_id', 'payload'}:
+                raise ValueError("Invalid observation cache entry")
+            identifier = row['observation_id']
+            if identifier not in identifiers or identifier in result._cache or not isinstance(row['payload'], dict):
+                raise ValueError("Invalid cached observation reference")
+            serialized = _serialize(sanitize(row['payload']))
+            if len(serialized) > result._max_payload_chars:
+                raise ValueError("Cached observation exceeds payload limit")
+            result._cache[identifier] = serialized
+            result._cache_chars += len(serialized)
+        if result._cache_chars > result._max_cache_chars:
+            raise ValueError("Research-memory checkpoint exceeds cache budget")
+        result._sequence = value['sequence']
+        result._evicted_metadata_count = value['evicted_metadata_count']
+        return result
 
     @property
     def evicted_metadata_count(self) -> int:

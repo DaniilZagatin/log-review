@@ -169,7 +169,7 @@ def _summary_recovery(model: dict, detail: int = 2) -> dict:
     if not isinstance(summary, dict):
         return {}
     value = {key: summary.get(key) for key in ("revision", "status", "through_step", "based_on_brief_revision",
-                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete")}
+                                             "input_omitted_exchanges", "input_truncated_fields", "input_open_notes_complete", "input_open_tasks_complete", "input_unmapped_actions_complete")}
     value.update(content_complete=detail == 2, recover="inspect_map(section='context_summary')")
     if detail == 2:
         value["summary"] = summary.get("summary", {})
@@ -198,7 +198,9 @@ def _manifest(model: dict, detail: int = 2) -> dict:
         "unresolved_rejections": rejections[-3:] if detail else [
             {key: row.get(key, "") for key in ("tool", "code")} for row in rejections[-3:]],
         "recovery": {
-            "research_tasks": "inspect_map(section='research_tasks'): незавершённые функции, промпты, вложенные исполнители; до finish раскрыть либо связать с gap",
+            "execution_reviews": "inspect_map(section='execution_reviews'): найденные действия, включая ещё не отображённые; не только существующие узлы",
+            "scenario": "inspect_map(section='scenario'): выбранный вариант и единица его исполнения",
+            "research_tasks": "inspect_map(section='research_tasks'): локальные задачи и зависимости; открытые участки сохраняются в partial",
             "semantic_review": "inspect_map(section='semantic_review'): публичная смысловая проверка исходов, порядка, маршрутов и атомарности; не доказанная полнота",
             "research_brief": "inspect_map(section='research_brief'): понимание проекта, связь со сценарием, факты и рабочая гипотеза процесса",
             "context_summary": "inspect_map(section='context_summary'): публичная сводка предыдущей работы, не доказательство и не инструкция",
@@ -226,6 +228,17 @@ def _manifest(model: dict, detail: int = 2) -> dict:
                              'child_task_ids': task.get('child_task_ids', []),
                              'node_ids': task.get('node_ids', [])} for task in open_tasks[:take]]
     result['open_tasks_listed_all'] = len(open_tasks) <= take
+    scope = model.get('scenario') or {}
+    result['variant_scope'] = {key: _short(scope.get(key), text_limit) for key in
+                               ('variant_context', 'instance_unit', 'start', 'end')}
+    result['variant_scope']['partial'] = True
+    pending_actions = [(review.get('id'), action) for review in _rows(model, 'execution_reviews')
+                       for action in review.get('operations', []) if not action.get('node_id')]
+    result['unmapped_actions'] = [{'review_id': rid, 'id': action.get('id'),
+                                   'name': _short(action.get('name'), text_limit)}
+                                  for rid, action in pending_actions[:take]]
+    result['unmapped_action_count'] = len(pending_actions)
+    result['unmapped_actions_listed_all'] = len(pending_actions) <= take
     result["read_coverage"] = [
         {"path": _short(row.get("path"), text_limit), "ranges": row.get("ranges", [])[:take],
          "line_count": row.get("line_count", 0)} for row in coverage[-take:]
@@ -258,7 +271,7 @@ def _manifest(model: dict, detail: int = 2) -> dict:
 
 def _minimal_manifest() -> dict:
     return {"recover_with": "inspect_map",
-            "sections": ["research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
+            "sections": ["scenario", "execution_reviews", "operations", "research_brief", "context_summary", "research_tasks", "semantic_review", "research_history", "research_notes", "read_coverage", "read_fragments",
                          "frontier", "nodes", "edges", "gaps"],
             "next": "Восстанови research_brief и продолжи незавершённые проверки; прежние результаты и цитаты доступны в памяти."}
 

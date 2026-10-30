@@ -34,6 +34,14 @@ class ScenarioMapTests(unittest.TestCase):
     def setUp(self):
         self.state = MapState(workspace(), "Выпуск дебетовой карты действующему клиенту")
 
+    def assert_partial_with(self, response, *diagnostics):
+        self.assertTrue(response['ok'], response)
+        self.assertEqual(response['status'], 'partial')
+        validation = self.state.snapshot()['validation']
+        self.assertEqual(validation['structural_issues'], [])
+        for text in diagnostics:
+            self.assertTrue(any(text in issue for issue in validation['coverage_issues']), validation)
+
     def good(self, tool_name, **args):
         if tool_name in ('upsert_step', 'upsert_transition'):
             args = explain_args(args)
@@ -153,8 +161,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.good('upsert_step', **{**node, 'outcome': 'unknown'})
         self.review_current_operations()
         response = self.state.dispatch('finish', {'summary': 'Исследованы переданные источники'})
-        self.assertFalse(response['ok'])
-        self.assertIn('бизнес-исход конечной операции не установлен', response['error'])
+        self.assert_partial_with(response, 'бизнес-исход конечной операции не установлен')
         self.good('add_gap', description='Не установлен итог получения результата', node_ids=[first], evidence=self.cite())
         self.assertTrue(any('бизнес-исход конечной операции' in error for error in self.state.quality_errors()),
                         'An unrelated gap must not stand in for the terminal outcome')
@@ -216,11 +223,7 @@ class ScenarioMapTests(unittest.TestCase):
     def test_finish_requires_scope_sources_and_boundaries(self):
         self.node(self.system())
         response = self.state.dispatch("finish", {"summary": "Исследовано"})
-        self.assertFalse(response["ok"])
-        self.assertIn("scenario.start", response["error"])
-        self.assertIn("entry_operation_ids", response["error"])
-        self.assertIn("Не рассмотрены источники", response["error"])
-        self.assertEqual(self.state.model["run"]["status"], "running")
+        self.assert_partial_with(response, 'scenario.start', 'entry_operation_ids', 'Не рассмотрены источники')
 
     def test_completed_only_means_completed_supplied_materials(self):
         self.complete_small_map()
@@ -246,8 +249,7 @@ class ScenarioMapTests(unittest.TestCase):
         other_end = self.node(system, "end")
         self.edge(other_start, other_end)
         result = self.state.dispatch("finish", {"summary": "Исследовано"})
-        self.assertFalse(result["ok"])
-        self.assertIn("Несвязанный фрагмент", result["error"])
+        self.assert_partial_with(result, 'Несвязанный фрагмент')
         self.good("add_gap", description="Связь найденного фрагмента с основным сценарием не установлена",
                   node_ids=[other_start, other_end])
         self.assertEqual(self.good("finish", summary="Связь фрагмента неизвестна")["status"], "partial")
@@ -257,9 +259,9 @@ class ScenarioMapTests(unittest.TestCase):
         last = self.state.model["edges"][0]["target"]
         existing = self.state.model["edges"][0]["id"]
         self.good("upsert_transition", id=existing, source=first, target=last, kind="sequence", evidence_status="unknown")
-        self.assertFalse(self.state.dispatch("finish", {"summary": "Исследовано"})["ok"])
+        self.assert_partial_with(self.state.dispatch("finish", {"summary": "Исследовано"}), 'неизвестный переход требует gap')
         self.good("add_gap", description="Не найден вызов", node_ids=[first])
-        self.assertFalse(self.state.dispatch("finish", {"summary": "Исследовано"})["ok"])
+        self.assert_partial_with(self.state.dispatch("finish", {"summary": "Исследовано"}), 'неизвестный переход требует gap')
         self.good("add_gap", description="Нужна реализация перехода", node_ids=[first, last])
         self.assertEqual(self.good("finish", summary="Переход не подтверждён")["status"], "partial")
 
@@ -303,7 +305,8 @@ class ScenarioMapTests(unittest.TestCase):
 
     def test_tool_contract_lists_all_mutation_handlers(self):
         names = [tool["function"]["name"] for tool in TOOLS]
-        self.assertEqual(len(set(names)), 13)
+        self.assertEqual(len(set(names)), 14)
+        self.assertIn('patch_fragment', names)
         self.assertIn("save_research_brief", names)
         self.assertIn("save_research_note", names)
         self.assertIn("inspect_map", names)
@@ -360,8 +363,7 @@ class ScenarioMapTests(unittest.TestCase):
     def test_finish_rejects_coarse_map_without_execution_inventory(self):
         self.complete_small_map()
         response = self.state.dispatch("finish", {"summary": "Общий шаг обработан"})
-        self.assertFalse(response["ok"])
-        self.assertIn("review_execution", response["error"])
+        self.assert_partial_with(response, 'review_execution')
         self.assertEqual(self.state.snapshot()["detail_review"]["status"], "pending")
 
     def test_two_atomic_effects_cannot_be_hidden_in_one_map_node(self):
@@ -385,8 +387,7 @@ class ScenarioMapTests(unittest.TestCase):
         self.edge(decision, last, "branch", condition="Получен отказ")
         self.good("review_execution", **self.review_payload(system, [action]))
         rejected = self.state.dispatch("finish", {"summary": "Проверка не раскрыта"})
-        self.assertFalse(rejected["ok"])
-        self.assertIn(f"{decision}: операция не сопоставлена", rejected["error"])
+        self.assert_partial_with(rejected, f"{decision}: операция не сопоставлена")
         self.review_current_operations()
         self.assertTrue(self.state.dispatch("finish", {"summary": "Проверка показана отдельно"})["ok"])
         detail = self.state.snapshot()["detail_review"]
@@ -441,8 +442,7 @@ class ScenarioMapTests(unittest.TestCase):
         updated["description"] = "Уточнённое действие по коду"
         self.good("upsert_step", **updated)
         response = self.state.dispatch("finish", {"summary": "Уточнена карта"})
-        self.assertFalse(response["ok"])
-        self.assertIn("изменена после обзора", response["error"])
+        self.assert_partial_with(response, 'изменена после обзора')
         updated_review = self.good("review_execution", **self.review_payload(system))
         self.assertEqual(updated_review["operations"][0]["id"], identifier)
         self.assertTrue(self.state.dispatch("finish", {"summary": "Обзор обновлён"})["ok"])
@@ -466,8 +466,7 @@ class ScenarioMapTests(unittest.TestCase):
         edge["condition"] = "Только после подтверждения заявки"
         self.good("upsert_transition", **edge)
         result = self.state.dispatch("finish", {"summary": "Уточнён порядок исполнения"})
-        self.assertFalse(result["ok"])
-        self.assertIn(f"переход {edge['id']} изменён после обзора", result["error"])
+        self.assert_partial_with(result, f"переход {edge['id']} изменён после обзора")
         self.good("review_execution", **self.review_payload(system))
         self.assertTrue(self.state.dispatch("finish", {"summary": "Обзор обновлён"})["ok"])
 

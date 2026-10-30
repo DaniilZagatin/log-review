@@ -15,6 +15,7 @@ from typing import Any
 from pko.render.dpss_theme import embedded_fonts
 from pko.render.horizon_theme import horizon_tokens
 from pko.stages.contracts import validate_hierarchy
+from pko.stages.inputs import grouping_stage, OPERATIONS_STAGE
 
 
 def _script_json(value: Any) -> str:
@@ -22,6 +23,88 @@ def _script_json(value: Any) -> str:
             .replace("&", "\\u0026").replace("<", "\\u003c")
             .replace(">", "\\u003e").replace("\u2028", "\\u2028")
             .replace("\u2029", "\\u2029"))
+
+
+def _action_terms(template: str) -> str:
+    """Translate static presentation only, never the user's graph data."""
+    replacements = (
+        ('Каждая операция', 'Каждое действие'), ('Выбрана операция', 'Выбрано действие'),
+        ('отдельная операция', 'отдельное действие'), ('следующих операций', 'следующих действий'),
+        ('исходной операции', 'исходного действия'), ('выбранной операции', 'выбранного действия'),
+        ('конечной операции', 'конечного действия'), ('этой операции', 'этого действия'),
+        ('новой методологии атомарных операций', 'методологии действий'),
+        ('атомарных операций', 'действий'), ('атомарной операции', 'действия'),
+        ('Выполняется операция', 'Выполняется действие'),
+        ('Атомарные операции', 'Действия'), ('атомарные операции', 'действия'),
+        ('Атомарная операция', 'Действие'), ('атомарная операция', 'действие'),
+        ('операциями', 'действиями'), ('операциях', 'действиях'), ('операциям', 'действиям'),
+        ('операцией', 'действием'), ('операцию', 'действие'), ('операций', 'действий'),
+        ('операции', 'действия'), ('операция', 'действие'),
+        ('Операций', 'Действий'), ('Операции', 'Действия'), ('Операция', 'Действие'),
+        ('бизнес-этапами', 'бизнес-операциями'), ('бизнес-этапов', 'бизнес-операций'),
+        ('бизнес-этапы', 'бизнес-операции'), ('Бизнес-этапы', 'Бизнес-операции'),
+        ('бизнес-этапа', 'бизнес-операции'), ('бизнес-этап', 'бизнес-операция'),
+        ('Бизнес-этап', 'Бизнес-операция'), ('этапами', 'операциями'), ('этапах', 'операциях'),
+        ('этапам', 'операциям'), ('этапов', 'операций'), ('этапом', 'операцией'),
+        ('этапу', 'операции'), ('этапа', 'операции'),
+        ('этапе', 'операции'), ('этапы', 'операции'), ('этап', 'операция'),
+        ('Этапы', 'Операции'), ('Этап', 'Операция'),
+        ('Выбрать операция', 'Выбрать операцию'), ('выберите операция', 'выберите операцию'),
+        ('БИЗНЕС-ЭТАП', 'БИЗНЕС-ОПЕРАЦИЯ'),
+        ('Выбран бизнес-операция', 'Выбрана бизнес-операция'),
+        ('Операция служит', 'Бизнес-операция служит'),
+        ('Операция предложен', 'Бизнес-операция предложена'),
+        ('операция показан', 'операция показана'), ('Операция показан', 'Операция показана'),
+        ('одним входом показан', 'одним входом показана'),
+        ('несколькими входами показан', 'несколькими входами показана'),
+        ('Почему операция показан', 'Почему операция показана'),
+        ('Свернуть операция', 'Свернуть операцию'), ('Показать операция', 'Показать операцию'),
+        ('Входы в операция', 'Входы в операцию'),
+        ('» раскрыт', '» раскрыта'), ('» свёрнут', '» свёрнута'),
+        ('условие которой выполнено', 'условие которого выполнено'),
+        ('выделяет его действия', 'выделяет её действия'),
+        ('раскрывает его действия', 'раскрывает её действия'),
+        ('выбор действия — все пути к ней и после неё', 'выбор действия — все пути к нему и после него'),
+        ('id="stage-label">Операция</span>', 'id="stage-label">Бизнес-операция</span>'),
+        ('Все операции', 'Все бизнес-операции'), ('Операции не заданы', 'Бизнес-операции не заданы'),
+    )
+    for before, after in replacements:
+        template = template.replace(before, after)
+    return template
+
+
+def _lifecycle_summary(model: dict, hierarchy: dict | None) -> str:
+    run, validation = model.get('run') or {}, model.get('validation') or {}
+    stop = run.get('stop_kind')
+    emergency = stop in ('error', 'checkpoint_error') or run.get('status') == 'failed'
+    labels = {'finish': 'Исследование завершено', 'time_limit': 'Остановлено по времени',
+              'step_limit': 'Остановлено по лимиту шагов', 'cancelled': 'Прервано пользователем',
+              'error': 'Аварийный снимок', 'checkpoint_error': 'Ошибка сохранения checkpoint', 'no_progress': 'Остановлено без продвижения',
+              'no_result': 'Модель не вернула результат', 'no_finish': 'Завершение не принято'}
+    state = labels.get(stop, {'partial': 'Частичный результат', 'failed': 'Аварийный снимок',
+                            'completed': 'Исследование завершено'}.get(run.get('status'), 'Состояние не установлено'))
+    if run.get('status') == 'partial' and not emergency and state != 'Частичный результат':
+        state = 'Частичный результат · ' + state.lower()
+    structural = validation.get('structural_issues')
+    structure = ('есть ошибки' if structural else 'проверки пройдены') if structural is not None else 'не оценена отдельно'
+    tasks = [t for t in model.get('research_tasks', []) if t.get('status') in ('open', 'read', 'analyzed')]
+    deficits = len(validation.get('coverage_issues') or [])
+    coverage = f'незавершённых задач: {len(tasks)}, замечаний: {deficits}'
+    if not tasks and not deficits:
+        coverage = 'открытые задачи не зарегистрированы; полнота не доказана'
+    group_status = (hierarchy or {}).get('status', {}).get('result') or run.get('grouping_status', 'not_requested')
+    if run.get('grouping_status') == 'cancelled':
+        group_status = 'cancelled'
+    grouping = {'complete': 'предложена', 'partial': 'предложена частично', 'none': 'не построена',
+                'blocked_structure': 'не запускалась из-за структуры', 'checkpoint_error': 'не запускалась: checkpoint не сохранён', 'no_map': 'нет карты',
+                'cancelled': 'отменена пользователем', 'time_limit': 'не запускалась по лимиту времени',
+                'not_requested': 'не запускалась'}.get(group_status, str(group_status))
+    rows = [('Запуск', state), ('Структура', structure), ('Покрытие', coverage), ('Группировка', grouping)]
+    body = ''.join(f'<span><b>{html.escape(label)}:</b> {html.escape(value)}</span>' for label, value in rows)
+    reason = str(run.get('reason') or '')
+    if reason and (run.get('status') in ('partial', 'failed') or emergency):
+        body += '<p>' + html.escape(reason) + '</p>'
+    return '<section id="result-lifecycle" class="result-lifecycle' + (' emergency' if emergency else '') + '" aria-label="Состояние результата">' + body + '</section>'
 
 
 def render_scenario_map(model: dict[str, Any], hierarchy: dict[str, Any] | None = None) -> str:
@@ -33,15 +116,19 @@ def render_scenario_map(model: dict[str, Any], hierarchy: dict[str, Any] | None 
     """
     if not isinstance(model, dict):
         raise TypeError("scenario map must be a dictionary")
+    semantic_stage = grouping_stage(model)
     if hierarchy is not None:
         validate_hierarchy(hierarchy, model)
     scenario = model.get("scenario") or {}
     run = model.get("run") or {}
     title = str(scenario.get("title") or "Карта сценария")
+    action_profile = (semantic_stage == OPERATIONS_STAGE
+                      or (hierarchy or {}).get("hierarchy_kind") == "business_operations")
     values = {
         "TITLE": html.escape(title, quote=True), "FONTS": embedded_fonts(),
         "STYLE": _STYLE + _NOTATION_STYLE + horizon_tokens() + _HORIZON_STYLE + _STAGE_STYLE,
-        "SCRIPT": _SCRIPT,
+        "SCRIPT": _action_terms(_SCRIPT) if action_profile else _SCRIPT,
+        "LIFECYCLE": _lifecycle_summary(model, hierarchy),
         "MODEL": _script_json(model),
         "LEGACY_HIDDEN": "" if str(model.get("schema_version", "1.0")).split(".")[0] != "2" else " hidden",
         "RUN_NOTE": html.escape(str(run.get("reason") or ""), quote=True),
@@ -50,8 +137,8 @@ def render_scenario_map(model: dict[str, Any], hierarchy: dict[str, Any] | None 
                            if hierarchy else ""),
     }
     # A single pass also keeps placeholder-like words in user text literal.
-    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|HIERARCHY_DATA)__",
-                  lambda match: values[match.group(1)], _DOCUMENT)
+    return re.sub(r"__(TITLE|FONTS|STYLE|SCRIPT|MODEL|LEGACY_HIDDEN|RUN_NOTE|RUN_NOTE_HIDDEN|HIERARCHY_DATA|LIFECYCLE)__",
+                  lambda match: values[match.group(1)], _action_terms(_DOCUMENT) if action_profile else _DOCUMENT)
 
 
 _DOCUMENT = r'''<!doctype html>
@@ -65,7 +152,7 @@ __FONTS__<style>__STYLE__</style></head>
 <section id="status-panel" class="map-popover status-panel" aria-label="Предупреждения" hidden><div class="header-status" id="header-status">
 <p id="legacy-note" class="legacy-note"__LEGACY_HIDDEN__>Архивная карта прежней методологии. Её узлы и группировки не подтверждают атомарность по правилам версии 2.0.</p>
 <p id="run-note" class="run-note"__RUN_NOTE_HIDDEN__>__RUN_NOTE__</p></div></section></div></div>
-<p id="scenario-description" class="description"></p></header>
+<p id="scenario-description" class="description"></p>__LIFECYCLE__</header>
 <main id="workspace" tabindex="-1">
 <div class="workspace-layout"><div class="main-panels">
 <section id="panel-map" aria-label="Подробная карта сценария">
@@ -84,7 +171,7 @@ __FONTS__<style>__STYLE__</style></head>
 
 _STYLE = r'''
 :root{--ink:#263844;--muted:#5a6d7c;--border:#d0d7dd;--mint:#f1faf7;--purple:#7044b4;--pale-purple:#f5edfc;--white:#fff;--focus:#7044b4;--shadow:0 3px 12px rgba(45,58,65,.045)}
-*{box-sizing:border-box}body{margin:0;background:var(--white);color:var(--ink);font-family:'SB Sans Display',Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}button,input{min-height:44px}button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:3px}button{transition:border-color .15s,background .15s,box-shadow .15s}button:hover{border-color:var(--purple)}[hidden]{display:none!important}h1,h2,h3,p{margin-top:0}h1,h2,h3{font-weight:600;line-height:1.25}h1{font-size:clamp(25px,2.5vw,38px);margin-bottom:0;letter-spacing:-.025em;overflow-wrap:anywhere}h2{font-size:20px}h3{font-size:17px}.page-header,main{max-width:1900px;margin:0 auto;padding:0 32px}.page-header{padding-top:32px;padding-bottom:22px}.eyebrow{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.12em;margin-bottom:14px}.eyebrow span{color:#9ba9b0;padding:0 9px}.heading-line{display:flex;align-items:center;justify-content:space-between;gap:24px}.heading-line>.badge{flex-shrink:0}.description{margin:13px 0 16px;max-width:1100px;color:var(--muted);font-size:17px;white-space:pre-wrap;overflow-wrap:anywhere}.overview{display:flex;flex-wrap:wrap;gap:10px 26px;color:var(--muted);margin-bottom:14px}.overview b{color:var(--ink);font-size:18px;font-weight:600;margin-right:5px}.scope{max-width:1100px}.scope summary{cursor:pointer;color:var(--purple);width:fit-content;min-height:30px;font-size:14px;padding:2px 0}.scope-content{margin-top:12px;border:1px solid var(--border);border-radius:14px;padding:18px 20px;background:#fcfdfd}.scope-content .field{margin-bottom:12px}.scope-content .field:last-child{margin-bottom:0}.scope-content ul{margin:6px 0;padding-left:20px}.run-note{margin:15px 0 0;padding:10px 14px;border-radius:10px;background:#fff6e5;color:#7a5014;white-space:pre-wrap}.workspace-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.tabs{display:flex;gap:5px;flex-wrap:wrap;padding:5px;background:#f3f5f5;border-radius:12px}.tabs button{border:1px solid transparent;border-radius:9px;padding:8px 15px;background:transparent;color:var(--muted);font-weight:600}.tabs button[aria-selected=true]{background:#fff;color:var(--purple);box-shadow:0 2px 5px #162e3a0b}.search-label{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}.search-label input{border:1px solid var(--border);border-radius:10px;padding:10px 12px;width:260px;background:#fff;color:var(--ink)}.workspace-layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}.main-panels{min-width:0;border:1px solid var(--border);border-radius:16px;overflow:hidden;background:#fff}.map-toolbar{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;gap:12px;border-bottom:1px solid var(--border);flex-wrap:wrap}.map-heading{display:flex;flex-direction:column;gap:2px}.map-heading strong{font-size:16px;font-weight:600}.map-heading span{font-size:12px;color:var(--muted)}.map-actions{display:flex;align-items:center;gap:6px}.map-actions button{border:1px solid var(--border);background:#fff;border-radius:8px;padding:7px 12px;font-size:13px;min-width:40px}.map-actions #zoom-in,.map-actions #zoom-out{font-size:20px;padding:3px 11px}.map-actions output{font-size:12px;min-width:42px;text-align:center;color:var(--muted)}.viewport{position:relative;height:clamp(470px,64vh,850px);overflow:auto;background:var(--mint);background-image:radial-gradient(#cbded6 .7px,transparent .7px);background-size:20px 20px;overscroll-behavior:contain;scrollbar-color:#b5c9bf transparent}.viewport.dragging{cursor:grabbing;user-select:none}.viewport:focus-visible{outline-offset:-4px}#canvas-size{position:relative;min-width:100%;min-height:100%}#stage{position:absolute;top:0;left:0;transform-origin:top left}#connections,#lanes,#nodes{position:absolute;top:0;left:0;width:100%;height:100%}#connections{overflow:visible;z-index:2;pointer-events:none}#lanes{z-index:1;pointer-events:none}#nodes{z-index:3;pointer-events:none}.lane{position:absolute;left:18px;right:18px;border:1px solid #d2e2db;border-radius:14px;background:#ffffff60}.lane:nth-child(even){background:#edf7f2b3}.lane-title{position:absolute;left:18px;top:22px;width:158px;padding-right:10px;color:#3d6053;overflow-wrap:anywhere;font-size:15px;font-weight:600;line-height:1.35}.lane-caption{display:block;color:#60796e;font-size:12px;font-weight:400;margin-top:6px}.node{position:absolute;display:flex;flex-direction:column;gap:9px;pointer-events:auto;width:236px;padding:14px 15px;border:1px solid #b9c8c0;border-radius:13px;background:#fff;box-shadow:var(--shadow);text-align:left;color:var(--ink);line-height:1.4;overflow-wrap:anywhere}.node:hover{box-shadow:0 5px 20px #53337618}.node.selected{border:2px solid var(--purple);padding:13px 14px;box-shadow:0 0 0 3px #d1b1eb4a}.node.dimmed{opacity:.32}.node.search-match{border-color:var(--purple);box-shadow:0 0 0 3px #e2cff5}.node-type{font-size:11px;font-weight:600;letter-spacing:.02em;color:#6a4a90;display:flex;align-items:center;gap:6px}.node-type .symbol{display:inline-flex;align-items:center;justify-content:center;width:21px;height:21px;flex-shrink:0;border:1px solid #d8c6e8;border-radius:6px;background:var(--pale-purple);font-size:13px}.node-name{font-size:15px;font-weight:600}.node-status{font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px}.node-status:before{content:'';display:block;flex-shrink:0;width:6px;height:6px;border-radius:50%;background:#687880}.node-status.observed:before{background:#137668}.node-status.inferred:before{background:#956211}.node.kind-start,.node.kind-end{border-radius:23px}.node.kind-external{border-style:dashed}.node.kind-decision,.node.kind-fork,.node.kind-join{border-top:3px solid #af86cc}.node.kind-wait{border-top:3px solid #87aba0}.edge-visible{fill:none;stroke:#78958a;stroke-width:1.8}.edge-observed .edge-visible{stroke:#638d7c}.edge-inferred .edge-visible{stroke:#a18450;stroke-dasharray:7 4}.edge-unknown .edge-visible{stroke:#87969a;stroke-dasharray:3 5}.edge-hit{fill:none;stroke:transparent;stroke-width:17;pointer-events:stroke;cursor:pointer}.edge.selected .edge-visible{stroke:var(--purple);stroke-width:3}.edge.dimmed{opacity:.18}.edge:focus-visible{outline:none}.edge:focus-visible .edge-visible{stroke:var(--purple);stroke-width:4}.map-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;flex-wrap:wrap;border-top:1px solid var(--border)}.legend{display:flex;flex-wrap:wrap;gap:7px}.badge{display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;line-height:1.4;white-space:normal}.badge.observed{color:#155f53;background:#e3f3ed}.badge.inferred{color:#805619;background:#fff1d8}.badge.unknown{color:#53636e;background:#eef1f3}.badge.run-completed{color:#155f53;background:#e3f3ed}.badge.run-partial,.badge.run-running{color:#805619;background:#fff1d8}.badge.run-failed{color:#9b3148;background:#fbe9ee}.map-hint{font-size:11px;color:var(--muted)}.inspector{border:1px solid var(--border);border-radius:16px;background:#fff;min-height:400px;max-height:calc(64vh + 140px);overflow:auto;position:sticky;top:16px;box-shadow:var(--shadow)}#inspector-content{padding:22px 20px}.inspector-kicker{font-size:12px;color:var(--purple);font-weight:600;margin-bottom:12px}.inspector h2{margin:13px 0 16px;overflow-wrap:anywhere}.inspector .muted{color:var(--muted);font-size:14px}.field{margin:18px 0;overflow-wrap:anywhere}.field dt{font-size:12px;color:var(--muted);margin-bottom:5px}.field dd{margin:0;color:var(--ink);font-size:14px;white-space:pre-wrap}.field-list{margin:0}.details{border-top:1px solid #e3e8eb;padding-top:14px;margin-top:20px}.details summary{cursor:pointer;font-size:13px;color:var(--purple);padding:3px 0;min-height:36px}.evidence{padding:10px 12px;background:#f5f7f7;border-radius:8px;margin:10px 0;font-size:12px;overflow-wrap:anywhere}.evidence cite{font-style:normal;color:var(--muted);display:block;margin-bottom:6px}.evidence pre{white-space:pre-wrap;word-break:break-word;font-family:Consolas,monospace;font-size:11px;line-height:1.5;margin:6px 0}.related{display:flex;flex-direction:column;gap:7px}.text-button{width:100%;text-align:left;border:1px solid var(--border);border-radius:9px;background:#fff;padding:9px 11px;color:var(--purple);font-size:13px;white-space:normal;overflow-wrap:anywhere}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}caption{text-align:left;padding:20px;font-size:18px;font-weight:600}th{text-align:left;color:var(--muted);font-size:12px;background:#f8faf9;font-weight:600}td,th{padding:14px 18px;border-bottom:1px solid #e5e9e7;vertical-align:top}td{max-width:350px;white-space:pre-wrap;overflow-wrap:anywhere}td:first-child{min-width:190px;width:25%}td:nth-child(2){min-width:145px}td .text-button{border:0;background:transparent;padding:0;min-height:36px;color:var(--purple);font-weight:600}td .type-label{display:block;color:var(--muted);font-size:11px;margin-top:5px}.gaps-intro{padding:24px 24px 0}.gaps-intro p{color:var(--muted);font-size:14px;max-width:700px}#gaps{padding:0 24px 24px}.gap{border:1px solid var(--border);border-left:3px solid #caa267;border-radius:10px;padding:16px;margin-top:14px}.gap p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 10px}.gap .related{flex-direction:row;flex-wrap:wrap}.gap .text-button{width:auto}.empty{padding:40px 28px;color:var(--muted);max-width:700px;margin:0}.footnote{font-size:12px;color:var(--muted);padding:14px 0 26px;margin:0;max-width:1150px}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.skip{position:absolute;top:-100px;left:20px;z-index:50;background:#fff;padding:12px;color:var(--purple)}.skip:focus{top:10px}
+.result-lifecycle{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:12px;color:#51616d;margin-top:10px}.result-lifecycle p{flex-basis:100%;margin:0}.result-lifecycle.emergency{border-left:4px solid #b32f38;padding:8px 12px;background:#fff1f1}*{box-sizing:border-box}body{margin:0;background:var(--white);color:var(--ink);font-family:'SB Sans Display',Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.45}button,input{min-height:44px}button:focus-visible,input:focus-visible,summary:focus-visible,a:focus-visible,[tabindex]:focus-visible{outline:3px solid var(--focus);outline-offset:3px}button{transition:border-color .15s,background .15s,box-shadow .15s}button:hover{border-color:var(--purple)}[hidden]{display:none!important}h1,h2,h3,p{margin-top:0}h1,h2,h3{font-weight:600;line-height:1.25}h1{font-size:clamp(25px,2.5vw,38px);margin-bottom:0;letter-spacing:-.025em;overflow-wrap:anywhere}h2{font-size:20px}h3{font-size:17px}.page-header,main{max-width:1900px;margin:0 auto;padding:0 32px}.page-header{padding-top:32px;padding-bottom:22px}.eyebrow{color:var(--muted);font-size:12px;font-weight:700;letter-spacing:.12em;margin-bottom:14px}.eyebrow span{color:#9ba9b0;padding:0 9px}.heading-line{display:flex;align-items:center;justify-content:space-between;gap:24px}.heading-line>.badge{flex-shrink:0}.description{margin:13px 0 16px;max-width:1100px;color:var(--muted);font-size:17px;white-space:pre-wrap;overflow-wrap:anywhere}.overview{display:flex;flex-wrap:wrap;gap:10px 26px;color:var(--muted);margin-bottom:14px}.overview b{color:var(--ink);font-size:18px;font-weight:600;margin-right:5px}.scope{max-width:1100px}.scope summary{cursor:pointer;color:var(--purple);width:fit-content;min-height:30px;font-size:14px;padding:2px 0}.scope-content{margin-top:12px;border:1px solid var(--border);border-radius:14px;padding:18px 20px;background:#fcfdfd}.scope-content .field{margin-bottom:12px}.scope-content .field:last-child{margin-bottom:0}.scope-content ul{margin:6px 0;padding-left:20px}.run-note{margin:15px 0 0;padding:10px 14px;border-radius:10px;background:#fff6e5;color:#7a5014;white-space:pre-wrap}.workspace-bar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:16px}.tabs{display:flex;gap:5px;flex-wrap:wrap;padding:5px;background:#f3f5f5;border-radius:12px}.tabs button{border:1px solid transparent;border-radius:9px;padding:8px 15px;background:transparent;color:var(--muted);font-weight:600}.tabs button[aria-selected=true]{background:#fff;color:var(--purple);box-shadow:0 2px 5px #162e3a0b}.search-label{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}.search-label input{border:1px solid var(--border);border-radius:10px;padding:10px 12px;width:260px;background:#fff;color:var(--ink)}.workspace-layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}.main-panels{min-width:0;border:1px solid var(--border);border-radius:16px;overflow:hidden;background:#fff}.map-toolbar{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;gap:12px;border-bottom:1px solid var(--border);flex-wrap:wrap}.map-heading{display:flex;flex-direction:column;gap:2px}.map-heading strong{font-size:16px;font-weight:600}.map-heading span{font-size:12px;color:var(--muted)}.map-actions{display:flex;align-items:center;gap:6px}.map-actions button{border:1px solid var(--border);background:#fff;border-radius:8px;padding:7px 12px;font-size:13px;min-width:40px}.map-actions #zoom-in,.map-actions #zoom-out{font-size:20px;padding:3px 11px}.map-actions output{font-size:12px;min-width:42px;text-align:center;color:var(--muted)}.viewport{position:relative;height:clamp(470px,64vh,850px);overflow:auto;background:var(--mint);background-image:radial-gradient(#cbded6 .7px,transparent .7px);background-size:20px 20px;overscroll-behavior:contain;scrollbar-color:#b5c9bf transparent}.viewport.dragging{cursor:grabbing;user-select:none}.viewport:focus-visible{outline-offset:-4px}#canvas-size{position:relative;min-width:100%;min-height:100%}#stage{position:absolute;top:0;left:0;transform-origin:top left}#connections,#lanes,#nodes{position:absolute;top:0;left:0;width:100%;height:100%}#connections{overflow:visible;z-index:2;pointer-events:none}#lanes{z-index:1;pointer-events:none}#nodes{z-index:3;pointer-events:none}.lane{position:absolute;left:18px;right:18px;border:1px solid #d2e2db;border-radius:14px;background:#ffffff60}.lane:nth-child(even){background:#edf7f2b3}.lane-title{position:absolute;left:18px;top:22px;width:158px;padding-right:10px;color:#3d6053;overflow-wrap:anywhere;font-size:15px;font-weight:600;line-height:1.35}.lane-caption{display:block;color:#60796e;font-size:12px;font-weight:400;margin-top:6px}.node{position:absolute;display:flex;flex-direction:column;gap:9px;pointer-events:auto;width:236px;padding:14px 15px;border:1px solid #b9c8c0;border-radius:13px;background:#fff;box-shadow:var(--shadow);text-align:left;color:var(--ink);line-height:1.4;overflow-wrap:anywhere}.node:hover{box-shadow:0 5px 20px #53337618}.node.selected{border:2px solid var(--purple);padding:13px 14px;box-shadow:0 0 0 3px #d1b1eb4a}.node.dimmed{opacity:.32}.node.search-match{border-color:var(--purple);box-shadow:0 0 0 3px #e2cff5}.node-type{font-size:11px;font-weight:600;letter-spacing:.02em;color:#6a4a90;display:flex;align-items:center;gap:6px}.node-type .symbol{display:inline-flex;align-items:center;justify-content:center;width:21px;height:21px;flex-shrink:0;border:1px solid #d8c6e8;border-radius:6px;background:var(--pale-purple);font-size:13px}.node-name{font-size:15px;font-weight:600}.node-status{font-size:10px;color:var(--muted);display:flex;align-items:center;gap:5px}.node-status:before{content:'';display:block;flex-shrink:0;width:6px;height:6px;border-radius:50%;background:#687880}.node-status.observed:before{background:#137668}.node-status.inferred:before{background:#956211}.node.kind-start,.node.kind-end{border-radius:23px}.node.kind-external{border-style:dashed}.node.kind-decision,.node.kind-fork,.node.kind-join{border-top:3px solid #af86cc}.node.kind-wait{border-top:3px solid #87aba0}.edge-visible{fill:none;stroke:#78958a;stroke-width:1.8}.edge-observed .edge-visible{stroke:#638d7c}.edge-inferred .edge-visible{stroke:#a18450;stroke-dasharray:7 4}.edge-unknown .edge-visible{stroke:#87969a;stroke-dasharray:3 5}.edge-hit{fill:none;stroke:transparent;stroke-width:17;pointer-events:stroke;cursor:pointer}.edge.selected .edge-visible{stroke:var(--purple);stroke-width:3}.edge.dimmed{opacity:.18}.edge:focus-visible{outline:none}.edge:focus-visible .edge-visible{stroke:var(--purple);stroke-width:4}.map-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:13px 16px;flex-wrap:wrap;border-top:1px solid var(--border)}.legend{display:flex;flex-wrap:wrap;gap:7px}.badge{display:inline-block;padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;line-height:1.4;white-space:normal}.badge.observed{color:#155f53;background:#e3f3ed}.badge.inferred{color:#805619;background:#fff1d8}.badge.unknown{color:#53636e;background:#eef1f3}.badge.run-completed{color:#155f53;background:#e3f3ed}.badge.run-partial,.badge.run-running{color:#805619;background:#fff1d8}.badge.run-failed{color:#9b3148;background:#fbe9ee}.map-hint{font-size:11px;color:var(--muted)}.inspector{border:1px solid var(--border);border-radius:16px;background:#fff;min-height:400px;max-height:calc(64vh + 140px);overflow:auto;position:sticky;top:16px;box-shadow:var(--shadow)}#inspector-content{padding:22px 20px}.inspector-kicker{font-size:12px;color:var(--purple);font-weight:600;margin-bottom:12px}.inspector h2{margin:13px 0 16px;overflow-wrap:anywhere}.inspector .muted{color:var(--muted);font-size:14px}.field{margin:18px 0;overflow-wrap:anywhere}.field dt{font-size:12px;color:var(--muted);margin-bottom:5px}.field dd{margin:0;color:var(--ink);font-size:14px;white-space:pre-wrap}.field-list{margin:0}.details{border-top:1px solid #e3e8eb;padding-top:14px;margin-top:20px}.details summary{cursor:pointer;font-size:13px;color:var(--purple);padding:3px 0;min-height:36px}.evidence{padding:10px 12px;background:#f5f7f7;border-radius:8px;margin:10px 0;font-size:12px;overflow-wrap:anywhere}.evidence cite{font-style:normal;color:var(--muted);display:block;margin-bottom:6px}.evidence pre{white-space:pre-wrap;word-break:break-word;font-family:Consolas,monospace;font-size:11px;line-height:1.5;margin:6px 0}.related{display:flex;flex-direction:column;gap:7px}.text-button{width:100%;text-align:left;border:1px solid var(--border);border-radius:9px;background:#fff;padding:9px 11px;color:var(--purple);font-size:13px;white-space:normal;overflow-wrap:anywhere}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:13px}caption{text-align:left;padding:20px;font-size:18px;font-weight:600}th{text-align:left;color:var(--muted);font-size:12px;background:#f8faf9;font-weight:600}td,th{padding:14px 18px;border-bottom:1px solid #e5e9e7;vertical-align:top}td{max-width:350px;white-space:pre-wrap;overflow-wrap:anywhere}td:first-child{min-width:190px;width:25%}td:nth-child(2){min-width:145px}td .text-button{border:0;background:transparent;padding:0;min-height:36px;color:var(--purple);font-weight:600}td .type-label{display:block;color:var(--muted);font-size:11px;margin-top:5px}.gaps-intro{padding:24px 24px 0}.gaps-intro p{color:var(--muted);font-size:14px;max-width:700px}#gaps{padding:0 24px 24px}.gap{border:1px solid var(--border);border-left:3px solid #caa267;border-radius:10px;padding:16px;margin-top:14px}.gap p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 10px}.gap .related{flex-direction:row;flex-wrap:wrap}.gap .text-button{width:auto}.empty{padding:40px 28px;color:var(--muted);max-width:700px;margin:0}.footnote{font-size:12px;color:var(--muted);padding:14px 0 26px;margin:0;max-width:1150px}.sr-only{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}.skip{position:absolute;top:-100px;left:20px;z-index:50;background:#fff;padding:12px;color:var(--purple)}.skip:focus{top:10px}
 @media(max-width:1200px){.workspace-layout{grid-template-columns:minmax(0,1fr) 300px}.page-header,main{padding-left:22px;padding-right:22px}.search-label>span{display:none}.search-label input{width:225px}.tabs button{padding-left:10px;padding-right:10px;font-size:13px}.map-hint{display:none}}
 .heading-badges{display:flex;gap:7px;align-items:center;flex-shrink:0;flex-wrap:wrap}.badge.demo{color:var(--purple);background:var(--pale-purple)}.scope .diagnostic-title{color:#805619;font-weight:600}.inspector-back{display:none;margin-bottom:16px}.gap-category{font-size:12px;color:#805619;font-weight:600;margin-bottom:8px}.checks-notice{border:0;border-bottom:1px solid var(--border);display:block;width:100%;text-align:left;padding:9px 18px;background:#fff8eb;color:#805619;font-size:12px;min-height:38px}.checks-notice:hover{background:#fff1d8}
 @media(max-width:900px){.workspace-layout{grid-template-columns:1fr}.inspector{position:static;min-height:0;max-height:none}.workspace-bar{align-items:center;flex-direction:row}.search-label input{width:100%}.search-label{width:225px;flex-shrink:0}.heading-line{align-items:center;flex-direction:row;flex-wrap:wrap;gap:8px 20px}.heading-line h1{flex:1 1 380px}.page-header{padding-top:18px;padding-bottom:14px}.eyebrow{margin-bottom:8px}.description{margin:8px 0 10px;font-size:15px}.overview{margin-bottom:8px}.scope summary{min-height:26px}.heading-badges{gap:6px}.viewport{height:560px}.map-toolbar{padding:12px}.map-actions{margin-left:auto}.tabs{width:fit-content}.map-hint{display:block}.inspector-back{display:block}}
@@ -457,7 +544,9 @@ const systems = array(legacy?model.systems:[]).filter(s => s && typeof s==='obje
 const gaps = array(model.gaps);
 const omissions = array(model.source_omissions);
 const validationIssues = array(model.validation?.issues);
-const openFindings = gaps.length + omissions.length + validationIssues.length;
+const structuralIssues=array(model.validation?.structural_issues),coverageIssues=array(model.validation?.coverage_issues);
+const unfinishedTasks=array(model.research_tasks).filter(task=>['open','read','analyzed'].includes(task.status));
+const openFindings = gaps.length + omissions.length + validationIssues.length + unfinishedTasks.length;
 const executionReviews=array(model.execution_reviews),operationsByNode=new Map();
 for(const review of executionReviews)for(const operation of array(review.operations)){const id=text(operation.node_id);if(!operationsByNode.has(id))operationsByNode.set(id,[]);operationsByNode.get(id).push({operation,review});}
 const byId = new Map(nodes.map(n => [text(n.id),n]));
@@ -817,7 +906,7 @@ function selectStage(stage){
 function showStage(stage){
  const panel=$('inspector-content'),members=stageMembers(stage),inside=new Set(members.map(n=>text(n.id)));panel.replaceChildren();
  panel.append(el('div','inspector-kicker','БИЗНЕС-ЭТАП'),el('span','badge unknown stage-proposal','Предложение модели'),el('h2','',stage.name||stage.id));
- field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);
+ field(panel,'Цель этапа',stage.goal);field(panel,'Результат этапа',stage.result);field(panel,'Граница завершения',stage.boundary);
  const starts=members.filter(n=>array(scenario.entry_operation_ids).map(text).includes(text(n.id)));
  const transitions=(title,list,outer,lead)=>{if(!list.length&&!lead.length)return;const section=el('section','details continuations');section.append(el('h3','',title));
   for(const node of lead){const row=el('article','continuation');relatedButton(row,'Начало сценария: '+(node.name||node.id),()=>selectNode(node,true)).classList.add('continuation-target');section.append(row);}
@@ -893,7 +982,10 @@ function showFindings(){
  field(panel,'Результат исследования',stateNames[runState]||'Статус исследования не установлен');
  listField(panel,'Материалы, не вошедшие в исследование',omissions);
  listField(panel,'Примечания к источникам',model.source_notes);
- listField(panel,'Незакрытые проверки карты',validationIssues);
+ listField(panel,'Структурные ошибки',structuralIssues);
+ listField(panel,'Неотображённые и непроверенные участки',coverageIssues);
+ listField(panel,'Незавершённые задачи',unfinishedTasks.map(task=>[task.id,task.target,task.resolution].filter(Boolean).join(' · ')));
+ if(!('structural_issues' in (model.validation||{})))listField(panel,'Незакрытые проверки карты',validationIssues);
  listField(panel,'Ограничения анализа',array(model.limitations).length?model.limitations:run.limitations);
 if(!openFindings)panel.append(el('p','empty','Агент не зафиксировал пробелов. Это не является гарантией полноты карты.'));
 for(const gap of gaps){const card=el('article','gap');card.append(el('p','',gap.description || 'Описание пробела не задано.'));const links=el('div','related');for(const id of array(gap.node_ids)){const node=byId.get(text(id));if(node)relatedButton(links,node.name || node.id,()=>selectNode(node,true));}for(const id of array(legacy?gap.system_ids:[])){const system=systemById.get(text(id));if(system){const label=el('span','badge '+evidenceStatus(system.evidence_status),'АС: '+(system.name || system.id)+(evidenceStatus(system.evidence_status)==='unknown'?' · Не установлено':''));links.append(label);}}for(const id of array(gap.edge_ids)){const edge=validEdges.find(e=>text(e.id)===text(id));if(edge){const from=byId.get(text(edge.source)),to=byId.get(text(edge.target));relatedButton(links,(from.name||from.id)+' → '+(to.name||to.id),()=>selectEdge(edge));}}
@@ -1027,7 +1119,7 @@ function stageCard(item){
  const ends=stageOutcomes(members),semantics=stageSemantics(members,validEdges);
  const findings=gaps.filter(g=>array(g.node_ids).some(id=>item.members.includes(text(id)))).length,content=el('span','node-content');
  content.append(el('span','node-stage-kicker','Бизнес-этап · '+members.length+' '+plural(members.length,['операция','операции','операций'])),el('span','node-name',stage.name||stage.id));
- if(stage.result)content.append(el('span','node-stage-result',stage.result));
+  if(stage.result)content.append(el('span','node-stage-result',stage.result));
  if(ends.length){const row=el('span','stage-outcomes'),count=value=>value>1?' · '+value:'';
   for(const end of ends){const badge=el('span','stage-outcome '+end.tone,end.label+count(end.count));badge.dataset.outcome=end.outcome;badge.dataset.conditional=String(end.conditional);row.append(badge);}content.append(row);}
  if(semantics.length){const row=el('span','stage-outcomes stage-semantics');for(const label of new Set(semantics.map(item=>item.short)))row.append(el('span','stage-outcome',label));content.append(row);}

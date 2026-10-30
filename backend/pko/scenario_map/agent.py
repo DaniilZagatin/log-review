@@ -9,6 +9,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any, Callable
+from uuid import uuid4
 
 from pko.audit import AuditedClient, record, sanitize
 from pko.errors import LlmError
@@ -21,6 +22,8 @@ from pko.scenario_map.tools import TOOLS
 from pko.scenario_map.model_retry import ModelDeadlineExceeded, call_model
 from pko.scenario_map.context import compact_context, context_budget, UNFINISHED_TASK_STATUSES
 from pko.scenario_map.compaction import compact_research_context
+from pko.scenario_map.checkpoint import (CheckpointError, compatibility, make_checkpoint,
+                                         validate_compatibility, checkpoint_scenario)
 
 READ_NAMES = {t["function"]["name"] for t in TOOL_SCHEMAS}
 MAX_TOOL_CHARS = 24000
@@ -67,6 +70,20 @@ def _cycle(signatures: list[str]) -> bool:
                for size in (1, 2, 3))
 
 
+def _rejection_key(function: dict, payload: dict) -> str:
+    """Identify the failed invariant, independently from cosmetic argument edits."""
+    try:
+        args = json.loads(function.get('arguments') or '{}')
+    except (TypeError, ValueError):
+        args = {}
+    details = payload.get('details') or {}
+    address = {key: details[key] for key in ('node_id', 'edge_id', 'task_id', 'field') if key in details}
+    if not address and isinstance(args, dict):
+        address = {key: args[key] for key in ('id', 'node_id', 'edge_id', 'task_id') if key in args}
+    return _json({'tool': function.get('name'), 'code': payload.get('code'),
+                  'address': address, 'invariant': payload.get('error', payload.get('errors', ''))})
+
+
 def _brief(state: MapState) -> str:
     """Retain graph identity and outstanding work; full evidence remains in state."""
     model = state.snapshot()
@@ -86,15 +103,34 @@ def _compact(messages: list[dict], state: MapState, budget: int) -> list[dict]:
 
 
 def _progress(state: MapState) -> str:
-    """Observation repetition/recency is bookkeeping, not research progress."""
+    """Track accepted research state, not request identities or presentation edits."""
     snapshot = state.snapshot()
-    observations = snapshot.pop("research_history", [])
+    snapshot.pop("research_history", None)
     snapshot.pop("research_history_evicted", None)
     # A new rejection is a diagnostic, not progress: counting it would let a
     # stream of failing calls defeat the loop guard.
-    snapshot.get("run", {}).pop("recent_rejections", None)
-    snapshot["observation_ids"] = sorted(row["observation_id"] for row in observations)
+    snapshot.pop("run", None)
+    snapshot.pop("validation", None)
+    snapshot.pop("research_coverage", None)
+    # Registering more unexamined work is not progress in understanding it.
+    snapshot['research_tasks'] = [task for task in snapshot.get('research_tasks', [])
+                                  if task.get('status') != 'open']
+    for node in snapshot.get('nodes', []):
+        for key in ('name', 'basis', 'code_explanations'):
+            node.pop(key, None)
+    for edge in snapshot.get('edges', []):
+        for key in ('basis', 'code_explanations', 'description'):
+            edge.pop(key, None)
     return _json(snapshot)
+
+
+def _tool_signature(function: dict, payload: dict) -> str:
+    """Changing read bounds/query spelling cannot disguise the same returned data."""
+    name = function.get('name')
+    if name in READ_NAMES and payload.get('ok'):
+        return _json({'tool': name, 'source_data': payload.get('source_data'),
+                      'evidence_reference': payload.get('evidence_reference')})
+    return _json(function)
 
 
 class GraphFrontierGuide:
@@ -172,6 +208,27 @@ class ResearchTools:
     def __init__(self, state: MapState, workspace):
         self.state = state
         self.box = ToolBox(workspace.tree, workspace.extraction)
+        self.discovery_results: set[str] = set()
+        # A resumed search already present in the bounded public cache is not
+        # new progress. Missing/evicted payloads are never reconstructed here.
+        offset = 1
+        while True:
+            page = state.research_memory.recall(offset=offset, limit=30)
+            for row in page['items']:
+                self._remember_discovery(row['name'], row.get('payload', {}))
+            if not page['has_more']:
+                break
+            offset += len(page['items'])
+
+    def _remember_discovery(self, name: str, payload: dict) -> None:
+        # Reads advance only through the authoritative line ledger. Errors and
+        # empty search results remain in memory but cannot reset a stuck loop.
+        count = (payload.get('meta') or {}).get('count', 0)
+        if (name not in READ_NAMES or name == 'read_file' or not payload.get('ok')
+                or not isinstance(count, int) or count <= 0 or not payload.get('source_data')):
+            return
+        content = _json([name, payload['source_data']])
+        self.discovery_results.add(hashlib.sha256(content.encode('utf-8')).hexdigest())
 
     def answer(self, call: dict) -> dict:
         function = call.get("function") or {}
@@ -206,8 +263,9 @@ class ResearchTools:
                         if t['status'] in UNFINISHED_TASK_STATUSES and any(r['path'] == evidence_reference['path'] for r in t['evidence'])][:30]
                     if payload["research_tasks"]:
                         payload["research_tasks_hint"] = "Незавершённые задачи по этому файлу; полный реестр — inspect_map(section='research_tasks')."
+                self._remember_discovery(name, payload)
                 payload["memory"] = self.state.research_memory.observe(name, args, payload)
-            elif name in {"upsert_step", "upsert_transition", "finish"} and not self.state.model.get("research_brief"):
+            elif name in {"upsert_step", "upsert_transition", "patch_fragment", "finish"} and not self.state.model.get("research_brief"):
                 payload = {"ok": False, "code": "brief_required", "error": (
                     "Перед построением карты сохрани первичное понимание через save_research_brief: "
                     "назначение проекта, связь с вариантом сценария, факты с прочитанными основаниями, "
@@ -227,38 +285,89 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
               summary_max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
               summary_mode: str = DEFAULT_SUMMARY_MODE,
               checkpoint: Callable[[dict], None] | None = None,
-              on_event: Callable[[str, dict], None] | None = None) -> dict:
+              on_event: Callable[[str, dict], None] | None = None,
+              resume_checkpoint: dict | None = None,
+              run_metadata: dict | None = None) -> dict:
     if max_steps < 1 or not all(math.isfinite(value) and value > 0 for value in (max_seconds, model_timeout)):
         raise ValueError("Лимиты исследования и ожидания модели должны быть конечными положительными числами")
     if (isinstance(summary_max_tokens, bool) or not isinstance(summary_max_tokens, int) or
             not 512 <= summary_max_tokens <= 32768 or summary_mode not in {"standard", "inherit"}):
         raise ValueError("Суммаризация: summary_max_tokens от 512 до 32768; summary_mode standard или inherit")
-    state = MapState(workspace, scenario)
-    state.model["run"].update({"status": "running", "steps": 0, "model": spec.model,
-                               "model_timeout_seconds": model_timeout, "max_seconds": max_seconds})
+    # Compatibility is checked before any checkpoint overwrite or model call.
+    schemas = copy.deepcopy(TOOL_SCHEMAS) + copy.deepcopy(TOOLS)
+    system = Path(__file__).with_name("system.md").read_text(encoding="utf-8")
+    bundle = {"system_prompt_sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
+              "tools_sha256": hashlib.sha256(_json(schemas).encode("utf-8")).hexdigest()}
+    contract = compatibility(spec, bundle['system_prompt_sha256'], bundle['tools_sha256'],
+                             summary_mode, summary_max_tokens)
+    previous = {}
+    if resume_checkpoint is not None:
+        validate_compatibility(resume_checkpoint, spec, bundle['system_prompt_sha256'], bundle['tools_sha256'],
+                               summary_mode, summary_max_tokens)
+        if scenario != checkpoint_scenario(resume_checkpoint):
+            raise CheckpointError("Описание варианта отличается от сохранённого checkpoint.")
+        from pko.scenario_map.checkpoint_state import restore_state
+        try:
+            state = restore_state(workspace, resume_checkpoint['_resume']['state'])
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise CheckpointError('Нельзя восстановить checkpoint: ' + str(sanitize(str(exc))),
+                                  'Проверьте исходные файлы, их порядок и целостность checkpoint. Сохранённый файл не изменён.') from exc
+        previous = copy.deepcopy(state.model['run'])
+    else:
+        state = MapState(workspace, scenario)
+    completion = previous.get('research_completion') or {}
+    finished_research = (completion.get('status') in ('completed', 'partial') or
+                         (previous.get('stop_kind') == 'finish' and previous.get('status') in ('completed', 'partial')))
+    if finished_research and not completion:
+        completion = {key: previous.get(key) for key in ('status', 'reason')}
+    previous_steps = previous.get('total_steps', previous.get('steps', 0))
+    previous_seconds = previous.get('total_duration_seconds', previous.get('duration_seconds', 0))
+    if previous:
+        history = copy.deepcopy(previous.get('attempt_history', []))
+        history.append({key: previous.get(key) for key in
+                        ('id', 'trace_id', 'attempt', 'status', 'stop_kind', 'reason', 'steps', 'duration_seconds')})
+        state.model['run']['attempt_history'] = history[-100:]
+        state.model['run']['attempt_history_omitted'] = previous.get('attempt_history_omitted', 0) + max(0, len(history)-100)
+        state.model['run']['parent_run_id'] = previous.get('id')
+        state.model['run']['root_run_id'] = previous.get('root_run_id') or previous.get('id')
+        state.model['run']['attempt'] = previous.get('attempt', 1) + 1
+        state.model['run']['resume_mode'] = 'publication' if finished_research else 'research'
+    else:
+        state.model['run']['attempt'] = 1
+    for key in ('stop_kind', 'interrupted', 'termination_kind', 'grouping_status', 'trace_export', 'local_audit',
+                'generated_at', 'duration_seconds', 'loop_recoveries', 'loop_recovery_attempted', 'checkpoint_persistence'):
+        state.model['run'].pop(key, None)
+    state.model["run"].update({"status": "running", "reason": "", "steps": 0, "model": spec.model,
+                               "max_steps": max_steps, "model_timeout_seconds": model_timeout, "max_seconds": max_seconds})
+    metadata = {'id': uuid4().hex, **(run_metadata or {})}
+    state.model['run']['root_run_id'] = state.model['run'].get('root_run_id') or metadata['id']
+    if metadata:
+        state.model['run'].update({key: value for key, value in metadata.items()
+                                  if key in ('id', 'trace_id', 'root_run_id', 'parent_run_id', 'attempt')})
+    if finished_research:
+        state.model['run'].update(status=completion['status'], stop_kind='finish', reason=completion.get('reason', ''))
     extra_body = getattr(spec, 'extra_body', None)
     template = extra_body.get('chat_template_kwargs') if isinstance(extra_body, dict) else None
     mode = template.get('enable_thinking') if isinstance(template, dict) else None
     state.model['run']['model_mode'] = 'reasoning' if mode is True else 'standard' if mode is False else 'provider_default'
     toolkit = ResearchTools(state, workspace)
-    schemas = copy.deepcopy(TOOL_SCHEMAS) + copy.deepcopy(TOOLS)
-    system = Path(__file__).with_name("system.md").read_text(encoding="utf-8")
-    bundle = {"system_prompt_sha256": hashlib.sha256(system.encode("utf-8")).hexdigest(),
-              "tools_sha256": hashlib.sha256(_json(schemas).encode("utf-8")).hexdigest()}
     state.model["run"].update(bundle)
     record('research_configuration', model=spec.model, model_mode=state.model['run']['model_mode'],
-           context_window=spec.context_window or DEFAULT_CONTEXT_WINDOW, max_steps=max_steps, max_seconds=max_seconds, **bundle)
+           context_window=spec.context_window or DEFAULT_CONTEXT_WINDOW, max_steps=max_steps, max_seconds=max_seconds,
+           semantic_profile=state.model.get('semantic_profile'), **bundle)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": _json({
         "scenario_description": scenario, "sources": workspace.sources,
         "source_notes": workspace.notes, "source_omissions": getattr(workspace, "omissions", []),
-        "instruction": "Восстанови карту именно этого варианта. Начни с ориентации в источниках."})}]
+        "instruction": ("Продолжи сохранённое исследование этого варианта. Принятые изменения и их ID сохранены; восстанови текущий участок из памяти." if previous else
+                        "Восстанови карту именно этого варианта. Начни с ориентации в источниках.")})}]
     started = time.monotonic()
     signatures: list[str] = []
+    rejected_signatures: list[str] = []
     idle, empty = 0, 0
     loop_recovery_used = False
     loop_recoveries = 0
     frontier_guide = GraphFrontierGuide()
-    recent_errors: list[dict] = []
+    recent_errors: list[dict] = copy.deepcopy(previous.get('recent_rejections', []))[-3:]
     failed_calls = 0
     failure_guidance_used = False
     next_compaction_step = 1
@@ -271,13 +380,66 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
         "standard" if summary_mode == "standard" and isinstance(template, dict) and "enable_thinking" in template
         else state.model['run']['model_mode'])
     audited_client = None
+    checkpoint_failed = False
+    if previous:
+        # No old transcript, pending tool batch or provider reasoning is replayed.
+        messages = compact_context(messages, state, message_budget, brief=_brief, force=True)
+        frontier_guide.message(state)
+        frontier_guide.at_link_progress = {node['id'] for node in state.model['nodes']}
+        frontier_guide.at_last_nudge = set(frontier_guide.at_link_progress)
+        record('research_resumed', parent_run_id=previous.get('id'), attempt=state.model['run']['attempt'],
+               mode=state.model['run']['resume_mode'], checkpoint_sha256=resume_checkpoint['_resume']['state_sha256'],
+               previous_steps=previous_steps, new_max_steps=max_steps, new_max_seconds=max_seconds)
+
+    last_state_event = None
 
     def save():
-        if checkpoint:
-            checkpoint(state.snapshot())
+        nonlocal last_state_event, checkpoint_failed
+        state.model['run']['duration_seconds'] = round(time.monotonic() - started, 3)
+        state.model['run']['total_duration_seconds'] = round(previous_seconds + state.model['run']['duration_seconds'], 3)
+        state.model['run']['total_steps'] = previous_steps + state.model['run']['steps']
+        snapshot = state.snapshot()
+        coverage = snapshot.get('research_coverage') or {}
+        validation = snapshot.get('validation') or {}
+        scope = snapshot.get('scenario') or {}
+        outgoing = {edge['source'] for edge in snapshot.get('edges', []) if edge.get('kind') != 'data'}
+        terminals = set(scope.get('terminal_operation_ids', []))
+        graph = {key: snapshot.get(key) for key in ('semantic_profile', 'scenario', 'nodes', 'edges')}
+        event = {
+            'semantic_profile': snapshot.get('semantic_profile'),
+            'map_state_sha256': hashlib.sha256(_json(graph).encode('utf-8')).hexdigest(),
+            'scope': {key: scope.get(key) for key in ('variant_context', 'instance_unit', 'variant_factors',
+                                                     'start', 'end', 'exclusions')},
+            'nodes': len(snapshot.get('nodes', [])), 'edges': len(snapshot.get('edges', [])),
+            'gaps': len(snapshot.get('gaps', [])),
+            'open_continuations': sum(n['id'] not in outgoing and n['id'] not in terminals
+                                      for n in snapshot.get('nodes', [])),
+            'coverage_status': coverage.get('status', 'unknown'),
+            'partial_tasks': sum(row.get('status') == 'partial' for row in coverage.get('tasks', [])),
+            'unmapped_actions': len(snapshot.get('detail_review', {}).get('unmapped_action_ids', [])),
+            'structural_issues': len(validation.get('structural_issues', [])),
+            'coverage_issues': len(validation.get('coverage_issues', [])),
+            'status': snapshot['run'].get('status'), 'stop_kind': snapshot['run'].get('stop_kind'),
+        }
+        signature = _json(event)
+        if signature != last_state_event:
+            record('research_state', step=snapshot['run'].get('steps', 0), **event)
+            last_state_event = signature
+        if checkpoint and not checkpoint_failed:
+            try:
+                checkpoint(make_checkpoint(state, contract, snapshot))
+            except Exception as exc:
+                checkpoint_failed = True
+                state.model['run']['checkpoint_persistence'] = 'failed'
+                raise CheckpointError("Не удалось сохранить checkpoint; исследование остановлено.",
+                                      str(sanitize(str(exc)))[:300]) from exc
 
     try:
         save()
+        if finished_research:
+            # A crash after accepted finish may precede HTML/group publication.
+            # Restore those outputs without asking the researcher to run again.
+            return state.snapshot()
         # The opening stays in context after every compaction, so it must fit the window itself.
         opening_size = sum(len(_json(m)) for m in messages)
         if opening_size + 1600 > message_budget:
@@ -291,7 +453,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
         with trace_span("scenario_research", model=spec.model):
             for step in range(1, max_steps + 1):
                 if time.monotonic() - started >= max_seconds:
-                    state.model["run"].update(status="partial", reason="Достигнут лимит времени исследования.")
+                    state.model["run"].update(status="partial", stop_kind="time_limit", reason="Достигнут лимит времени исследования.")
                     break
                 state.model["run"]["steps"] = step
                 message_size = sum(len(_json(m)) for m in messages)
@@ -326,7 +488,10 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                 with trace_span("scenario_step", step=step):
                     reply = call_model(audited_client, messages, deadline=started + max_seconds,
                                        before_retry=save, on_event=on_event,
-                                       tools=schemas, temperature=0, max_tokens=response_tokens)
+                                       tools=schemas, temperature=0, max_tokens=response_tokens,
+                                       recovery_max_tokens=min(32768, max(response_tokens, int(window -
+                                           (sum(len(_json(m)) for m in messages) + len(_json(schemas))) / 1.6 - 2048))),
+                                       context_window=window)
                     calls = reply.tool_calls or []
                     assistant = {"role": "assistant", "content": reply.text or ""}
                     if calls:
@@ -338,11 +503,12 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         messages.append({"role": "user", "content":
                             "Сохрани выводы инструментами карты и вызови finish. Текст ответа не завершает исследование."})
                         if empty >= 3:
-                            state.model["run"].update(status="partial", reason="Модель не сохранила результат инструментами.")
+                            state.model["run"].update(status="partial", stop_kind="no_result", reason="Модель не сохранила результат инструментами.")
                             break
+                        save()
                         continue
                     empty = 0
-                    before = _progress(state)
+                    before = (_progress(state), len(toolkit.discovery_results))
                     accepted_finish = False
                     for call in calls:
                         if accepted_finish or time.monotonic() - started >= max_seconds:
@@ -360,7 +526,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             # needed ranges): a bare message made the model resend
                             # the same rejected arguments.
                             rejection = {"tool": name, "code": payload.get("code", ""), "error": str(sanitize(
-                                payload.get("error", payload.get("errors", "Вызов отклонён"))))[:1600]}
+                                payload.get("error", payload.get("errors", payload.get("source_data", "Вызов отклонён")))))[:1600]}
                             if payload.get("details"):
                                 details = sanitize(payload["details"])
                                 rejection["details"] = details if len(_json(details)) <= 3000 else {"truncated": _json(details)[:3000]}
@@ -368,26 +534,38 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             recent_errors = recent_errors[-3:]
                             state.model["run"]["recent_rejections"] = copy.deepcopy(recent_errors)
                             failed_calls += 1
-                        signature = _json(function)
+                            rejected_signatures.append(_rejection_key(function, payload))
+                            rejected_signatures = rejected_signatures[-12:]
+                        signature = _tool_signature(function, payload)
                         signatures.append(signature)
+                        signatures = signatures[-12:]
                         if name == "finish" and payload.get("ok"):
                             accepted_finish = True
+                            state.model["run"]["stop_kind"] = "finish"
+                            state.model["run"]["research_completion"] = {
+                                "status": payload['status'], "reason": payload.get('reason', ''), "step": step}
+                        # Commit each tool before callbacks or the next call in
+                        # this batch; resume never replays the discarded suffix.
+                        save()
                         if on_event:
                             on_event("tool", {"name": name, "ok": payload.get("ok"), "step": step,
                                               "nodes": len(state.model.get("nodes", [])),
                                               "edges": len(state.model.get("edges", []))})
-                    # New observations/lines/notes/maps count; looking at the same
-                    # material again does not reset the no-progress guard.
-                    changed = before != _progress(state)
+                    # Only new successful discovery content, read lines or
+                    # accepted research changes can clear the failure history.
+                    changed = before != (_progress(state), len(toolkit.discovery_results))
                     idle = 0 if changed else idle + 1
+                    cleanup_changed = bool(recent_errors or failed_calls or failure_guidance_used or loop_recovery_used)
                     if changed:
                         signatures.clear()
+                        rejected_signatures.clear()
                         recent_errors.clear()
                         state.model["run"]["recent_rejections"] = []
                         failed_calls = 0
                         failure_guidance_used = False
                         loop_recovery_used = False
-                    save()
+                    if changed and cleanup_changed:
+                        save()
                     if accepted_finish:
                         break
                     frontier_message = frontier_guide.message(state)
@@ -395,7 +573,7 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                         messages.append({"role": "user", "content": frontier_message})
                         record("graph_frontier_guidance", step=step, nodes=len(state.model.get("nodes", [])),
                                edges=len(state.model.get("edges", [])))
-                    if _cycle(signatures) or idle >= 24:
+                    if _cycle(signatures) or _cycle(rejected_signatures) or idle >= 24 or failed_calls >= 8:
                         if not loop_recovery_used and loop_recoveries < 3:
                             loop_recovery_used = True
                             loop_recoveries += 1
@@ -409,12 +587,14 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                                 "research_tasks — вложенные исполнители/промпты и незавершённые участки. "
                                 "Не начинай обзор заново. Если продолжение невозможно, сохрани пробелы и заверши через finish." +
                                 _failure_guidance(recent_errors)})
-                            record("research_loop_recovery", step=step, idle=idle)
+                            record("research_loop_recovery", step=step, idle=idle, failed_calls=failed_calls)
                             signatures.clear()
+                            rejected_signatures.clear()
                             idle = 0
+                            failed_calls = 0
                             save()
                             continue
-                        state.model["run"].update(status="partial", reason="Исследование остановлено: повторение действий без нового результата.")
+                        state.model["run"].update(status="partial", stop_kind="no_progress", reason="Исследование остановлено: повторение действий без нового результата.")
                         break
                     if failed_calls >= 3 and not failure_guidance_used:
                         # Varying a bad quote or its bounds evades exact-call cycle
@@ -433,21 +613,31 @@ def run_agent(workspace, scenario: str, spec, *, client=None,
                             "Карта давно не менялась. Сохрани операции и переходы, уже установленные "
                             "прочитанным кодом, и продолжи текущий участок."})
             else:
-                state.model["run"].update(status="partial", reason="Достигнут лимит шагов исследования.")
+                state.model["run"].update(status="partial", stop_kind="step_limit", reason="Достигнут лимит шагов исследования.")
+    except CheckpointError as exc:
+        state.model['run'].update(status='partial' if state.model.get('nodes') else 'failed',
+                                  stop_kind='checkpoint_error', reason=exc.render())
+        record('checkpoint_failed', reason=exc.render())
     except ModelDeadlineExceeded as exc:
-        state.model["run"].update(status="partial", reason=str(exc))
+        state.model["run"].update(status="partial", stop_kind="time_limit", reason=str(exc))
     except KeyboardInterrupt:
-        state.model["run"].update(status="partial", reason="Исследование прервано пользователем.", interrupted=True)
+        state.model["run"].update(status="partial", stop_kind="cancelled", reason="Исследование прервано пользователем.", interrupted=True)
     except Exception as exc:
         hint = str(sanitize(getattr(exc, "hint", "")))[:500]
         record("scenario_error", error_type=type(exc).__name__, error_message=str(exc), hint=hint)
-        state.model["run"].update(status="partial" if state.model.get("nodes") else "failed",
+        state.model["run"].update(status="partial" if state.model.get("nodes") else "failed", stop_kind="error",
                                   reason=str(sanitize(f"Ошибка исследования: {exc}")) + (f" {hint}" if hint else ""))
     finally:
         if audited_client is not None:
             audited_client.flush()
     state.model["run"]["duration_seconds"] = round(time.monotonic() - started, 3)
     if state.model["run"].get("status") == "running":
-        state.model["run"].update(status="partial", reason="Исследование остановлено без принятого завершения.")
-    save()
+        state.model["run"].update(status="partial", stop_kind="no_finish", reason="Исследование остановлено без принятого завершения.")
+    if not checkpoint_failed:
+        try:
+            save()
+        except CheckpointError as exc:
+            state.model['run'].update(status='partial' if state.model.get('nodes') else 'failed',
+                                      stop_kind='checkpoint_error', reason=exc.render())
+            record('checkpoint_failed', reason=exc.render())
     return state.snapshot()

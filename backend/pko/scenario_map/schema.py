@@ -22,6 +22,7 @@ from pko.scenario_map.quality import ResearchQuality, QualityError, EFFECT_KINDS
 from pko.scenario_map.code_references import code_only
 
 SCHEMA_VERSION = "2.0"
+SEMANTIC_PROFILE = "variant-actions-v1"
 STEP_KINDS = ("operation",)
 OUTCOME_KINDS = ("success", "refusal", "failure", "cancelled", "deferred", "no_decision", "unknown")
 EDGE_KINDS = ("sequence", "branch", "call", "event", "return", "retry", "error")
@@ -96,9 +97,10 @@ class MapState(ResearchQuality):
         self._source_ids = set(source_ids)
         self.model: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
+            "semantic_profile": SEMANTIC_PROFILE,
             # The process description is bounded by the model window, checked before research.
             "scenario": {"description": _text(scenario_description, "scenario_description", required=True, limit=None),
-                         "title": "", "process_name": "", "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
+                         "title": "", "process_name": "", "variant_context": "", "instance_unit": "", "variant_factors": [], "start": "", "end": "", "exclusions": [], "assumptions": [], "entry_operation_ids": [], "terminal_operation_ids": []},
             "sources": sources, "nodes": [], "edges": [], "gaps": [],
             "source_reviews": [], "execution_reviews": [], "research_notes": [], "research_brief": None, "context_summary": None,
             "research_tasks": [], "semantic_review": None,
@@ -135,7 +137,8 @@ class MapState(ResearchQuality):
              "ranges": self._ranges(sorted(lines))}
             for path, lines in sorted(self._reads.items()) if lines
         ]
-        result["validation"] = {"issues": self._finish_errors(), "semantic_verification": False}
+        result["validation"] = self.validation_signals()
+        result["research_coverage"] = self.research_coverage()
         result["detail_review"] = self._detail_summary()
         result["research_history"] = self.research_memory.snapshot()
         result["research_history_evicted"] = self.research_memory.evicted_metadata_count
@@ -196,13 +199,13 @@ class MapState(ResearchQuality):
             raise MapValidationError(f"Путь не относится к известному источнику: {path}")
         return source
 
-    def _evidence(self, value: Any, field: str = "evidence") -> list[dict[str, Any]]:
+    def _evidence(self, value: Any, field: str = "evidence", *, limit: int = MAX_EVIDENCE) -> list[dict[str, Any]]:
         if isinstance(value, dict):
             value = [value]
         if value is None:
             value = []
-        if not isinstance(value, list) or len(value) > MAX_EVIDENCE:
-            raise MapValidationError(f"{field}: ожидается до {MAX_EVIDENCE} цитат")
+        if not isinstance(value, list) or len(value) > limit:
+            raise MapValidationError(f"{field}: ожидается до {limit} цитат")
         accepted = []
         for item in value:
             if not isinstance(item, dict):
@@ -297,7 +300,8 @@ class MapState(ResearchQuality):
             return {"ok": False, "error": "Аргументы должны быть объектом JSON"}
         args = args or {}
         allowed = {
-            "set_scope": {"title", "process_name", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
+            "set_scope": {"title", "process_name", "variant_context", "instance_unit", "variant_factors", "start", "end", "exclusions", "assumptions", "entry_operation_ids", "terminal_operation_ids"},
+            "patch_fragment": {"steps", "transitions", "remove_node_ids", "remove_edge_ids"},
             "upsert_step": {"id", "name", "kind", "description", "input", "output", "condition", "evidence_status", "evidence", "outcome", "basis", "code_explanations", "effect_kind", "continuation_mode", "join_mode", "external_interactions", "completion_condition"},
             "upsert_transition": {"id", "source", "target", "kind", "description", "condition", "data", "correlation", "evidence_status", "evidence", "sender_evidence", "receiver_evidence", "channel", "contract", "basis", "code_explanations"},
             "add_gap": {"description", "node_ids", "edge_ids", "task_ids", "category", "evidence"},
@@ -329,7 +333,7 @@ class MapState(ResearchQuality):
             result = getattr(self, f"_{name}")(args)
             if created:
                 self._require_new_fields(name, result["id"])
-            errors = self._reference_errors()
+            errors = [] if getattr(self, '_patch_in_progress', False) else self._reference_errors()
             if errors:
                 raise MapValidationError("; ".join(errors))
             if name != "finish":
@@ -382,9 +386,9 @@ class MapState(ResearchQuality):
             return ""
         parts = [f"{branches} ветвлений" if branches else "", f"{calls} вызовов других исполнителей" if calls else "",
                  f"{len(own)} строк" if long_range else ""]
-        return (f"{node['id']}: основания охватывают {', '.join(p for p in parts if p)}, которые не показаны другими операциями. "
-                "Каждый шаг процесса должен быть отдельной операцией: если здесь несколько проверок, вызовов, расчётов "
-                "или результатов, раздели эту операцию и свяжи части переходами.")
+        return (f"{node['id']}: основания охватывают {', '.join(p for p in parts if p)}, которые не показаны другими действиями. "
+                "Самостоятельные действия с предметом и результатом разделяются; служебные строки и предикаты выбора не требуют узла. "
+                "Проверь, нужно ли разделить этот узел, сохранив подтверждённые переходы.")
 
     def _hints(self, name: str, result: dict[str, Any]) -> list[str]:
         """Immediate, non-blocking feedback; finish still enforces the hard rules."""
@@ -398,7 +402,7 @@ class MapState(ResearchQuality):
                 hints.append(hint)
             if re.search(r"\s(?:и|или|а также)\s", node.get("name", "")):
                 hints.append(f"{node['id']}: в названии несколько действий через «и»/«или»; если это отдельные шаги процесса, "
-                             "сделай из них отдельные операции.")
+                             "покажи каждое самостоятельное действие отдельным узлом.")
             if (node.get("continuation_mode") == "choice" and node.get("outcome", "unknown") != "unknown"
                     and not (node['id'] in terminals and node.get('completion_condition'))):
                 hints.append(f"{node['id']}: у операции с выбором продолжения нет единственного исхода; outcome не указывай, "
@@ -511,7 +515,8 @@ class MapState(ResearchQuality):
         if section == "summary":
             return {"section": section, "model": compact({
                 "scenario": self.model["scenario"], "run": self.model["run"], "summary": self.model["summary"],
-                "counts": counts, "validation": {"issues": self._finish_errors()},
+                "counts": counts, "validation": self.validation_signals(),
+                "research_coverage": self.research_coverage(),
                 "limitations": self.model["limitations"], "detail_review": self._detail_summary(),
                 "research_notes": len(self.model["research_notes"]),
                 "research_brief_revision": (self.model["research_brief"] or {}).get("revision"),
@@ -522,12 +527,15 @@ class MapState(ResearchQuality):
         if section == "read_coverage":
             rows = self.snapshot()[section]
         elif section == "validation":
-            rows = self._finish_errors()
+            signals = self.validation_signals()
+            rows = ([{'kind': 'structural', 'issue': message} for message in signals['structural_issues']] +
+                    [{'kind': 'coverage', 'issue': message} for message in signals['coverage_issues']])
         elif section == "operations":
             rows = [{**operation, "review_id": review["id"]}
                     for review in self.model["execution_reviews"] for operation in review["operations"]]
         else:
             rows = self.model[section]
+        coverage = {row['task_id']: row for row in self.research_coverage()['tasks']} if section == 'research_tasks' else {}
         page, size = [], 0
         for row in rows[offset - 1:offset - 1 + limit]:
             # Notes already have strict field limits. Do not lose the latter
@@ -536,6 +544,7 @@ class MapState(ResearchQuality):
                 item = deepcopy(row)
                 item["evidence"] = [{k: v for k, v in ref.items() if k != "quote"}
                                     for ref in item["evidence"]]
+                if section == 'research_tasks': item['coverage'] = coverage.get(item['id'])
             else:
                 item = compact(row)
             length = len(json.dumps(item, ensure_ascii=False))
@@ -621,6 +630,9 @@ class MapState(ResearchQuality):
         self.model["scenario"].update({
             "title": _text(args.get("title"), "title", required=True, limit=300),
             "process_name": _text(args.get("process_name", ""), "process_name", limit=300),
+            **{key: _text(args.get(key, self.model['scenario'].get(key, '')), key)
+               for key in ('variant_context', 'instance_unit')},
+            "variant_factors": _strings(args.get('variant_factors', self.model['scenario'].get('variant_factors', [])), 'variant_factors'),
             # The header and overview show these to the process owner, so they are business text.
             "start": self.business_text(args.get("start"), "start", MAX_TEXT),
             "end": self.business_text(args.get("end"), "end", MAX_TEXT),
@@ -719,6 +731,66 @@ class MapState(ResearchQuality):
         self.model[collection] = [row for row in self.model[collection] if row["id"] != identifier]
         return {"removed": identifier}
 
+    def _patch_fragment(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Commit a bounded graph replacement; dispatch provides outer rollback."""
+        rows = {}
+        for key in ('steps', 'transitions', 'remove_node_ids', 'remove_edge_ids'):
+            value = args.get(key, [])
+            if not isinstance(value, list):
+                raise MapValidationError(f'{key}: требуется список')
+            rows[key] = value
+        if not 1 <= sum(map(len, rows.values())) <= 100:
+            raise MapValidationError('patch_fragment: от 1 до 100 изменений')
+        remove_nodes = set(_strings(rows['remove_node_ids'], 'remove_node_ids'))
+        remove_edges = set(_strings(rows['remove_edge_ids'], 'remove_edge_ids'))
+        if remove_nodes - {n['id'] for n in self.model['nodes']} or remove_edges - {e['id'] for e in self.model['edges']}:
+            raise MapValidationError('Удаляемые ID должны существовать; пакет не применён')
+        local_ids, results = {}, {'steps': [], 'transitions': []}
+        self._patch_in_progress = True
+        try:
+            for key, tool in (('steps', 'upsert_step'), ('transitions', 'upsert_transition')):
+                for raw in rows[key]:
+                    if not isinstance(raw, dict):
+                        raise MapValidationError(f'{key}: изменение должно быть объектом')
+                    item = dict(raw)
+                    alias = item.pop('local_ref', None) if key == 'steps' else None
+                    if alias is not None:
+                        if item.get('id') or not isinstance(alias, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', alias) or alias in local_ids:
+                            raise MapValidationError('local_ref: уникальное локальное имя только для нового действия')
+                    if item.get('id') in (remove_nodes if key=='steps' else remove_edges):
+                        raise MapValidationError('Нельзя одновременно изменить и удалить один объект')
+                    if key == 'transitions':
+                        for field in ('source', 'target'):
+                            value = item.get(field)
+                            if isinstance(value, str) and value.startswith('$'):
+                                if value[1:] not in local_ids:
+                                    raise MapValidationError(f'{field}: неизвестный local_ref {value}')
+                                item[field] = local_ids[value[1:]]
+                    response = self.dispatch(tool, item)
+                    if not response.get('ok'):
+                        raise MapValidationError(response.get('error', 'Изменение отклонено'), response.get('code', 'invalid_arguments'))
+                    results[key].append(response['id'])
+                    if alias is not None: local_ids[alias] = response['id']
+            self.model['nodes'] = [n for n in self.model['nodes'] if n['id'] not in remove_nodes]
+            self.model['edges'] = [e for e in self.model['edges'] if e['id'] not in remove_edges]
+            # Retain discovered actions and old fingerprints: the changed review
+            # is stale, but its obsolete graph references must not block a repair.
+            for review in self.model['execution_reviews']:
+                for operation in review['operations']:
+                    if operation['node_id'] in remove_nodes:
+                        operation.update(node_id='', mapping_status='unmapped')
+                for check in review['checks'].values():
+                    check['node_ids'] = [n for n in check['node_ids'] if n not in remove_nodes]
+                    check['edge_ids'] = [e for e in check['edge_ids'] if e not in remove_edges]
+            for task in self.model['research_tasks']:
+                task['node_ids'] = [n for n in task['node_ids'] if n not in remove_nodes]
+        finally:
+            self._patch_in_progress = False
+        unknown_boundaries = set(self.model['scenario']['entry_operation_ids'] + self.model['scenario']['terminal_operation_ids']) - {n['id'] for n in self.model['nodes']}
+        if unknown_boundaries:
+            raise MapValidationError('Сначала пересмотрите границы сценария: удаление оставит неизвестные входы/завершения')
+        return {**results, 'local_ids': local_ids, 'removed_node_ids': sorted(remove_nodes), 'removed_edge_ids': sorted(remove_edges)}
+
     @staticmethod
     def _fingerprint(value: Any) -> str:
         # Renaming or explaining an action does not alter its execution. Conditions, results, provenance, and transitions still do.
@@ -742,36 +814,47 @@ class MapState(ResearchQuality):
         No natural-language heuristic pretends to prove that an action is atomic.
         """
         identifier = self._id("execution_reviews", "review", args.get("id"), MAX_NODES)
-        evidence = self._evidence(args.get("evidence", []))
+        evidence = self._evidence(args.get("evidence", []), limit=100)
         if not evidence:
             raise MapValidationError("review_execution требует прочитанные основания обследованного исполнения")
         raw_operations = args.get("operations")
-        if not isinstance(raw_operations, list) or not 1 <= len(raw_operations) <= 100:
-            raise MapValidationError("operations: укажите от 1 до 100 атомарных операций; большой обзор разделите на несколько исполнителей")
+        if not isinstance(raw_operations, list) or len(raw_operations) > 100:
+            raise MapValidationError("operations: укажите до 100 самостоятельных действий; пустой перечень допустим, если обследованный участок их не содержит")
         nodes = {node["id"]: node for node in self.model["nodes"]}
         old = next((r for r in self.model["execution_reviews"] if r["id"] == identifier), {})
         old_ids = {op["node_id"]: op["id"] for op in old.get("operations", [])}
+        old_actions = {op['id']: op for op in old.get('operations', [])}
         used_nodes: set[str] = set()
+        used_actions: set[str] = set()
         operations = []
         for raw in raw_operations:
-            if not isinstance(raw, dict) or set(raw) - {"node_id", "name", "kind", "action", "effect", "failure", "condition", "evidence"}:
+            if not isinstance(raw, dict) or set(raw) - {"id", "node_id", "name", "kind", "action", "effect", "failure", "condition", "evidence"}:
                 raise MapValidationError("operations: неверная структура операции")
-            node_id = _text(raw.get("node_id"), "operations.node_id", required=True)
-            if node_id not in nodes:
+            node_id = _text(raw.get("node_id") or "", "operations.node_id")
+            if node_id and node_id not in nodes:
                 raise MapValidationError(f"{node_id}: операция должна ссылаться на существующий узел")
-            if node_id in used_nodes:
+            if node_id and node_id in used_nodes:
                 raise MapValidationError(f"{node_id}: несколько действий нельзя свернуть в одну операцию; создайте отдельные узлы")
-            used_nodes.add(node_id)
-            citations = self._evidence(raw.get("evidence", []), "operations.evidence")
+            if node_id:
+                used_nodes.add(node_id)
+            citations = self._evidence(raw.get("evidence", nodes[node_id]['evidence'] if node_id else []), "operations.evidence")
             if not citations:
                 raise MapValidationError(f"{node_id}: нужны основания операции")
-            if not any(self._overlap(a, b) for a in citations for b in nodes[node_id]["evidence"]):
+            if node_id and not any(self._overlap(a, b) for a in citations for b in nodes[node_id]["evidence"]):
                 raise MapValidationError(f"{node_id}: основания операции не относятся к основаниям узла")
-            self.require_coverage(node_id, "operations.evidence", citations, evidence)
-            self.require_coverage(node_id, "node.evidence", nodes[node_id]["evidence"], evidence)
-            if node_id not in old_ids:
+            self.require_coverage(node_id or 'unmapped', "operations.evidence", citations, evidence)
+            if node_id:
+                self.require_coverage(node_id, "node.evidence", nodes[node_id]["evidence"], evidence)
+            action_id = raw.get('id') or (old_ids.get(node_id) if node_id else None)
+            if action_id and action_id not in old_actions:
+                raise MapValidationError('operations.id: используйте ID действия из обновляемого обзора')
+            if not action_id:
                 self._counters["op"] += 1
-            operation = {"id": old_ids.get(node_id, f"op-{self._counters['op']}"), "node_id": node_id,
+                action_id = f"op-{self._counters['op']}"
+            if action_id in used_actions:
+                raise MapValidationError('operations.id: повтор действия в обзоре')
+            used_actions.add(action_id)
+            operation = {"id": action_id, "node_id": node_id, "mapping_status": "mapped" if node_id else "unmapped",
                          "kind": _choice(raw.get("kind"), "operations.kind", OPERATION_KINDS),
                          "evidence": citations}
             for field in ("name", "action", "effect", "failure"):
@@ -787,7 +870,7 @@ class MapState(ResearchQuality):
             if not isinstance(raw, dict) or set(raw) - {"status", "explanation", "evidence", "node_ids", "edge_ids", "gap_ids"}:
                 raise MapValidationError(f"checks.{category}: неверная структура")
             status = _choice(raw.get("status"), f"checks.{category}.status", ("present", "not_found", "unknown"))
-            citations = self._evidence(raw.get("evidence", []), f"checks.{category}.evidence")
+            citations = self._evidence(raw.get("evidence", evidence), f"checks.{category}.evidence", limit=100)
             if not self._within(citations, evidence):
                 raise MapValidationError(f"checks.{category}: цитата вне области обзора")
             check = {"status": status, "explanation": _text(raw.get("explanation"), f"checks.{category}.explanation", required=True),
@@ -796,7 +879,7 @@ class MapState(ResearchQuality):
                 check[field] = _strings(raw.get(field, []), f"checks.{category}.{field}", limit=MAX_NODES)
             if status != "unknown" and not citations:
                 raise MapValidationError(f"checks.{category}: вывод требует цитат обследованного участка")
-            if status == "present" and not (check["node_ids"] or check["edge_ids"]):
+            if status == "present" and not (check["node_ids"] or check["edge_ids"] or any(not op['node_id'] for op in operations)):
                 raise MapValidationError(f"checks.{category}: обнаруженное поведение должно быть показано узлами или переходами")
             if status == "not_found" and (check["node_ids"] or check["edge_ids"]):
                 raise MapValidationError(f"checks.{category}: not_found не может одновременно ссылаться на найденное поведение")
@@ -831,13 +914,16 @@ class MapState(ResearchQuality):
                     errors.append(f"{gap['id']}: неизвестные ссылки {key}")
         assigned = {}
         for review in self.model["execution_reviews"]:
-            reviewed = {op["node_id"] for op in review["operations"]}
+            reviewed = {op["node_id"] for op in review["operations"] if op['node_id']}
             for op in review["operations"]:
+                if not op['node_id']:
+                    continue
                 if op["node_id"] not in nodes:
                     errors.append(f"{op['id']}: запись обзора ссылается на отсутствующую операцию карты")
-                if op["node_id"] in assigned:
+                if op["node_id"] in assigned and any(op.get(k) != assigned[op['node_id']].get(k)
+                                                     for k in ('kind', 'action', 'effect', 'failure', 'condition', 'evidence')):
                     errors.append(f"{op['node_id']}: несколько операций не могут быть скрыты в одном узле")
-                assigned[op["node_id"]] = op["id"]
+                assigned[op["node_id"]] = op
             for category, check in review["checks"].items():
                 if set(check["node_ids"]) - set(nodes) or set(check["edge_ids"]) - set(edges) or set(check["gap_ids"]) - set(gaps):
                     errors.append(f"{review['id']}.{category}: неизвестные ссылки узлов, переходов или пробелов")
@@ -848,9 +934,13 @@ class MapState(ResearchQuality):
                     errors.append(f"{review['id']}.{category}: переход не относится к обследованным операциям")
                 if check["status"] == "unknown" and not any(
                     reviewed.intersection(gaps[g]["node_ids"]) or
-                    any(edges[e]["source"] in reviewed or edges[e]["target"] in reviewed for e in gaps[g].get("edge_ids", []))
+                    any(edges[e]["source"] in reviewed or edges[e]["target"] in reviewed for e in gaps[g].get("edge_ids", [])) or
+                    any(tasks.get(t, {}).get('evidence') and tasks[t]['status'] != 'out_of_scope'
+                        and gaps[g].get('evidence') and self._within(gaps[g]['evidence'], review['evidence'])
+                        and self._within(tasks[t]['evidence'], review['evidence'])
+                        for t in gaps[g].get('task_ids', []))
                     for g in check["gap_ids"]):
-                    errors.append(f"{review['id']}.{category}: gap должен относиться к обследованным операциям")
+                    errors.append(f"{review['id']}.{category}: gap должен относиться к обследованным действиям или области исполнения")
         for task in tasks.values():
             for key, existing in (("node_ids", nodes), ("gap_ids", gaps), ("child_task_ids", tasks)):
                 if set(task.get(key, [])) - set(existing):
@@ -875,7 +965,10 @@ class MapState(ResearchQuality):
         nodes = {node["id"]: node for node in self.model["nodes"]}
         edges = {edge["id"]: edge for edge in self.model["edges"]}
         operations = [op for review in reviews for op in review["operations"]]
-        mapped = {op["node_id"] for op in operations}
+        mapped = {op["node_id"] for op in operations if op['node_id']}
+        for op in operations:
+            if not op['node_id']:
+                errors.append(f"{op['id']}: найденное действие ещё не отображено на карте")
         required = self._reviewable_operations()
         unknown_operations = {n["id"] for n in nodes.values() if n["kind"] in OPERATION_NODE_KINDS} - required
         if (required and (not reviews or not any(op["node_id"] in required for op in operations))) or (not required and not unknown_operations):
@@ -883,8 +976,7 @@ class MapState(ResearchQuality):
         for identifier in sorted(required - mapped):
             errors.append(f"{identifier}: операция не сопоставлена с записью review_execution")
         for review in reviews:
-            review_nodes = {op["node_id"] for op in review["operations"]}
-            kinds = {op["kind"] for op in review["operations"]}
+            review_nodes = {op["node_id"] for op in review["operations"] if op['node_id']}
             incident = [edge for edge in edges.values() if edge["source"] in review_nodes or edge["target"] in review_nodes]
             incident_ids = {edge["id"] for edge in incident}
             reviewed_edge_ids = set(review["edge_fingerprints"])
@@ -902,21 +994,43 @@ class MapState(ResearchQuality):
                 node = nodes.get(operation["node_id"])
                 if node and not self._within(node["evidence"], review["evidence"]):
                     errors.append(f"{operation['id']}: основания узла выходят за обследованную область")
-            present = {
-                "branches": (any(sum(e["source"] == n and e["kind"] != "data" for e in incident) > 1 for n in review_nodes)
-                             or any(e["kind"] == "branch" for e in incident)),
-                "failures": "error_handling" in kinds or any(e["kind"] in ("error", "retry") for e in incident),
-                "integrations": bool(kinds.intersection({"integration", "publish"})) or any(
-                    e["kind"] in ("call", "event", "return") or
-                    (e["source"] in nodes and bool(nodes[e["source"]].get("external_interactions")))
-                    for e in incident),
-                "state_changes": "write" in kinds,
-                "computations": bool(kinds.intersection({"calculation", "transform"})),
-            }
+            present = self._review_presence(review, nodes, edges) if self._review_is_current(review, nodes, edges) else {}
             for category, found in present.items():
                 if found and review["checks"][category]["status"] == "not_found":
                     errors.append(f"{review['id']}.{category}: карта/реестр уже содержит это поведение; not_found противоречит результату")
         return errors
+
+    def _review_is_current(self, review, nodes=None, edges=None):
+        """A review describes its recorded graph revision, not later behaviour."""
+        if nodes is None:
+            nodes = {node['id']: node for node in self.model['nodes']}
+        if edges is None:
+            edges = {edge['id']: edge for edge in self.model['edges']}
+        if any(identifier not in nodes or self._fingerprint(nodes[identifier]) != fingerprint
+               for identifier, fingerprint in review['node_fingerprints'].items()):
+            return False
+        incident = {edge['id'] for edge in edges.values()
+                    if edge['source'] in review['node_fingerprints'] or edge['target'] in review['node_fingerprints']}
+        return incident == set(review['edge_fingerprints']) and all(
+            identifier in edges and self._fingerprint(edges[identifier]) == fingerprint
+            for identifier, fingerprint in review['edge_fingerprints'].items())
+
+    @staticmethod
+    def _review_presence(review, nodes, edges):
+        reviewed = {op['node_id'] for op in review['operations'] if op['node_id']}
+        kinds = {op['kind'] for op in review['operations']}
+        # Incoming routes describe their source action, which may be outside the
+        # independently inspected fragment. They cannot contradict its not_found.
+        outgoing = [e for e in edges.values() if e['source'] in reviewed]
+        return {
+            'branches': any(sum(e['source']==n and e['kind']!='data' for e in outgoing)>1 for n in reviewed) or any(e['kind']=='branch' for e in outgoing),
+            'failures': 'error_handling' in kinds or any(e['kind'] in ('error','retry') for e in outgoing),
+            'integrations': bool(kinds.intersection({'integration','publish'})) or any(
+                e['kind'] in ('call','event','return') for e in outgoing) or any(
+                nodes.get(identifier, {}).get('external_interactions') for identifier in reviewed),
+            'state_changes': 'write' in kinds,
+            'computations': bool(kinds.intersection({'calculation','transform'})),
+        }
 
     def _detail_summary(self) -> dict[str, Any]:
         if "execution_reviews" not in self.model:
@@ -934,6 +1048,7 @@ class MapState(ResearchQuality):
                 "review_count": len(reviews), "operation_count": len(operations),
                 "required_nodes": len(required), "mapped_nodes": len(required.intersection(mapped)),
                 "unmapped_node_ids": sorted(required - mapped), "issues": issues,
+                "unmapped_action_ids": [op['id'] for op in operations if not op['node_id']],
                 "unknown_node_ids": unknown_nodes, "external_node_ids": external_nodes,
                 "registry_coverage_checked": bool(reviews) and not issues,
                 "semantic_completeness_verified": False}
@@ -1018,6 +1133,51 @@ class MapState(ResearchQuality):
         errors.extend(self.quality_errors())
         return errors
 
+    def validation_signals(self) -> dict[str, Any]:
+        """Separate malformed execution structure from honest research deficits."""
+        structural = self._reference_errors()
+        nodes = {n['id']: n for n in self.model['nodes']}
+        starts = set(self.model['scenario']['entry_operation_ids'])
+        ends = set(self.model['scenario']['terminal_operation_ids'])
+        if (starts | ends) - set(nodes):
+            structural.append('Границы сценария ссылаются на неизвестные операции')
+        outgoing = {n: set() for n in nodes}
+        for edge in self.model['edges']:
+            if edge['source'] in nodes and edge['target'] in nodes and edge['kind'] != 'data':
+                outgoing[edge['source']].add(edge['target'])
+        for identifier, node in nodes.items():
+            links = [e for e in self.model['edges'] if e['source']==identifier and e['kind']!='data']
+            if identifier in ends and outgoing[identifier] and not node.get('completion_condition'):
+                structural.append(f'{identifier}: конечная операция имеет исходящее продолжение; укажите смысловое completion_condition')
+            if node.get('completion_condition') and identifier not in ends:
+                structural.append(f'{identifier}: completion_condition требует включения в terminal_operation_ids')
+            if len(links) > 1 and node.get('continuation_mode', 'sequence') == 'sequence':
+                structural.append(f'{identifier}: несколько связей требуют continuation_mode=choice или all')
+            if (len(links)>1 or node.get('completion_condition')) and any(not e['condition'].strip() for e in links):
+                structural.append(f'{identifier}: несколько направлений требуют условий на всех выходах; общий участок не должен терять категорию маршрута')
+        structural.extend(self._loop_exit_errors(nodes, outgoing))
+        edge_index = {edge['id']: edge for edge in self.model['edges']}
+        current_reviews = [review for review in self.model['execution_reviews'] if self._review_is_current(review, nodes, edge_index)]
+        structural.extend(self._reviewed_kind_errors(current_reviews))
+        for task in self.model['research_tasks']:
+            if task['status'] == 'out_of_scope':
+                reason = self._task_exclusion_error(task)
+                if reason:
+                    structural.append(f"{task['id']}: исключение задачи не соответствует границе или карте: {reason}")
+        for review in current_reviews:
+            for category, found in self._review_presence(review, nodes, edge_index).items():
+                if found and review['checks'][category]['status']=='not_found':
+                    structural.append(f"{review['id']}.{category}: карта/реестр уже содержит это поведение; not_found противоречит результату")
+        structural = list(dict.fromkeys(structural))
+        all_issues = self._finish_errors()
+        coverage = [issue for issue in all_issues if issue not in structural]
+        for row in self.research_coverage()['tasks']:
+            if row['status'] == 'partial':
+                coverage.append(f"{row['task_id']}: неполное покрытие; участки: {', '.join(row['incomplete_task_ids'])}")
+        coverage = list(dict.fromkeys(coverage))
+        return {'issues': structural + coverage, 'structural_issues': structural,
+                'coverage_issues': coverage, 'semantic_verification': False}
+
     @staticmethod
     def _loop_exit_errors(nodes: dict[str, dict], outgoing: dict[str, set[str]]) -> list[str]:
         """A cycle without an exit edge or conditional completion is an endless loop on the map.
@@ -1075,10 +1235,11 @@ class MapState(ResearchQuality):
 
     def _finish(self, args: dict[str, Any]) -> dict[str, Any]:
         summary = _text(args.get("summary"), "summary", required=True, limit=20000)
-        errors = self._finish_errors()
+        validation = self.validation_signals()
+        errors = validation['structural_issues']
         if errors:
             raise MapValidationError("Исправьте карту перед завершением: " + "; ".join(errors[:30]), "finish_blocked")
-        partial = bool(self.model["gaps"] or self.model["source_omissions"] or self.model["scenario"]["assumptions"]
+        partial = bool(validation['coverage_issues'] or self.model["gaps"] or self.model["source_omissions"] or self.model["scenario"]["assumptions"]
                        or any(r["disposition"] == "unavailable" for r in self.model["source_reviews"])
                        or any(r["disposition"] == "out_of_scope" and not r.get("inspected", False)
                               for r in self.model["source_reviews"])
@@ -1087,5 +1248,5 @@ class MapState(ResearchQuality):
         reason = ("Исследование завершено с предположениями, ограничениями или явно обозначенными пробелами."
                   if partial else "Исследование переданных материалов завершено; это не подтверждение семантической полноты или исполнения в рабочей среде.")
         self.model["summary"] = summary
-        self.model["run"].update(status=status, reason=reason)
+        self.model["run"].update(status=status, reason=reason, termination_kind='normal')
         return {"status": status, "reason": reason, "limitations": list(self.model["limitations"])}

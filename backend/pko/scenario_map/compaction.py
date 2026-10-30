@@ -58,6 +58,11 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
         ])))
     open_notes = [note for note in snapshot.get("research_notes", []) if note.get("status") == "open"]
     open_tasks = [task for task in snapshot.get('research_tasks', []) if task.get('status') in UNFINISHED_TASK_STATUSES]
+    pending_actions = [
+        {"review_id": review.get("id"), **_public(action)}
+        for review in snapshot.get("execution_reviews", [])
+        for action in review.get("operations", []) if not action.get("node_id")
+    ]
     payload = {
         "previous_summary": _public(snapshot.get("context_summary")),
         "current_state": {
@@ -69,6 +74,11 @@ def summary_request(messages: list[dict], state, budget: int) -> list[dict]:
             "open_tasks": bounded([_public(task) for task in open_tasks[:12]]),
             "open_task_count": len(open_tasks), "open_tasks_listed_all": len(open_tasks) <= 12,
             "recover_tasks": "inspect_map(section='research_tasks')",
+            "unmapped_actions": bounded(pending_actions[:12]),
+            "unmapped_action_count": len(pending_actions),
+            "unmapped_actions_listed_all": len(pending_actions) <= 12,
+            "recover_actions": "inspect_map(section='operations')",
+            "coverage_status": snapshot.get("research_coverage", {}).get("status", "unknown"),
             # Taken from harness state, not from model prose: the summary must
             # not drop a rejection that is still unresolved.
             "recent_rejections": bounded(snapshot.get("run", {}).get("recent_rejections", [])),
@@ -197,6 +207,7 @@ def compact_research_context(messages: list[dict], state, budget: int, *,
             "input_truncated_fields": input_metadata["truncated_field_count"],
             "input_open_notes_complete": input_metadata["current_state"]["open_notes_listed_all"],
             "input_open_tasks_complete": input_metadata["current_state"]["open_tasks_listed_all"],
+            "input_unmapped_actions_complete": input_metadata["current_state"]["unmapped_actions_listed_all"],
             "summary": summary,
         }
         accepted = True

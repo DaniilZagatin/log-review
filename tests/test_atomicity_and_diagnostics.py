@@ -109,7 +109,7 @@ class DiagnosticsTests(unittest.TestCase):
     def test_large_operation_gets_atomicity_hint(self):
         self.state.observe_read("source-1/Decide.java", 1, 9)
         large = self.node([{"path": "source-1/Decide.java", "line_start": 1, "line_end": 9}], name="Рассмотрение претензии")
-        self.assertTrue(any("Каждый шаг процесса" in hint for hint in large.get("hints", [])), large)
+        self.assertTrue(any("Самостоятельные действия" in hint and "предикаты выбора не требуют узла" in hint for hint in large.get("hints", [])), large)
         conj = self.node(name="Проверка срока и перенос рассмотрения")
         self.assertTrue(any("«и»" in hint for hint in conj.get("hints", [])), conj)
         small = self.node([{"path": "source-1/Decide.java", "line_start": 2, "line_end": 3}], name="Проверка категории торговой точки")
@@ -156,8 +156,10 @@ class InlineRoleTests(unittest.TestCase):
         self.assertTrue(node["ok"], node)
         blocked = self.state.dispatch("save_research_task", {"id": role["id"], "status": "mapped", "node_ids": [node["id"]],
             "resolution": "Роль раскрыта операцией запроса", "child_task_ids": [child["id"]]})
-        self.assertFalse(blocked["ok"])
-        self.assertIn(child["id"], blocked["error"])
+        self.assertTrue(blocked["ok"], blocked)
+        coverage = next(row for row in self.state.research_coverage()["tasks"] if row["task_id"] == role["id"])
+        self.assertEqual(coverage["status"], "partial")
+        self.assertIn(child["id"], coverage["incomplete_task_ids"])
         child_done = self.state.dispatch("save_research_task", {"id": child["id"], "status": "mapped", "node_ids": [node["id"]],
             "resolution": "Запрос показан операцией", "evidence": [{"path": "source-1/PprbAgent.java", "line_start": 1, "line_end": 3}]})
         self.assertTrue(child_done["ok"], child_done)

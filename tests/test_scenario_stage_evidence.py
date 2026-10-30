@@ -188,7 +188,7 @@ class ReviewedMapPresentationTests(unittest.TestCase):
 
     def finish(self):
         # Refresh only the separate semantic assessment; execution review
-        # fingerprints must still reject changes in behavior/evidence.
+        # fingerprints must still prevent complete status after behavior/evidence changes.
         self.helper.good('review_semantics', **fixtures.semantic_payload(self.state))
         return self.state.dispatch("finish", {"summary": "Проверен результат уточнения карты"})
 
@@ -209,8 +209,10 @@ class ReviewedMapPresentationTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.helper.good("upsert_step", **{**self.node, field: value})
                 result = self.finish()
-                self.assertFalse(result["ok"])
-                self.assertIn("после обзора", result["error"])
+                self.assertTrue(result["ok"], result)
+                self.assertEqual(result["status"], "partial")
+                self.assertTrue(any("после обзора" in issue for issue in
+                                    self.state.snapshot()["validation"]["coverage_issues"]))
                 self.helper.good("upsert_step", **self.node)
         self.assertTrue(self.finish()["ok"])
 
@@ -219,15 +221,19 @@ class ReviewedMapPresentationTests(unittest.TestCase):
         explanations = [{'kind':'fragment','symbol':'','explanation':'Изменённое тестовое основание','evidence':replacement}]
         self.helper.good("upsert_step", **{**self.node, "evidence": replacement, 'code_explanations':explanations})
         result = self.finish()
-        self.assertFalse(result["ok"])
-        self.assertIn("после обзора", result["error"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "partial")
+        self.assertTrue(any("после обзора" in issue for issue in
+                            self.state.snapshot()["validation"]["coverage_issues"]))
 
     def test_transition_business_explanation_is_distinct_from_semantic_description(self):
         edge = deepcopy(self.state.model["edges"][0])
         self.helper.good("upsert_transition", **{**edge, "description": "Продолжение выполняется новым способом"})
         result = self.finish()
-        self.assertFalse(result["ok"])
-        self.assertIn("после обзора", result["error"])
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["status"], "partial")
+        self.assertTrue(any("после обзора" in issue for issue in
+                            self.state.snapshot()["validation"]["coverage_issues"]))
 
 
 class GraphFrontierTests(unittest.TestCase):

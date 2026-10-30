@@ -76,7 +76,7 @@ async function checkBusinessStages(page, model) {
       if(outgoing.length>1)assert.equal(await page.locator('.stage-semantics [data-operation-id="'+node.id+'"][data-continuation-mode="'+(node.continuation_mode||'sequence')+'"]').count(),1);
       if(incoming.length>1)assert.equal(await page.locator('.stage-semantics [data-operation-id="'+node.id+'"][data-join-mode="'+(node.join_mode||'any')+'"]').count(),1);
     }
-    await page.getByRole('button',{name:'Свернуть этап на карте',exact:true}).click();await settleMap(page);
+    await page.getByRole('button',{name:model.semantic_profile==='variant-actions-v1'?'Свернуть операцию на карте':'Свернуть этап на карте',exact:true}).click();await settleMap(page);
     await page.locator('#close-inspector').click();
     assert.equal(await page.locator('.kind-stage[data-stage-id="'+stage.id+'"]').evaluate(node=>document.activeElement===node),true,'Closing the panel returns focus to the replacement collapsed block');
   }
@@ -362,7 +362,9 @@ async function main() {
       assert.deepEqual(edgeGeometry, [], 'Curves must avoid unrelated node boxes');
       await page.locator('#notation-toggle').click();
       assert.equal(await page.locator('#notation-items .notation-item').count(), (legacy?8:1)+(await page.locator('#view-mode').isVisible()?1:0));
-      assert.match(await page.locator('#notation-panel').innerText(), /Условия выбора следующих операций указаны в карточке исходной операции/);
+      assert.match(await page.locator('#notation-panel').innerText(), model.semantic_profile==='variant-actions-v1'
+        ? /Условия выбора следующих действий указаны в карточке исходного действия/
+        : /Условия выбора следующих операций указаны в карточке исходной операции/);
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('#notation-toggle').getAttribute('aria-expanded'), 'false');
       assert.equal(await page.locator('#notation-toggle').evaluate(e=>document.activeElement===e), true);
@@ -422,7 +424,7 @@ async function main() {
       assert.equal(await page.locator('.node').count(),model.nodes.length,'All nodes must stay on the map');
       const card=page.locator('#inspector-content');
       assert.equal(await card.locator('.execution-review,.predecessors').count(),0,'Operation card must not duplicate execution reviews or predecessors');
-      assert.equal(await card.locator('summary',{hasText:/^Предыдущие операции$/}).count(),0);
+      assert.equal(await card.locator('summary',{hasText:model.semantic_profile==='variant-actions-v1'?/^Предыдущие действия$/:/^Предыдущие операции$/}).count(),0);
       assert.equal(await card.locator('dl').filter({has:page.locator('dt',{hasText:/^Обоснование$/})}).count(),0,'Basis belongs only to the unified source explanation section');
       assert.equal(await card.locator(':scope > details').filter({has:page.locator(':scope > summary',{hasText:/^Основания в исходниках/})}).count(),0,'No duplicate general evidence block');
       const stageLinks=card.locator('.operation-meta .group-links');
@@ -525,7 +527,8 @@ async function main() {
           assert(presentation.regular&&presentation.black,'Transition condition must use regular body text colour');
         }
         if(!legacy&&operation.continuation_mode==='all')assert.match(await page.locator('.continuations').innerText(),/Запускаются все/);
-        if(!legacy&&operation.continuation_mode==='choice')assert.match(await page.locator('.continuations').innerText(),/условие которой выполнено/);
+        if(!legacy&&operation.continuation_mode==='choice')assert.match(await page.locator('.continuations').innerText(),
+          model.semantic_profile==='variant-actions-v1'?/условие которого выполнено/:/условие которой выполнено/);
         if(output&&width>900){await page.locator(".continuations").scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,`conditions-${width}x${height}.png`)});}
         const next=model.nodes.find(n=>n.id===outgoing[0].target);
         await page.locator('.continuation-target').first().click();

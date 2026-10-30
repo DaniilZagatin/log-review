@@ -77,7 +77,7 @@ class ResearchQuality:
         owner = task['target'].rsplit('.', 1)[0] if '.' in task['target'] else task['target']
         basename = owner.rsplit('.', 1)[-1]
         candidates = [p for p in self._files if p.endswith('/'+basename+'.java') or p.endswith('/'+basename+'.py')]
-        origin = task.get('evidence', [{}])[0].get('path', '')
+        origin = (task.get('evidence') or [{}])[0].get('path', '')
         if origin.endswith('.java'):
             caller = '\n'.join(self._reads.get(origin, {}).get(n, '') for n in sorted(self._reads.get(origin, {})))
             imports = re.findall(r'(?m)^\s*import\s+([\w.]+\.'+re.escape(basename)+r')\s*;', caller)
@@ -168,10 +168,7 @@ class ResearchQuality:
                 "node_ids": [], "gap_ids": [], "child_task_ids": [], "automatic": True})
 
     def _task_mapping_error(self, task, seen=None):
-        seen = set(seen or ())
-        if task['id'] in seen:
-            return 'цикл зависимостей задач'
-        seen.add(task['id'])
+        """Validate the local assertion; dependency completeness is computed separately."""
         implementation = self._dependency_implementation(task, task['evidence'])
         if task.get('automatic') and not implementation:
             files = self._dependency_files(task)
@@ -181,35 +178,93 @@ class ResearchQuality:
             return f'mapped требует прочитанной реализации зависимости, а не места её вызова; {where}'
         children = task.get('child_task_ids', [])
         index = {t['id']: t for t in self.model['research_tasks']}
-        discovered = {t['id'] for t in index.values() if t.get('automatic') and t['id'] != task['id'] and
-                      any(self._overlap(ref, scope) for ref in t['evidence'][:1] for scope in implementation)}
-        pending = sorted(x for x in discovered - set(children) if index[x]['status'] != 'out_of_scope')
-        if pending:
-            return ('добавьте в child_task_ids найденные в реализации дочерние задачи либо обоснованно исключите их: ' +
-                    ', '.join(f"{x} ({index[x]['target']})" for x in pending[:12]))
         if children:
-            index = {t['id']: t for t in self.model['research_tasks']}
             for identifier in children:
                 child = index.get(identifier)
-                if not child or child['status'] != 'mapped':
-                    unfinished = [x for x in children if x in index and index[x]['status'] != 'mapped']
-                    return ('сначала закройте дочерние задачи: ' +
-                            ', '.join(f"{x} ({index[x]['target']}, {index[x]['status']})" for x in unfinished[:12]))
-                if not any(self._overlap(ref, scope) for ref in child['evidence'][:1] for scope in implementation):
+                if not child:
+                    return f'неизвестная дочерняя задача {identifier}'
+                if task.get('automatic') and not any(self._overlap(ref, scope) for ref in child['evidence'] for scope in implementation):
                     return 'дочерняя задача не обнаружена в прочитанной реализации родителя'
-                if self._task_mapping_error(child, seen):
-                    return 'дочерняя задача больше не покрывает свою реализацию'
-                if not set(child['node_ids']).issubset(task['node_ids']):
-                    return 'mapped должен включать операции всех дочерних задач'
-            discovered = {t['id'] for t in index.values() if t.get('automatic') and t['id'] != task['id'] and
-                          any(self._overlap(ref, scope) for ref in t['evidence'][:1] for scope in implementation)}
-            if any(index[x]['status'] != 'out_of_scope' for x in discovered - set(children)):
-                return 'добавьте все найденные дочерние зависимости либо обоснованно исключите их'
         elif task.get('automatic') and not self._nodes_cover_dependency(task['node_ids'], implementation):
             return 'действия карты должны иметь основания в реализации зависимости'
-        if not task['node_ids']:
-            return 'mapped требует действия карты в node_ids; чтение файла не означает раскрытие исполнения'
-        return None
+        if not task['node_ids'] and not children:
+            return 'mapped требует действия карты в node_ids или дочерние задачи; чтение файла не означает раскрытие исполнения'
+
+    def research_coverage(self):
+        """Finite reachability over task dependencies; no copied parent status or gaps.
+
+        A local mapped assertion alone is not proof of coverage. Its independently
+        scoped inventory must be current and every discovered action represented.
+        Cycles share findings through reachability, never manufacture completeness.
+        """
+        index = {t['id']: t for t in self.model['research_tasks']}
+        nodes = {n['id']: n for n in self.model['nodes']}
+        edges = {e['id']: e for e in self.model['edges']}
+        adjacency, local, represented = {}, {}, {}
+        for identifier, task in index.items():
+            implementation = self._dependency_implementation(task, task['evidence'])
+            scope = implementation or task['evidence']
+            children = set(task.get('child_task_ids', []))
+            children.update(t['id'] for t in index.values() if t.get('automatic') and t['id'] != identifier
+                            and any(self._overlap(ref, area) for ref in t['evidence'] for area in implementation))
+            adjacency[identifier] = children.intersection(index)
+            issues, actions = [], []
+            status = task['status']
+            if status == 'out_of_scope':
+                issue = self._task_exclusion_error(task)
+                if issue: issues.append(issue)
+            elif status == 'mapped':
+                issue = self._task_mapping_error(task)
+                if issue: issues.append(issue)
+                relevant = [r for r in self.model['execution_reviews'] if self._within(scope, r['evidence'])]
+                if not relevant:
+                    issues.append('нет актуального перечня действий обследованного участка')
+                for review in relevant:
+                    stale = any(n not in nodes or self._fingerprint(nodes[n]) != fp for n, fp in review['node_fingerprints'].items())
+                    incident = {e['id'] for e in edges.values() if e['source'] in review['node_fingerprints'] or e['target'] in review['node_fingerprints']}
+                    stale = stale or incident != set(review['edge_fingerprints']) or any(
+                        e not in edges or self._fingerprint(edges[e]) != fp for e, fp in review['edge_fingerprints'].items())
+                    if stale: issues.append(f"{review['id']}: обзор участка устарел")
+                    actions.extend(op for op in review['operations'] if any(self._overlap(a, b) for a in op['evidence'] for b in scope))
+                if any(not op.get('node_id') or op['node_id'] not in nodes for op in actions):
+                    issues.append('не все найденные действия отображены')
+                if not actions and not children:
+                    issues.append('нет перечня самостоятельных действий')
+            elif status == 'gap':
+                issue = self._task_gap_error(task)
+                if issue: issues.append(issue)
+                issues.append('участок содержит адресный пробел')
+            else:
+                issues.append(f'локальная работа не завершена: {status}')
+            local[identifier] = {'issues': list(dict.fromkeys(issues)), 'action_ids': sorted({op['id'] for op in actions})}
+            represented[identifier] = any(op.get('node_id') in nodes for op in actions)
+        reached_by = {}
+        for identifier in index:
+            reached, todo = set(), [identifier]
+            while todo:
+                current = todo.pop()
+                if current in reached: continue
+                reached.add(current)
+                if index[current]['status'] != 'out_of_scope':
+                    todo.extend(adjacency[current] - reached)
+            reached_by[identifier] = reached
+        for identifier, task in index.items():
+            cyclic = task['status'] != 'out_of_scope' and any(
+                identifier in reached_by[child] for child in adjacency[identifier])
+            if cyclic and not any(represented[child] for child in reached_by[identifier]):
+                local[identifier]['issues'].append('круговая делегация без достижимого отображённого действия')
+        rows = []
+        for identifier, task in index.items():
+            reached = reached_by[identifier]
+            incomplete = sorted(n for n in reached if local[n]['issues'])
+            gap_ids = sorted({g for n in reached for g in index[n].get('gap_ids', [])})
+            rows.append({'task_id': identifier, 'local_status': task['status'],
+                         'status': 'partial' if incomplete else 'excluded' if task['status']=='out_of_scope' else 'covered',
+                         'dependency_ids': sorted(adjacency[identifier]), 'incomplete_task_ids': incomplete,
+                         'gap_ids': gap_ids, 'local_issues': local[identifier]['issues'],
+                         'action_ids': local[identifier]['action_ids']})
+        return {'status': 'unknown' if not rows else 'partial' if any(r['status']=='partial' for r in rows) else 'covered',
+                'tasks': rows, 'semantic_completeness_verified': False}
 
     def _task_exclusion_error(self, task):
         """An exclusion is a visible scope decision, not a way to close mapped work."""
@@ -262,10 +317,6 @@ class ResearchQuality:
         child_ids = ids(args.get('child_task_ids', []), 'child_task_ids', [t['id'] for t in self.model['research_tasks']])
         if identifier in child_ids:
             raise QualityError('Задача не может быть своей дочерней зависимостью')
-        if child_ids:
-            for child in self.model['research_tasks']:
-                if child['id'] in child_ids:
-                    node_ids = list(dict.fromkeys(node_ids + child['node_ids']))
         item = {"id": identifier, "target": text(args.get('target'), 'target', 500),
                 "kind": text(args.get('kind'), 'kind', 80), "status": status,
                 "resolution": text(args.get('resolution'), 'resolution') if status != 'open' else '',
@@ -462,7 +513,8 @@ class ResearchQuality:
                     and node.get('outcome', 'unknown') == 'unknown'
                     and not any(node['id'] in gap['node_ids'] for gap in self.model['gaps'])):
                 errors.append(f"{node['id']}: бизнес-исход конечной операции не установлен; уточните outcome по основаниям либо добавьте адресный gap")
-        errors.extend(self._reviewed_kind_errors())
+        errors.extend(self._reviewed_kind_errors(
+            review for review in self.model['execution_reviews'] if self._review_is_current(review)))
         for task in self.model['research_tasks']:
             if task['status'] in ('open','read','analyzed'):
                 errors.append(f"{task['id']}: не раскрыт {task['target']}; исследуйте либо сохраните адресный gap")
@@ -484,7 +536,7 @@ class ResearchQuality:
             errors.append('Выполните актуальный review_semantics: после прошлой проверки изменились операции, переходы, задачи, обзоры исполнения или источники')
         return errors
 
-    def _reviewed_kind_errors(self):
+    def _reviewed_kind_errors(self, reviews=None):
         """What the execution review says an operation is must be visible on the graph.
 
         A check has more than one continuation (or ends the scenario conditionally,
@@ -497,7 +549,7 @@ class ResearchQuality:
         for edge in self.model['edges']:
             if edge['kind'] != 'data':
                 outgoing.setdefault(edge['source'], set()).add(edge['target'])
-        for review in self.model['execution_reviews']:
+        for review in self.model['execution_reviews'] if reviews is None else reviews:
             for operation in review['operations']:
                 node = nodes.get(operation['node_id'])
                 if node is None:

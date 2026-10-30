@@ -3,6 +3,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 
 from pko.code_tools.tools import TOOL_SCHEMAS
@@ -43,9 +44,10 @@ class PromptContractTests(unittest.TestCase):
         self.assertTrue(self.state.dispatch("upsert_step", {"id": before["id"],
             "description": "Другое действие над обращением"})["ok"])
         rejected = self.state.dispatch("finish", {"summary": "Описание изменено"})
-        self.assertFalse(rejected["ok"])
-        self.assertEqual(rejected["code"], "finish_blocked")
-        self.assertIn("после обзора", rejected["error"])
+        self.assertTrue(rejected["ok"], rejected)
+        self.assertEqual(rejected["status"], "partial")
+        self.assertTrue(any("после обзора" in issue
+                            for issue in self.state.snapshot()["validation"]["coverage_issues"]))
 
     def test_transition_edit_by_id_keeps_endpoints_and_evidence(self):
         self.complete_small_map()
@@ -67,6 +69,7 @@ class PromptContractTests(unittest.TestCase):
         unread = self.state.dispatch("upsert_step", {"name": "Проверка заявки", "evidence_status": "observed",
             "evidence": [{"path": "source-2/cards.py", "line_start": 1, "line_end": 1}]})
         self.assertEqual(unread["code"], "invalid_evidence")
+        self.state.model["scenario"]["entry_operation_ids"] = ["step-missing"]
         self.assertEqual(self.state.dispatch("finish", {"summary": "Рано"})["code"], "finish_blocked")
         self.assertEqual(self.state.dispatch("upsert_system", {})["code"], "unknown_tool")
 
@@ -92,6 +95,9 @@ class PromptContractTests(unittest.TestCase):
         properties = {tool["function"]["name"]: tool["function"]["parameters"]["properties"] for tool in TOOLS}
         self.assertNotIn("kind", properties["upsert_step"])
         self.assertNotIn("upsert_group", properties)
+        check = properties["review_execution"]["checks"]["properties"]["branches"]
+        self.assertNotIn("evidence", check["required"])
+        self.assertEqual(check["properties"]["evidence"]["maxItems"], 100)
         for legacy in ("channel", "correlation", "contract", "sender_evidence", "receiver_evidence"):
             self.assertNotIn(legacy, properties["upsert_transition"])
         reading = json.dumps(TOOL_SCHEMAS, ensure_ascii=False)
@@ -125,7 +131,16 @@ class TelemetryTests(unittest.TestCase):
             def chat(self, messages, **kwargs):
                 return ChatResult(text="Наблюдение без вызова инструментов.", usage={})
 
-        model = run_agent(schema_tests.workspace(1), "Обработка обращения", Silent.spec, client=Silent(), max_steps=4)
+        with patch("pko.scenario_map.agent.record") as recorded:
+            model = run_agent(schema_tests.workspace(1), "Обработка обращения", Silent.spec, client=Silent(), max_steps=4)
+        events = [row.kwargs for row in recorded.call_args_list if row.args[0] == "research_state"]
+        self.assertTrue(events)
+        self.assertEqual(events[-1]["stop_kind"], model["run"]["stop_kind"])
+        self.assertEqual(events[-1]["semantic_profile"], "variant-actions-v1")
+        self.assertIn("partial_tasks", events[-1])
+        self.assertIn("instance_unit", events[-1]["scope"])
+        self.assertRegex(events[-1]["map_state_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn("reasoning", json.dumps(events))
         self.assertEqual(model["run"]["system_prompt_sha256"], hashlib.sha256(SYSTEM.encode("utf-8")).hexdigest())
         self.assertRegex(model["run"]["tools_sha256"], r"^[0-9a-f]{64}$")
 

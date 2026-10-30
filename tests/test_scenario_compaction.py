@@ -3,11 +3,12 @@ from copy import deepcopy
 import json
 import unittest
 from unittest.mock import Mock
+from types import SimpleNamespace
 
 from pko.llm.client import ChatResult
 from pko.scenario_map.agent import _brief
 from pko.scenario_map.compaction import compact_research_context, summary_request, validate_summary
-from pko.scenario_map.context import COMPACTION_MARKER, compact_context, _size, graph_identity
+from pko.scenario_map.context import COMPACTION_MARKER, compact_context, _size, graph_identity, _manifest
 from pko.scenario_map.schema import MapState
 from scenario_script import scripted_summary
 from test_scenario_schema import workspace
@@ -200,6 +201,29 @@ class ScenarioCompactionTests(unittest.TestCase):
         self.assertEqual(payload['current_state']['open_task_count'], 2)
         self.assertEqual(payload['current_state']['open_tasks'][0]['child_task_ids'], ['task-2'])
         self.assertNotIn('systems', payload['current_state']['counts'])
+
+
+    def test_variant_scope_and_unmapped_actions_survive_bounded_summary_input(self):
+        model = self.state.snapshot()
+        model["scenario"].update(variant_context="Обработка обращения в отделении",
+                                 instance_unit="Одно обращение", variant_factors=["Канал обращения"])
+        model["execution_reviews"] = [{"id": "review-1", "operations": [
+            {"id": f"action-{i}", "node_id": "", "name": "Сохранить результат",
+             "evidence": [{"path": "source-1/channel.py", "line_start": 1, "line_end": 2,
+                           "quote": "not copied to summary input"}]} for i in range(15)]}]
+        state = SimpleNamespace(snapshot=lambda: model)
+        payload = json.loads(summary_request(self.prefix, state, 20000)[1]["content"])["current_state"]
+        self.assertEqual(payload["scenario"]["instance_unit"], "Одно обращение")
+        self.assertEqual(payload["unmapped_action_count"], 15)
+        self.assertEqual(len(payload["unmapped_actions"]), 12)
+        self.assertFalse(payload["unmapped_actions_listed_all"])
+        self.assertEqual(payload["unmapped_actions"][0]["review_id"], "review-1")
+        self.assertNotIn("quote", payload["unmapped_actions"][0]["evidence"][0])
+        manifest = _manifest(model, 1)
+        self.assertEqual(manifest["variant_scope"]["instance_unit"], "Одно обращение")
+        self.assertEqual(manifest["unmapped_action_count"], 15)
+        self.assertFalse(manifest["unmapped_actions_listed_all"])
+        self.assertIn("execution_reviews", _manifest(model, 0)["recovery"])
 
 
 if __name__ == "__main__":

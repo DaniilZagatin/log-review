@@ -59,7 +59,7 @@ class MapOnlyTests(unittest.TestCase):
                          {"scenario_map.json", "scenario_map.html", "scenario_map.checkpoint.json",
                           "map_hierarchy.json", "audit"})
         html = (self.out / "scenario_map.html").read_text(encoding="utf-8")
-        self.assertIn("Бизнес-этапы", html)
+        self.assertIn("Бизнес-операции", html)
         self.assertNotIn('role="tablist"', html)
 
     def test_grouping_joins_the_run_trace_and_every_span_ends(self):

@@ -8,11 +8,13 @@ one block. The atomic map is never changed.
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 
 from pko.audit import record
 from pko.scenario_map.quality import QualityError, ResearchQuality
-from pko.stages.contracts import HIERARCHY_VERSION, validate_hierarchy
-from pko.stages.inputs import (METHODOLOGY, STAGE, build_payload, input_fingerprint, map_revision, methodology,
+from pko.stages.contracts import HIERARCHY_VERSION, OPERATIONS_HIERARCHY_VERSION, validate_hierarchy
+from pko.stages.inputs import (ACTION_PROFILE, METHODOLOGY, STAGE, build_payload, grouping_stage, hierarchy_kind,
+                               input_fingerprint, map_revision, methodology,
                                payload_fingerprint)
 from pko.stages.model import PacketTooLarge, StageModel
 from pko.stages.regions import collapse_check, operation_graph
@@ -20,6 +22,7 @@ from pko.stages.regions import collapse_check, operation_graph
 MAX_STAGES = 60
 _STAGE_ID = re.compile(r"stage-[1-9]\d{0,2}")
 _UNPLACED = "Операции не распределены"
+_UNPLACED_ACTIONS = "Действия не распределены"
 _STRINGS = {"type": "array", "items": {"type": "string"}}
 
 TOOL = {
@@ -36,24 +39,40 @@ TOOL = {
 }
 
 
+def grouping_tool(model: dict) -> dict:
+    tool = deepcopy(TOOL)
+    if model.get("semantic_profile") == ACTION_PROFILE:
+        tool["description"] = ("Вернуть бизнес-операции: цель, отделимый результат, границу завершения и id действий каждой группы; "
+                               "остальные действия — в unassigned с причиной.")
+        item = tool["parameters"]["properties"]["stages"]["items"]
+        item["required"].append("boundary")
+        item["properties"]["boundary"] = {"type": "string", "description": "Условие, при котором отделимый результат операции сформирован."}
+    return tool
+
+
 def _short(value, limit: int) -> str:
     value = (value or "").strip() if isinstance(value, str) else ""
     return value if len(value) <= limit else value[:limit - 1] + "…"
 
 
-def _validate(arguments: dict, operations: set[str]) -> tuple[list | None, dict, list[str]]:
+def _validate(arguments: dict, operations: set[str], *, action_profile: bool = False) -> tuple[list | None, dict, list[str]]:
     """Accepted stages, reasons for unassigned operations and addressed errors."""
     items = arguments.get("stages")
+    member_name = "действия" if action_profile else "операции"
+    group_name = "бизнес-операции" if action_profile else "этапы"
     if not isinstance(items, list):
         return None, {}, ["stages: ожидается список"]
     accepted, errors, owner = [], [], {}
     for item in items[:MAX_STAGES]:
         if not isinstance(item, dict) or not _STAGE_ID.fullmatch(str(item.get("id"))) or item.get("id") in {s["id"] for s in accepted}:
-            errors.append("stages: у каждого этапа уникальный id вида stage-N")
+            errors.append("stages: у каждой группы уникальный id вида stage-N")
             continue
         label, problems = item["id"], []
         fields = {}
-        for name, limit in (("name", 300), ("goal", 1500), ("result", 1500)):
+        fields_spec = [("name", 300), ("goal", 1500), ("result", 1500)]
+        if action_profile:
+            fields_spec.append(("boundary", 1500))
+        for name, limit in fields_spec:
             try:
                 fields[name] = ResearchQuality.business_text(item.get(name), name, limit)
             except QualityError as exc:
@@ -65,9 +84,9 @@ def _validate(arguments: dict, operations: set[str]) -> tuple[list | None, dict,
         unknown = [value for value in members if value not in operations]
         repeated = [value for value in members if value in owner]
         if unknown:
-            problems.append(f"{label}: operation_ids — существующие операции карты" + (f"; неизвестны: {', '.join(unknown[:8])}" if unknown else ""))
+            problems.append(f"{label}: operation_ids — существующие {member_name} карты" + (f"; неизвестны: {', '.join(unknown[:8])}" if unknown else ""))
         if repeated:
-            problems.append(f"{label}: операции уже входят в другие этапы: " + ", ".join(
+            problems.append(f"{label}: {member_name} уже входят в другие {group_name}: " + ", ".join(
                 f"{value} ({owner[value]})" for value in repeated[:8]))
         errors += problems
         if problems:
@@ -86,20 +105,25 @@ def _validate(arguments: dict, operations: set[str]) -> tuple[list | None, dict,
         if not isinstance(operation, str):
             errors.append("unassigned: operation_id должен быть строкой с id операции")
         elif operation not in operations or operation in owner:
-            errors.append(f"unassigned: {operation} — операция карты, не включённая в этапы")
+            errors.append(f"unassigned: {operation} — id карты, не включённый в группы")
         elif _short(row.get("reason"), 500):
             unassigned[operation] = _short(row["reason"], 500)
         else:
             errors.append(f"unassigned: {operation} — укажите непустую текстовую причину")
     missing = sorted(operations - set(owner) - set(unassigned))
     if missing:
-        errors.append(f"{_UNPLACED}: " + ", ".join(missing[:30]) + "; включите их в этапы или в unassigned с причиной")
+        unplaced_label = _UNPLACED_ACTIONS if action_profile else _UNPLACED
+        errors.append(f"{unplaced_label}: " + ", ".join(missing[:30]) + f"; включите их в {group_name} или в unassigned с причиной")
     return accepted, unassigned, errors
 
 
 def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None = None) -> dict:
     """Ask once (plus one repair), then check membership and collapsibility."""
     operations = {node["id"] for node in model.get("nodes") or []}
+    action_profile = model.get("semantic_profile") == ACTION_PROFILE
+    unplaced_label = _UNPLACED_ACTIONS if action_profile else _UNPLACED
+    stage_name = grouping_stage(model)
+    tool = grouping_tool(model)
     graph = operation_graph(model)
     latest: dict = {}
     first_accepted: dict | None = None
@@ -107,7 +131,7 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
 
     def validate(arguments):
         nonlocal first_accepted, first_unassigned
-        stages, unassigned, errors = _validate(arguments, operations)
+        stages, unassigned, errors = _validate(arguments, operations, action_profile=action_profile)
         if stages is not None:
             conflicts = []
             if first_accepted is None:
@@ -145,11 +169,11 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
     input_mode = "full"
     payload = build_payload(model)
     try:
-        stages, errors = stage_model.ask(STAGE, payload, TOOL, validate, key=lambda stage: stage["id"])
+        stages, errors = stage_model.ask(stage_name, payload, tool, validate, key=lambda stage: stage["id"])
     except PacketTooLarge:
         input_mode = "compact"
         payload = build_payload(model, compact=True)
-        stages, errors = stage_model.ask(STAGE, payload, TOOL, validate, key=lambda stage: stage["id"])
+        stages, errors = stage_model.ask(stage_name, payload, tool, validate, key=lambda stage: stage["id"])
     # Keep each accepted semantic contract with its complete proposed membership.
     # Never manufacture a new stage by trimming conflicting operations.
     membership, kept = {}, []
@@ -164,17 +188,19 @@ def build_hierarchy(model: dict, stage_model: StageModel, *, run_id: str | None 
     reasons = {operation: reason for operation, reason in latest.get("unassigned", {}).items() if operation not in membership}
     unplaced = sorted(operations - set(membership) - set(reasons))
     for operation in unplaced:
-        reasons[operation] = "Модель не отнесла операцию к этапу"
+        reasons[operation] = ("Модель не отнесла действие к бизнес-операции" if action_profile
+                              else "Модель не отнесла операцию к этапу")
     # The outcome describes the final partition: errors of the first answer that
     # the repair resolved are gone, rejected stages stay reported.
-    errors = [error for error in errors if not error.startswith(("stages:", "unassigned:", _UNPLACED))]
+    errors = [error for error in errors if not error.startswith(("stages:", "unassigned:", unplaced_label))]
     errors = list(dict.fromkeys(errors + latest.get("generic", []) + latest.get("conflicts", [])))
     if unplaced:
-        errors.append(f"{_UNPLACED}: " + ", ".join(unplaced[:30]))
+        errors.append(f"{unplaced_label}: " + ", ".join(unplaced[:30]))
     records = []
     for stage in stages:
         collapsible, entry, why = collapse_check(set(stage["operation_ids"]), graph)
-        records.append({key: stage[key] for key in ("id", "name", "goal", "result", "note")} |
+        fields = ("id", "name", "goal", "result", "note", "boundary") if action_profile else ("id", "name", "goal", "result", "note")
+        records.append({key: stage[key] for key in fields} |
                        {"collapsible": collapsible, "entry_operation_id": entry if collapsible else None,
                         "collapse_reason": why})
     status = "complete" if stages and not errors else "partial" if stages else "none"
@@ -194,19 +220,24 @@ def unavailable_hierarchy(model: dict, reason: str, *, run_id: str | None = None
         mode, digest = "full", input_fingerprint(model, "full")
     except Exception:
         mode = digest = None
-    return _hierarchy(model, [], {}, dict.fromkeys(operations, "Этапы не построены"),
+    unavailable = "Бизнес-операции не построены" if model.get("semantic_profile") == ACTION_PROFILE else "Этапы не построены"
+    return _hierarchy(model, [], {}, dict.fromkeys(operations, unavailable),
                       {"result": "none", "reasons": [reason]}, run_id=run_id,
                       input_sha256=digest, input_mode=mode, budget=budget)
 
 
 def _hierarchy(model: dict, records: list, membership: dict, reasons: dict, status: dict, *,
                run_id, input_sha256, input_mode, budget) -> dict:
-    hierarchy = {"hierarchy_version": HIERARCHY_VERSION, "map_revision": map_revision(model), "run_id": run_id,
+    action_profile = model.get("semantic_profile") == ACTION_PROFILE
+    hierarchy = {"hierarchy_version": OPERATIONS_HIERARCHY_VERSION if action_profile else HIERARCHY_VERSION,
+                 "hierarchy_kind": hierarchy_kind(model), "map_revision": map_revision(model), "run_id": run_id,
                  "map_run_id": (model.get("run") or {}).get("id"), "input_sha256": input_sha256,
                  "input_mode": input_mode,
-                 "methodology_sha256": methodology(STAGE, METHODOLOGY)["sha256"],
+                 "methodology_sha256": methodology(grouping_stage(model), METHODOLOGY)["sha256"],
                  "stages": records, "membership": membership,
                  "unassigned": [{"operation_id": operation, "reason": reason} for operation, reason in sorted(reasons.items())],
                  "status": status, "provenance": "model_proposal", "authority_status": "proposed", "budget": budget}
+    if action_profile:
+        hierarchy["semantic_profile"] = ACTION_PROFILE
     validate_hierarchy(hierarchy, model)
     return hierarchy

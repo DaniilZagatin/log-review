@@ -281,7 +281,7 @@ def scripted_business_stages(payload):
         ids = [by_name[member] for member in members if member in by_name]
         if ids:
             used.update(ids)
-            stages.append({"id": f"stage-{number}", "name": name, "goal": goal, "result": result, "operation_ids": ids})
+            stages.append({"id": f"stage-{number}", "name": name, "goal": goal, "result": result, "operation_ids": ids, "boundary": "Участок завершён при получении результата: " + result})
     unassigned = [{"operation_id": row["id"], "reason": "Операция не относится к этапам учебного сценария"}
                   for row in payload["operations"] if row["id"] not in used]
     return {"stages": stages, "unassigned": unassigned}
