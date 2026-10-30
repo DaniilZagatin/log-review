@@ -1,2 +1,0 @@
-# unittest и локальные подмены Phoenix; внешний сервер не требуется.
--r requirements.txt

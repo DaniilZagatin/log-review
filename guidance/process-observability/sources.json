@@ -1,0 +1,107 @@
+{
+  "schema_version": "guidance-sources/1",
+  "sources": [
+    {
+      "id": "SRC-001",
+      "title": "Инструкция по подключению к данным в ClickStream - Портал M-App.html",
+      "snapshot_sha256": "a96fdf742ce442968db48e8674fc481469a9f3cfe27d8f21324f7022a495370a",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-002",
+      "title": "Инструкция по подключению к данным в Kafka - Портал M-App.html",
+      "snapshot_sha256": "a0245459e37ede714dcb2e6298ee86299a2e0d33b5e1a96780cb2f12e7117c26",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-003",
+      "title": "Инструкция по подключению к данным через СМД КАП - Портал M-App.html",
+      "snapshot_sha256": "f6c74bbfbefbf38b599917d8175d8c9cb76e0c79709799643106e36764d45505",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-004",
+      "title": "Требования к логированию бизнес-событий в АС - Портал M-App.html",
+      "snapshot_sha256": "5922df3e85c3ae78abf3b68e381311aac5d84815f945c9c7068bfc476629460b",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-005",
+      "title": "Этапы постановки процесса на Цифровой мониторинг - Портал M-App.html",
+      "snapshot_sha256": "a586f267e57c7bf3d51ab30b8c3f802ed73da9af7c41eb59b7fd637ee44f97e6",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-047",
+      "title": "1. Подготовка сценария процесса к постановке на Цифровой мониторинг - Портал M-App.html",
+      "snapshot_sha256": "ceedf90ba74f31dbe9c8f4bc06c9145aefb38a1feffe7d0e544e9b373cd8360c",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-048",
+      "title": "2. Поиск и подготовка данных для сценария процесса - Портал M-App.html",
+      "snapshot_sha256": "3e715c38d594980eca92505573232d0592b3c411971030162fdf940623258e6b",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-049",
+      "title": "3. Передача данных сценария процесса в Process Mining - Портал M-App.html",
+      "snapshot_sha256": "ed183a1446df75c4db55082da6dbaf727041d49700ed1cf1ddcf2d393f13205a",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-050",
+      "title": "4. Валидация метрик процесса - Портал M-App.html",
+      "snapshot_sha256": "77e4f1f8c708d6e3c23c1138cb8d01c42ecb205331c960dd4b2e2024630fe5cd",
+      "authority": "supplied_snapshot_unconfirmed_current",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "SRC-059",
+      "title": "требования к логам.docx",
+      "snapshot_sha256": "965b1ab66cda85b03cd3dc10575bbf76d3e09909bde426716d6fa157dcfa608e",
+      "authority": "proposal",
+      "use": "Paraphrased methodological ideas; source originals are not distributed; not pilot obligations"
+    },
+    {
+      "id": "WEB-CELONIS-TIME",
+      "title": "Celonis CALC_THROUGHPUT",
+      "url": "https://help.celonis.com/pql46/en/calc_throughput",
+      "checked_on": "2026-10-26",
+      "authority": "official_product_documentation",
+      "use": "Metric ideas and limits paraphrased; pilot formulas/cohorts are project proposals, not a banking methodology"
+    },
+    {
+      "id": "WEB-PM4PY-STATS",
+      "title": "PM4Py Statistics",
+      "url": "https://processintelligence.solutions/pm4py/examples/statistics/",
+      "checked_on": "2026-10-26",
+      "authority": "official_product_documentation",
+      "use": "Metric ideas and limits paraphrased; pilot formulas/cohorts are project proposals, not a banking methodology"
+    },
+    {
+      "id": "WEB-UIPATH-FTR",
+      "title": "UiPath Operational monitoring",
+      "url": "https://docs.uipath.com/process-mining/automation-cloud/latest/user-guide/operational-monitoring-dashboard",
+      "checked_on": "2026-10-26",
+      "authority": "official_product_documentation",
+      "use": "Metric ideas and limits paraphrased; pilot formulas/cohorts are project proposals, not a banking methodology"
+    },
+    {
+      "id": "WEB-UIPATH-AUTOMATION",
+      "title": "UiPath Automation potential",
+      "url": "https://docs.uipath.com/process-mining/automation-cloud/latest/user-guide/simulating-automation-potential",
+      "checked_on": "2026-10-26",
+      "authority": "official_product_documentation",
+      "use": "Metric ideas and limits paraphrased; pilot formulas/cohorts are project proposals, not a banking methodology"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "code": {
+    "base_url": "https://code.example.invalid/v1",
+    "model": "SET_MODEL_ID",
+    "thinking": false,
+    "max_output_tokens": 65536,
+    "api_key_env": "LLM_API_KEY"
+  },
+  "business": {
+    "base_url": "https://business.example.invalid/v1",
+    "model": "SET_MODEL_ID",
+    "thinking": false,
+    "max_output_tokens": 65536,
+    "api_key_env": "LLM_API_KEY"
+  }
+}

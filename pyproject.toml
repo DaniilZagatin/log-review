@@ -1,37 +1,21 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "pko"
+name = "process-observability"
 version = "0.1.0"
-description = "Белка — восстановление варианта бизнес-сценария по коду одной или нескольких АС"
+description = "Local agent that prepares a business process for digital monitoring (skeleton)."
 requires-python = ">=3.11"
-dependencies = [
-    # Один исследователь использует OpenAI-совместимый endpoint.
-    "openai>=1.30",
-    "httpx>=0.27",
-    "python-dotenv>=1.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
-# Трассировка в Phoenix (`PKO_PHOENIX_ENABLED=true`): OTel SDK и экспортёр.
-# Без неё CLI работает как прежде, трейсы просто не собираются.
-phoenix = ["arize-phoenix-otel>=0.17"]
-
-[project.scripts]
-pko = "pko.cli:run"
-
-[tool.pytest.ini_options]
-# Тесты написаны на unittest и запускаются как `make test`; эта секция нужна,
-# чтобы их подхватывал и pytest, если сборочный контур использует его.
-testpaths = ["tests"]
-pythonpath = ["backend", "tests"]
+tokens = ["tokenizers"]
 
 [tool.setuptools.packages.find]
-# HTML-карта собирается автономным рендерером, без отдельного frontend build.
-where = ["backend"]
+where = ["src"]
 
+# The vendored map renderer reads these files at report time; they must ship with a wheel.
 [tool.setuptools.package-data]
-"pko.scenario_map" = ["*.md"]
-"pko.render" = ["assets/dpss/*.woff2", "assets/dpss/*.md", "design/horizon/tokens.css", "design/horizon/components/bundle.css"]
+"process_observability.map_presentation" = ["PROVENANCE.md", "assets/dpss/*.woff2", "assets/dpss/PROVENANCE.md",
+                                            "assets/horizon/tokens.css"]

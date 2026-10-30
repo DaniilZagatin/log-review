@@ -1,0 +1,732 @@
+{
+  "data_origin": "synthetic",
+  "records": {
+    "e53c30de36b5e7e2ce9e2d06929e50100b7afed0bee5972de520b50c09142439": {
+      "findings": [
+        {
+          "id": "receive-code",
+          "description": "receive_request вызывает emit с ключом request.received и передаёт case_id, occurrence_id и attempt_id. Запись в БД в этой функции не показана.",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 4,
+              "end_line": 6,
+              "symbol": "receive_request"
+            }
+          ]
+        },
+        {
+          "id": "review-code",
+          "description": "review_request фиксирует начало проверки. При decision == revise записывает review.returned и возвращает revision_required; иначе записывает review.approved и возвращает approved.",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "fulfil-code",
+          "description": "fulfil_request фиксирует попытку. При transient_failure пишет fulfil.failed и возвращает retry_required. Иначе вызывает commit(case_id), затем пишет fulfil.completed и возвращает completed. Надёжность commit и доставки вне показанного кода неизвестна.",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "cancel-code",
+          "description": "cancel_request возвращает объект со state == cancelled. Сохранение состояния и вызов логирования не показаны.",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 34,
+              "end_line": 36,
+              "symbol": "cancel_request"
+            }
+          ]
+        }
+      ],
+      "unknowns": [
+        "Вызывающий маршрут и условия отмены не показаны",
+        "Доработка заявки между проверками не реализована в выбранном файле"
+      ]
+    },
+    "462571ab2aa28b2910ac3d7069eb8e43ec479ba691e481b4ec21f9b0ec85cb95": {
+      "process": {
+        "purpose": "Обработка сервисной заявки — искусственный пример",
+        "boundaries": "От приёма заявки до исполнения или отмены",
+        "case_definition": "Одна сервисная заявка"
+      },
+      "stages": [
+        {
+          "id": "receive",
+          "name": "Приём заявки",
+          "roles": [],
+          "systems": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 4,
+              "end_line": 6,
+              "symbol": "receive_request"
+            }
+          ]
+        },
+        {
+          "id": "review",
+          "name": "Проверка заявки",
+          "roles": [],
+          "systems": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "fulfil",
+          "name": "Исполнение заявки",
+          "roles": [],
+          "systems": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "cancel",
+          "name": "Отмена заявки",
+          "roles": [],
+          "systems": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 34,
+              "end_line": 36,
+              "symbol": "cancel_request"
+            }
+          ]
+        }
+      ],
+      "transitions": [
+        {
+          "from_stage": "receive",
+          "to_stage": "review",
+          "condition": "Заявка получена",
+          "refs": []
+        },
+        {
+          "from_stage": "review",
+          "to_stage": "review",
+          "condition": "Возврат на доработку: тот же случай, новое выполнение проверки",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "from_stage": "review",
+          "to_stage": "fulfil",
+          "condition": "Проверка завершена одобрением",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        }
+      ],
+      "event_mappings": [
+        {
+          "event_key": "request.received",
+          "business_action": "receive",
+          "operation": "receive",
+          "stage_id": "receive",
+          "lifecycle_role": "start",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 4,
+              "end_line": 6,
+              "symbol": "receive_request"
+            }
+          ]
+        },
+        {
+          "event_key": "review.started",
+          "business_action": "review",
+          "operation": "review",
+          "stage_id": "review",
+          "lifecycle_role": "start",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "event_key": "review.returned",
+          "business_action": "review",
+          "operation": "review",
+          "stage_id": "review",
+          "lifecycle_role": "result",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "event_key": "review.approved",
+          "business_action": "review",
+          "operation": "review",
+          "stage_id": "review",
+          "lifecycle_role": "result",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "event_key": "fulfil.attempted",
+          "business_action": "fulfil",
+          "operation": "fulfil",
+          "stage_id": "fulfil",
+          "lifecycle_role": "request",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "event_key": "fulfil.failed",
+          "business_action": "fulfil",
+          "operation": "fulfil",
+          "stage_id": "fulfil",
+          "lifecycle_role": "error",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "event_key": "fulfil.completed",
+          "business_action": "fulfil",
+          "operation": "fulfil",
+          "stage_id": "fulfil",
+          "lifecycle_role": "result",
+          "occurrence_rule": "Группировать по переданному occurrence_id; сохранять попытки attempt_id; повторы одного event_id рассматривать отдельно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        }
+      ],
+      "facts": [
+        {
+          "id": "receive.result",
+          "stage_id": "receive",
+          "meaning": "Результат этапа «Приём заявки»",
+          "rationale": "Граница процесса, необходимая для анализа",
+          "scope": "Искусственный пример обработки заявки",
+          "condition": null,
+          "guidance_ids": [
+            "FACT-QUESTION"
+          ],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "evidence_alternatives": [
+            "Явная запись о результате"
+          ],
+          "event_keys": [
+            "request.received"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 4,
+              "end_line": 6,
+              "symbol": "receive_request"
+            }
+          ]
+        },
+        {
+          "id": "review.result",
+          "stage_id": "review",
+          "meaning": "Результат этапа «Проверка заявки»",
+          "rationale": "Граница процесса, необходимая для анализа",
+          "scope": "Искусственный пример обработки заявки",
+          "condition": null,
+          "guidance_ids": [
+            "FACT-QUESTION"
+          ],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "evidence_alternatives": [
+            "Явная запись о результате"
+          ],
+          "event_keys": [
+            "review.returned",
+            "review.approved"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "fulfil.result",
+          "stage_id": "fulfil",
+          "meaning": "Результат этапа «Исполнение заявки»",
+          "rationale": "Граница процесса, необходимая для анализа",
+          "scope": "Искусственный пример обработки заявки",
+          "condition": null,
+          "guidance_ids": [
+            "FACT-QUESTION"
+          ],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "evidence_alternatives": [
+            "Явная запись о результате"
+          ],
+          "event_keys": [
+            "fulfil.completed"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "cancel.result",
+          "stage_id": "cancel",
+          "meaning": "Результат этапа «Отмена заявки»",
+          "rationale": "Граница процесса, необходимая для анализа",
+          "scope": "Искусственный пример обработки заявки",
+          "condition": null,
+          "guidance_ids": [
+            "FACT-QUESTION"
+          ],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "evidence_alternatives": [
+            "Явная запись о результате"
+          ],
+          "event_keys": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 34,
+              "end_line": 36,
+              "symbol": "cancel_request"
+            }
+          ]
+        }
+      ],
+      "unknowns": [
+        "Из какого этапа и при каких условиях возможна отмена?",
+        "Как фиксируется доработка заявки между двумя проверками?"
+      ],
+      "operations": [
+        {
+          "id": "intake",
+          "name": "Принять заявку",
+          "stage_id": "receive",
+          "kind": "start",
+          "description": "Получить сервисную заявку и начать её обработку.",
+          "actor": null,
+          "event_keys": [
+            "request.received"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 4,
+              "end_line": 6,
+              "symbol": "receive_request"
+            }
+          ]
+        },
+        {
+          "id": "check",
+          "name": "Проверить заявку",
+          "stage_id": "review",
+          "kind": "operation",
+          "description": "Проверить заявку перед исполнением.",
+          "actor": null,
+          "event_keys": [
+            "review.started"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "decision",
+          "name": "Результат проверки",
+          "stage_id": "review",
+          "kind": "decision",
+          "description": "Одобрить заявку или вернуть на доработку.",
+          "actor": null,
+          "event_keys": [
+            "review.returned",
+            "review.approved"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "revise",
+          "name": "Доработать заявку",
+          "stage_id": "review",
+          "kind": "operation",
+          "description": "Уточнить заявку после возврата и передать на повторную проверку.",
+          "actor": null,
+          "event_keys": [],
+          "refs": []
+        },
+        {
+          "id": "execute",
+          "name": "Исполнить заявку",
+          "stage_id": "fulfil",
+          "kind": "operation",
+          "description": "Выполнить заявку. Временная техническая ошибка допускает повторную попытку в рамках той же операции.",
+          "actor": null,
+          "event_keys": [
+            "fulfil.attempted",
+            "fulfil.failed"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "done",
+          "name": "Заявка исполнена",
+          "stage_id": "fulfil",
+          "kind": "end",
+          "description": "Зафиксировать успешный результат исполнения.",
+          "actor": null,
+          "event_keys": [
+            "fulfil.completed"
+          ],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "cancelled",
+          "name": "Заявка отменена",
+          "stage_id": "cancel",
+          "kind": "end",
+          "description": "Альтернативный исход. Условия и момент отмены нужно уточнить.",
+          "actor": null,
+          "event_keys": [],
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 34,
+              "end_line": 36,
+              "symbol": "cancel_request"
+            }
+          ]
+        }
+      ],
+      "operation_transitions": [
+        {
+          "id": "e1",
+          "from_operation": "intake",
+          "to_operation": "check",
+          "condition": null,
+          "refs": []
+        },
+        {
+          "id": "e2",
+          "from_operation": "check",
+          "to_operation": "decision",
+          "condition": null,
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "e3",
+          "from_operation": "decision",
+          "to_operation": "execute",
+          "condition": "Одобрено",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "e4",
+          "from_operation": "decision",
+          "to_operation": "revise",
+          "condition": "Нужна доработка",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 9,
+              "end_line": 18,
+              "symbol": "review_request"
+            }
+          ]
+        },
+        {
+          "id": "e5",
+          "from_operation": "revise",
+          "to_operation": "check",
+          "condition": "Повторная проверка",
+          "refs": []
+        },
+        {
+          "id": "e6",
+          "from_operation": "execute",
+          "to_operation": "done",
+          "condition": "Успешно",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        },
+        {
+          "id": "e7",
+          "from_operation": "execute",
+          "to_operation": "execute",
+          "condition": "Повторная попытка",
+          "refs": [
+            {
+              "path": "app.py",
+              "start_line": 21,
+              "end_line": 31,
+              "symbol": "fulfil_request"
+            }
+          ]
+        }
+      ],
+      "scenarios": [
+        {
+          "id": "main",
+          "name": "Основной",
+          "description": "Заявка проходит проверку и исполняется.",
+          "operation_ids": [
+            "intake",
+            "check",
+            "decision",
+            "execute",
+            "done"
+          ],
+          "transition_ids": [
+            "e1",
+            "e2",
+            "e3",
+            "e6"
+          ]
+        },
+        {
+          "id": "revision",
+          "name": "С доработкой",
+          "description": "После возврата заявка проходит повторную проверку.",
+          "operation_ids": [
+            "intake",
+            "check",
+            "decision",
+            "revise",
+            "execute",
+            "done"
+          ],
+          "transition_ids": [
+            "e1",
+            "e2",
+            "e3",
+            "e4",
+            "e5",
+            "e6"
+          ]
+        },
+        {
+          "id": "cancel",
+          "name": "Отмена",
+          "description": "Отмена предусмотрена; точка перехода пока неизвестна.",
+          "operation_ids": [
+            "cancelled"
+          ],
+          "transition_ids": []
+        }
+      ]
+    },
+    "2652aa9aaf059b59fd639344900a0916a257c95051040f500a475de090aaf317": {
+      "cards": [
+        {
+          "id": "map-fulfil-result",
+          "guidance_ids": [
+            "INST-REUSE"
+          ],
+          "fact_id": "fulfil.result",
+          "action": "map_existing",
+          "rationale": "Событие завершения уже найдено после commit: сначала проверить и разметить его",
+          "semantics": "Результат исполнения после commit, отдельно от запроса и технических попыток",
+          "fields": {
+            "event_id": "Идентификатор логического события; повторная доставка сохраняет его"
+          },
+          "transaction_timing": "В коде после commit; надёжность доставки требует отдельной проверки",
+          "dependencies": [],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "validation_plan": "Проверить, что ошибка и повторная попытка не считаются завершением, а повтор доставки не создаёт новое выполнение",
+          "ref": {
+            "path": "app.py",
+            "start_line": 21,
+            "end_line": 31,
+            "symbol": "fulfil_request"
+          }
+        },
+        {
+          "id": "add-cancellation-result",
+          "guidance_ids": [
+            "INST-MINIMUM"
+          ],
+          "fact_id": "cancel.result",
+          "action": "add_event",
+          "rationale": "В показанном коде отмены не найдена запись о результате",
+          "semantics": "Подтверждённый результат отмены",
+          "fields": {
+            "case_id": "Идентификатор заявки",
+            "occurrence_id": "Отдельное выполнение операции"
+          },
+          "transaction_timing": "После commit состояния отмены; доставку проверить отдельно",
+          "dependencies": [],
+          "metric_ids": [
+            "lead-time"
+          ],
+          "validation_plan": "При контролируемом сценарии отмены сверить один логический результат; проверку выполнять отдельно от анализа исходников",
+          "ref": {
+            "path": "app.py",
+            "start_line": 34,
+            "end_line": 36,
+            "symbol": "cancel_request"
+          }
+        }
+      ]
+    },
+    "7159695fa370626f5da7a0f5afb6e24f11ffcb039d5d34035a4c574df065ee2b": {
+      "metrics": [
+        {
+          "id": "lead-time",
+          "guidance_ids": [
+            "METRIC-DEFINITION"
+          ],
+          "purpose": "Длительность от приёма заявки до исполнения или отмены",
+          "formula_text": "Время терминального результата минус время приёма; событие результата отмены пока не найдено",
+          "counting_unit": "бизнес-экземпляр заявки",
+          "cohort": "Заявки, полученные в объявленном окне наблюдения",
+          "window": null,
+          "time_semantics": "Время бизнес-события в UTC; время доставки не подменяет его",
+          "open_case_policy": "Сохранять открытые случаи видимыми; не считать их завершениями с нулевой длительностью",
+          "late_data_policy": "Пересчитать после проверки поздних записей и полноты окна",
+          "dependencies": [
+            "receive.result",
+            "review.result",
+            "fulfil.result",
+            "cancel.result"
+          ]
+        }
+      ]
+    }
+  }
+}

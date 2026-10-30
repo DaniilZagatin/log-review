@@ -1,0 +1,15 @@
+{
+  "schema_version": "decisions/1",
+  "decisions": [
+    {
+      "id": "synthetic-decision-001",
+      "subject_id": "synthetic-request-completion",
+      "author": "Synthetic process owner",
+      "role": "Example owner",
+      "decided_at": "2026-01-01",
+      "scope": "Synthetic fixture only; not an approved real-world requirement",
+      "basis": "Illustrative trusted project configuration, not model output",
+      "decision": "accepted"
+    }
+  ]
+}

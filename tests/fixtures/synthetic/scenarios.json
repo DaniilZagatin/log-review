@@ -1,0 +1,68 @@
+{
+  "schema_version": "synthetic-scenarios/1",
+  "data_origin": "synthetic",
+  "population_complete": true,
+  "required_activities": [
+    {"id": "receive", "symbol": "receive_request", "event_keys": ["request.received"]},
+    {"id": "review", "symbol": "review_request", "event_keys": ["review.started", "review.returned", "review.approved"]},
+    {"id": "fulfil", "symbol": "fulfil_request", "event_keys": ["fulfil.attempted", "fulfil.failed", "fulfil.completed"]},
+    {"id": "cancel", "symbol": "cancel_request", "event_keys": []}
+  ],
+  "cases": [
+    {
+      "case_id": "synthetic-001",
+      "cancellation_requested": false,
+      "started_at": "2026-01-01T10:00:00Z",
+      "outcome": "completed",
+      "operations": [
+        {"activity": "receive", "occurrence": "receive-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "request.received", "offset_seconds": 0}]}
+        ]},
+        {"activity": "review", "occurrence": "review-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "review.started", "offset_seconds": 60}, {"key": "review.approved", "offset_seconds": 120}]}
+        ]},
+        {"activity": "fulfil", "occurrence": "fulfil-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "fulfil.attempted", "offset_seconds": 180}, {"key": "fulfil.completed", "offset_seconds": 300}]}
+        ]}
+      ]
+    },
+    {
+      "case_id": "synthetic-002",
+      "cancellation_requested": false,
+      "started_at": "2026-01-01T10:10:00Z",
+      "outcome": "completed",
+      "operations": [
+        {"activity": "receive", "occurrence": "receive-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "request.received", "offset_seconds": 0}]}
+        ]},
+        {"activity": "review", "occurrence": "review-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "review.started", "offset_seconds": 60}, {"key": "review.returned", "offset_seconds": 180}]}
+        ]},
+        {"activity": "review", "occurrence": "review-2", "attempts": [
+          {"attempt": 1, "events": [{"key": "review.started", "offset_seconds": 600}, {"key": "review.approved", "offset_seconds": 660}]}
+        ]},
+        {"activity": "fulfil", "occurrence": "fulfil-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "fulfil.attempted", "offset_seconds": 720}, {"key": "fulfil.completed", "offset_seconds": 1200}]}
+        ]}
+      ]
+    },
+    {
+      "case_id": "synthetic-003",
+      "cancellation_requested": false,
+      "started_at": "2026-01-01T11:00:00Z",
+      "outcome": "completed",
+      "operations": [
+        {"activity": "receive", "occurrence": "receive-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "request.received", "offset_seconds": 0}]}
+        ]},
+        {"activity": "review", "occurrence": "review-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "review.started", "offset_seconds": 60}, {"key": "review.approved", "offset_seconds": 120}]}
+        ]},
+        {"activity": "fulfil", "occurrence": "fulfil-1", "attempts": [
+          {"attempt": 1, "events": [{"key": "fulfil.attempted", "offset_seconds": 180}, {"key": "fulfil.failed", "offset_seconds": 240}]},
+          {"attempt": 2, "events": [{"key": "fulfil.attempted", "offset_seconds": 300}, {"key": "fulfil.completed", "offset_seconds": 480, "deliveries": 2}]}
+        ]}
+      ]
+    }
+  ]
+}

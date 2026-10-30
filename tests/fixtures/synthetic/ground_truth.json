@@ -1,0 +1,102 @@
+{
+  "basis": "complete_controlled_scenario_table",
+  "cancellation_opportunities": {
+    "basis": "Explicit cancellation inputs in the independently specified complete controlled population",
+    "count": 0,
+    "state": "known_zero"
+  },
+  "cases": [
+    {
+      "activity_occurrences": {
+        "fulfil": 1,
+        "receive": 1,
+        "review": 1
+      },
+      "cancellation_requested": false,
+      "case_id": "synthetic-001",
+      "duration_seconds": 300,
+      "logical_events": 5,
+      "operation_occurrences": 3,
+      "outcome": "completed",
+      "retried_occurrences": [],
+      "returned_for_revision": false,
+      "technical_attempts": 3
+    },
+    {
+      "activity_occurrences": {
+        "fulfil": 1,
+        "receive": 1,
+        "review": 2
+      },
+      "cancellation_requested": false,
+      "case_id": "synthetic-002",
+      "duration_seconds": 1200,
+      "logical_events": 7,
+      "operation_occurrences": 4,
+      "outcome": "completed",
+      "retried_occurrences": [],
+      "returned_for_revision": true,
+      "technical_attempts": 4
+    },
+    {
+      "activity_occurrences": {
+        "fulfil": 1,
+        "receive": 1,
+        "review": 1
+      },
+      "cancellation_requested": false,
+      "case_id": "synthetic-003",
+      "duration_seconds": 480,
+      "logical_events": 7,
+      "operation_occurrences": 3,
+      "outcome": "completed",
+      "retried_occurrences": [
+        "synthetic-003:fulfil-1"
+      ],
+      "returned_for_revision": false,
+      "technical_attempts": 4
+    }
+  ],
+  "data_origin": "synthetic",
+  "oracle_for_tests_only": true,
+  "required_activities": [
+    {
+      "event_keys": [
+        "request.received"
+      ],
+      "id": "receive",
+      "symbol": "receive_request"
+    },
+    {
+      "event_keys": [
+        "review.started",
+        "review.returned",
+        "review.approved"
+      ],
+      "id": "review",
+      "symbol": "review_request"
+    },
+    {
+      "event_keys": [
+        "fulfil.attempted",
+        "fulfil.failed",
+        "fulfil.completed"
+      ],
+      "id": "fulfil",
+      "symbol": "fulfil_request"
+    },
+    {
+      "event_keys": [],
+      "id": "cancel",
+      "symbol": "cancel_request"
+    }
+  ],
+  "schema_version": "synthetic-oracle/1",
+  "totals": {
+    "cases": 3,
+    "delivered_records": 20,
+    "logical_events": 19,
+    "operation_occurrences": 10,
+    "technical_attempts": 11
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "kind": "synthetic old host checkpoint, never live continuation data",
+  "run": {
+    "binding": {
+      "context": {},
+      "graph": "034a26e5c2611fd08fa53fcb2233808594b6813889487cb72e513fbd7cf792c0",
+      "model": "",
+      "options": {
+        "index_share": 0.2,
+        "max_findings_per_task": 40,
+        "max_followups": 0,
+        "max_requests_per_task": 6,
+        "parent_share": 0.25,
+        "relations": true,
+        "repair_attempts": 1,
+        "request_chars": 32000
+      },
+      "prompt": "254dbb19d079615e7c343a73fd05b38c43e03ccbce41b32e08eb26ac56b5e31f",
+      "schema": "code-review-execution/1",
+      "snapshot": "1417375763c1386f6657099ea3f70098c483e374de5b065394f01d2c440e09ae",
+      "tool": [
+        "code_review_plan/1",
+        "0.1.0"
+      ]
+    },
+    "plan_id": "plan-43beacc49444fc27",
+    "resumed_from": null,
+    "run_fingerprint": "febe16f6072138ff370b5a7a858b682183b4e40443ad7457ca52b5667827ab6c",
+    "schema": "code-review-run/1"
+  },
+  "tasks": {
+    "task-c5852bf809dd8747.json": "{\"attempts\": 1, \"kind\": \"base\", \"request_sha256\": \"a59d9a42c471fc08857ae8cf3347aaf2ac6bdf26f2bf1d8e1c437ccf7b88473d\", \"response\": {\"findings\": [{\"description\": \"Behaviour of <module>\", \"id\": \"f0\", \"kind\": \"branch\", \"refs\": [{\"end_line\": 1, \"path\": \"app/work.py\", \"start_line\": 1, \"symbol\": \"<module>\"}]}], \"interval_status\": [{\"interval_id\": \"iv-2d7012e371108a0f\", \"note\": \"\", \"status\": \"reviewed\"}], \"relations\": [], \"requests\": [], \"unknowns\": []}, \"run_fingerprint\": \"febe16f6072138ff370b5a7a858b682183b4e40443ad7457ca52b5667827ab6c\", \"schema\": \"code-review-task/1\", \"status\": \"succeeded\", \"task_id\": \"task-c5852bf809dd8747\"}\n"
+  },
+  "findings": [
+    {
+      "id": "cf-0f6856d70fabeb98",
+      "kind": "branch",
+      "description": "Behaviour of <module>",
+      "refs": [
+        {
+          "path": "app/work.py",
+          "start_line": 1,
+          "end_line": 1,
+          "symbol": "<module>"
+        }
+      ],
+      "evidence_ids": [
+        "src-4ce45f489c7ee18d8392"
+      ],
+      "task_id": "task-c5852bf809dd8747",
+      "task_kind": "base",
+      "interval_ids": [
+        "iv-2d7012e371108a0f"
+      ],
+      "basis": "model_proposal",
+      "ref_check": "frozen_range_inside_supplied_text"
+    }
+  ],
+  "relations": {
+    "status": "collected",
+    "items": [],
+    "basis": "the worker contract asked for relations and every accepted reply carried them"
+  }
+}
